@@ -21,6 +21,7 @@ from sonic_platform.thermal import Thermal, NUM_THERMALS
 from sonic_platform.fan import FanDrawer, NUM_FANS
 from sonic_platform.psu import Psu, NUM_PSUS
 from sonic_platform.sfp import Sfp, NUM_SFPS
+from sonic_platform.eeprom import SysEeprom
 
 
 class Chassis(ChassisBase):
@@ -41,11 +42,16 @@ class Chassis(ChassisBase):
         self._sfp_list.append(None)         # index 0 — never requested by xcvrd
         for i in range(NUM_SFPS):
             self._sfp_list.append(Sfp(i))  # index 1..32 → port 0..31
+        # System EEPROM (24c64 at i2c-40/0x50, ONIE TlvInfo)
+        self._eeprom = SysEeprom()
         # Previous presence state for get_change_event() polling
         self._prev_presence = {}
 
     def get_name(self):
         return "Wedge 100S-32X"
+
+    def get_system_eeprom_info(self):
+        return self._eeprom.get_eeprom()
 
     def get_change_event(self, timeout=0):
         """

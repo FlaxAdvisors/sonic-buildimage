@@ -1,4 +1,4 @@
-Copyright (C) 2016 Accton Networks, Inc.
+Copyright (C) 2026 Flax Advisors, LLC.
 
 This program is free software: you can redistribute it and/or modify
 It under the terms of the GNU General Public License as published by
@@ -7,7 +7,7 @@ the Free Software Foundation, either version 3 of the License, or
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
@@ -15,46 +15,60 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 To initialize the system, run "accton_wedge100s_util.py install".
 To clean up the drivers & devices, run "accton_wedge100s_util.py clean".
-To dump information of sensors, run "accton_wedge100s_util.py show".
-To dump SFP EEPROM, run "accton_wedge100s_util.py sff".
-To set fan speed, run "accton_wedge100s_util.py set fan".
-To enable/disable SFP emission, run "accton_wedge100s_util.py set sfp".
-To set system LEDs' color, run "accton_wedge100s_util.py set led"
+To dump platform status (PSU and QSFP presence), run "accton_wedge100s_util.py show".
+To dump QSFP EEPROM, run "accton_wedge100s_util.py sff <port>".
+To set fan speed, run "accton_wedge100s_util.py set fan <pct>".
+To set system LED color, run "accton_wedge100s_util.py set led <val>".
 For more information, run "accton_wedge100s_util.py --help".
 
 ====================================================================
-Besides applying accton_wedge100s_util.py to access peripherals, you can 
-access peripherals by sysfs nodes directly after the installation is run.
+Wedge 100S-32X platform hardware architecture:
 
-LED controls can be found under /sys/class/leds. The sysfs interface
-color mappings are as follows:
-Brightness:
-  0 => off
-  1 => green
-  2 => amber
-  3 => red
-  4 => blue
+HOST CPU (Intel Broadwell-DE D1508)
+  Manages the following via the CP2112 USB HID I2C bridge (i2c-1, hid_cp2112):
+  - System CPLD at i2c-1/0x32 (PSU presence/status, board ID)
+  - 5x PCA9548 I2C muxes at 0x70-0x74 (produces buses i2c-2 through i2c-41)
+  - 32x QSFP28 100GbE EEPROMs at i2c-2 to i2c-33 (via mux tree)
+  - PCA9535 GPIO @ i2c-36/0x22 (QSFP presence ports 0-15)
+  - PCA9535 GPIO @ i2c-37/0x23 (QSFP presence ports 16-31)
+  - System EEPROM (ONIE TLV, 24c64) @ i2c-40/0x50
 
-There are 5 system LEDs, loc, diag, fan, ps1, and ps2. 
-They are lit automatically by CPLD, but the loc and diag.
-The loc led has only 1 color, blue.
-The diag one has 3 colors: red, amber, and green.
+NOTE: There is NO iSMT controller on this platform. The CP2112 USB HID
+bridge (hid_cp2112 kernel module) is the sole host I2C master for platform
+management. Do NOT load i2c_ismt.
 
-Fan controls can be found in /sys/bus/i2c/devices/2-0066.
-There are 12 fans inside 6 fan modules.
-All fans share 1 duty setting, ranged from 0~100.
+OpenBMC (ARM processor, separate chassis management module)
+  Manages fans, thermal sensors, and PSU telemetry.
+  Accessible from the host ONLY via /dev/ttyACM0 (57600 8N1, login: root/0penBmc).
+  The following are NOT accessible from the host via sysfs or I2C:
+  - Fan board (5 fans, BMC i2c-8/0x33, speed control via set_fan_speed.sh)
+  - Thermal sensors (7x TMP75 on BMC i2c-3 and i2c-8)
+  - PSU PMBus telemetry (voltage, current, power — BMC i2c-7)
+  Do NOT load lm75 on the host; thermal sensors are on BMC I2C buses.
 
-Three temperature sensors are controlled by the lm75 kernel modules. 
-They should already be visible under /sys/bus/i2c/drivers/lm75/.
+====================================================================
+After "accton_wedge100s_util.py install", peripherals are accessible as follows:
 
-Two power supplies are controlled by the CPLD. 
-Here provide their status under
-/sys/bus/i2c/devices/10-0050 and /sys/bus/i2c/devices/11-0053.
+LED controls are via CPLD registers 0x3e/0x3f (Phase 9, not yet implemented).
+There are 5 system LEDs: loc, diag, fan, psu1, psu2.
+The loc LED has only 1 color (blue); diag has 3 colors (red, amber, green).
 
-There are 32 QSFP+ modules are equipped. 
-Apply "accton_wedge100s_util.py show" to get their status. 
-Apply "accton_wedge100s_util.py set sfp" to turn on/off light transmission.
-Apply "accton_wedge100s_util.py sff" to dump EEPROM information.
-Before operating on that QSFP+, please make sure it is well plugged. 
-Otherwise, operation is going to fail.
+Fan controls are managed exclusively by OpenBMC via /dev/ttyACM0.
+There are 5 fans (one per fan tray), direction F2B (front-to-back).
+Fan speed is set by sending set_fan_speed.sh <pct> to the BMC (Phase 2+).
+The "set fan" subcommand will be implemented in Phase 2 (bmc.py TTY helper).
 
+Thermal sensors are managed exclusively by OpenBMC.
+There are 7 TMP75 sensors on BMC i2c buses and 1 CPU coretemp on the host.
+BMC sensors are NOT visible under /sys/bus/i2c/drivers/lm75/ on the host.
+
+Two power supplies are monitored via the CPLD at i2c-1/0x32 register 0x10.
+PSU presence (active-low bit 0/4) and power-good (bit 1/5) are readable after
+install via: "accton_wedge100s_util.py show"
+PSU PMBus telemetry is via OpenBMC (Phase 5).
+
+There are 32 QSFP28 (100G) ports.
+Apply "accton_wedge100s_util.py show" to check module presence.
+Apply "accton_wedge100s_util.py sff <1-32>" to dump QSFP EEPROM
+  (requires optoe1 registered on the port's I2C bus — enabled in Phase 6).
+Before reading QSFP EEPROM, make sure the module is inserted.

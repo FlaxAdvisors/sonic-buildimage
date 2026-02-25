@@ -68,6 +68,7 @@ kos = [
     'modprobe hid_cp2112',
     'modprobe i2c_mux_pca954x force_deselect_on_exit=1',
     'modprobe at24',
+    'modprobe optoe',
 ]
 
 # I2C device registration.  Order is critical for bus number stability:

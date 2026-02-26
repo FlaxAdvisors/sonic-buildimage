@@ -84,9 +84,6 @@ class SfpUtil(SfpUtilBase):
             group  = 0 if port_num < 16 else 1
             bus    = _PRESENCE_BUS[group]
             addr   = _PRESENCE_ADDR[group]
-            # Within each group, ports 0-7 are offset 0, ports 8-15 are offset 1
-            local  = port_num % 16
-            offset = 0 if (local < 8 or (port_num >= 16 and local < 8)) else 1
             # sfpi.c: ports <8 or ports 16-23 use offset 0; others use offset 1
             if port_num < 8 or (16 <= port_num <= 23):
                 offset = 0

@@ -225,8 +225,8 @@ class Psu(PsuBase):
         return 'PSU-{}'.format(self._index)
 
     def get_model(self):
-        # PMBus MFR_MODEL (0x9a) requires an SMBus block read which is not
-        # yet implemented in bmc.py.  Return 'N/A' until Phase 7 adds it.
+        # PMBus MFR_MODEL (0x9a) requires an SMBus block-read transaction
+        # which is not implemented in bmc.py (i2cget only reads word/byte).
         return 'N/A'
 
     def get_serial(self):

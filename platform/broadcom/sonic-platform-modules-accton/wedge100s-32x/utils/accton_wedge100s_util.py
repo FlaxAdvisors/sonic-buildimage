@@ -398,16 +398,34 @@ def set_device(args):
         if not (0 <= pct <= 100):
             show_set_help()
             return
-        # Fan speed is set via BMC TTY using set_fan_speed.sh.
-        # Implemented in Phase 2 (bmc.py TTY helper) + Phase 4 (fan.py).
-        print("Fan speed control requires BMC TTY (Phase 2 — not yet implemented).")
-        print("Target: {}%".format(pct))
+        # Fan speed is set via BMC TTY using set_fan_speed.sh (implemented in bmc.py / fan.py).
+        # This CLI shim invokes it directly without the pmon sonic_platform layer.
+        status, output = log_os_system(
+            "i2cset -f -y 1 0x32 0x3e 0x02", 0)  # keep SYS1 green while adjusting
+        status, output = log_os_system(
+            "python3 -c \"import sys; sys.path.insert(0,'/usr/lib/python3/dist-packages');"
+            "from sonic_platform import bmc; "
+            "r=bmc.send_command('set_fan_speed.sh {}'); "
+            "print('OK' if r else 'FAILED')\"".format(pct), 1)
+        print("Fan speed set to {}%: {}".format(pct, output.strip()))
     elif args[0] == 'led':
-        # LED control via CPLD registers 0x3e/0x3f — Phase 9.
-        print("LED control not yet implemented (Phase 9).")
+        # SYS1 (0x3e) and SYS2 (0x3f) via CPLD at i2c-1/0x32.
+        # Color map: 0=off, 1=red, 2=green, 4=blue.
+        if len(args) < 2:
+            show_set_help()
+            return
+        try:
+            color = int(args[1])
+        except ValueError:
+            show_set_help()
+            return
+        log_os_system("i2cset -f -y 1 0x32 0x3e 0x{:02x}".format(color), 1)
+        log_os_system("i2cset -f -y 1 0x32 0x3f 0x{:02x}".format(color), 1)
+        print("LED color set to 0x{:02x}".format(color))
     elif args[0] == 'sfp':
-        # QSFP tx_disable — Phase 6.
-        print("QSFP tx_disable not yet implemented (Phase 6).")
+        # QSFP LP_MODE / RESET pins are on the mux board and not accessible
+        # from the host CPU on this platform.  tx_disable is not supported.
+        print("QSFP tx_disable is not accessible from the host CPU on this platform.")
     else:
         show_set_help()
 

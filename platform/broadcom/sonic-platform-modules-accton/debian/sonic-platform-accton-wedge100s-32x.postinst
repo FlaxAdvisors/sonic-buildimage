@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+depmod -a
+systemctl enable wedge100s-platform-init.service
+systemctl start wedge100s-platform-init.service

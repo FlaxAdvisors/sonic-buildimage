@@ -1,6 +1,6 @@
 # ARCHSPEC: SONiC Platform Support for Accton Wedge 100S-32X
 
-*Implementation record — all 10 phases complete and hardware-verified 2026-02-25.*
+*Implementation record — all phases complete and hardware-verified 2026-02-25; pmon device passthrough automated 2026-02-26.*
 
 ---
 
@@ -185,7 +185,7 @@ SONiC CLI / APP layer
 | `control` | ✓ DONE | `sonic-platform-accton-wedge100s-32x` package stanza added |
 | `rules` | ✓ DONE | `wedge100s-32x` in `MODULE_DIRS`; conditional udev cp; elif for `sonic_platform_setup.py` |
 | `sonic-platform-accton-wedge100s-32x.install` | ✓ DONE | Installs wheel to `usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/` |
-| `sonic-platform-accton-wedge100s-32x.postinst` | ✓ DONE | `#!/bin/sh`; `depmod -a`; enable+start init service |
+| `sonic-platform-accton-wedge100s-32x.postinst` | ✓ DONE | `depmod -a`; enable+start init service; patches `pmon.sh` for ttyACM0; auto-removes stopped pmon container |
 
 ---
 
@@ -269,32 +269,39 @@ on a lock file if contention is observed in production.
 
 ## 5. Deployment Requirements
 
-### 5.1 pmon Container Device Access (CRITICAL — manual post-install)
+### 5.1 pmon Container Device Access
 
-The SONiC pmon Docker container does not pass through `/dev/ttyACM0` or the
-I2C device nodes by default.  The following two additions to `/usr/bin/pmon.sh`
-(inside the `docker create` command) are required for full pmon functionality.
-They must be applied after each image deployment (they do not survive a Docker
-image rebuild unless the pmon Dockerfile source is patched):
-
-**ttyACM0** (add after the `ipmi0` conditional block):
-```bash
-$(if [ -e "/dev/ttyACM0" ]; then echo "--device=/dev/ttyACM0:/dev/ttyACM0"; fi) \
-```
+The SONiC pmon Docker container needs two categories of host devices passed
+through to operate correctly on this platform.
 
 **I2C buses 1–41** (CPLD, QSFP EEPROMs, PCA9535, system EEPROM):
+Handled automatically — `get_pmon_device_mounts()` in `docker_image_ctl.j2`
+already matches the pattern `i2c-[0-9]+`, so every `/dev/i2c-N` present on the
+host at container-create time is passed through with `--device`.  No manual
+action required.
+
+**ttyACM0** (BMC USB-CDC serial interface):
+`ttyACM[0-9]*` is not in the upstream regex.  Without it, all 7 BMC thermal
+sensors and fan/PSU telemetry time out (~140 s per poll cycle).
+This is patched automatically by `sonic-platform-accton-wedge100s-32x.postinst`,
+which inserts the following line immediately after the `$(get_pmon_device_mounts)`
+call in `/usr/bin/pmon.sh`:
+
 ```bash
-$(for n in $(seq 1 41); do dev="/dev/i2c-$n"; [ -e "$dev" ] && echo "--device=$dev:$dev"; done) \
+$(for d in /dev/ttyACM*; do [ -c "$d" ] && echo "--device=$d:$d"; done) \
 ```
 
-After editing pmon.sh, the container must be **recreated** (not just restarted):
-`docker rm pmon` then let SONiC restart it.
+The patch is idempotent (skipped if `ttyACM` is already present in the file).
+
+**Container recreation:** the pmon container must be **recreated** — not merely
+restarted — to pick up new `--device` flags.  The postinst handles this
+automatically: if the pmon container exists but is stopped it is removed so the
+next supervisor start recreates it.  If pmon is running when the package is
+installed, the postinst prints a warning; in that case reboot (or manually stop
+pmon then run `docker rm pmon`) to pick up the new flags.
+
 **WARNING:** never `docker rm -f pmon` while xcvrd is running — this hangs the
 I2C bus and requires a full power cycle to recover.
-
-Without ttyACM0: all 7 BMC thermal sensors time out (~140 s per poll cycle).
-Without i2c nodes: CPLD reads fail (PSU presence, LED control) and QSFP
-EEPROM reads fail.
 
 ### 5.2 Platform Init Service
 
@@ -315,7 +322,7 @@ via ttyACM0 at 57600 baud from the host side.
 
 | Item | Severity | Notes |
 |------|----------|-------|
-| pmon.sh device passthrough | **Deployment blocker** | Manual post-install step; see Section 5.1 |
+| pmon.sh ttyACM0 passthrough | Resolved | Patched automatically by postinst; see Section 5.1 |
 | PSU model/serial | Low | SMBus block-read not in bmc.py; `get_model()` returns `'N/A'` |
 | Fan per-tray speed control | N/A | Not supported in hardware; `set_fan_speed.sh` is global |
 | QSFP LP_MODE / RESET | N/A | Pins on mux board, not host-accessible |

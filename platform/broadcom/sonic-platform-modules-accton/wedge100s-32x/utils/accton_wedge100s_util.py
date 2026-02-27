@@ -11,7 +11,8 @@
 #     They are NOT accessible via host I2C.  Do NOT load lm75 or i2c_ismt.
 #   - PSU presence/status is read from CPLD register 0x10 at i2c-1/0x32.
 #   - QSFP28 presence is via PCA9535 GPIO expanders at i2c-36/0x22 and i2c-37/0x23.
-#   - System EEPROM (ONIE TLV) is a 24c64 at i2c-40/0x50.
+#   - System EEPROM (ONIE TLV) was thought to be a 24c64 at i2c-40/0x50 - but then it moved?
+#   - System EEPROM (ONIE TLV, TlvInfo) is an AT24C02 at i2c-1/0x51 (registered via i2c-40/0x51).
 #   - Bus numbers are confirmed stable on SONiC kernel 6.1.0; see i2c_bus_map.json.
 
 """
@@ -33,6 +34,7 @@ import subprocess
 import getopt
 import sys
 import logging
+import os
 import time
 
 PROJECT_NAME = 'wedge100s_32x'
@@ -40,6 +42,13 @@ version = '0.1.0'
 DEBUG = False
 args = []
 FORCE = 0
+
+# EEPROM cache — written once at platform-init time, before xcvrd/pmon start.
+# This prevents CP2112 I2C bus hangs caused by mux 0x74 contention between
+# EEPROM reads (channel 6) and PCA9535 presence polls (channels 2 and 3).
+EEPROM_SYSFS_PATH = '/sys/bus/i2c/devices/40-0051/eeprom'
+EEPROM_CACHE_PATH = '/var/run/platform_cache/syseeprom_cache'
+TLVINFO_MAGIC     = bytes([0x54, 0x6c, 0x76, 0x49, 0x6e, 0x66, 0x6f, 0x00])
 
 # Port-to-I2C-bus map (ONL sfpi.c sfp_bus_index[], 0-indexed, confirmed SONiC 6.1.0)
 SFP_BUS_MAP = [
@@ -83,10 +92,20 @@ mknod = [
     'echo pca9548 0x74 > /sys/bus/i2c/devices/i2c-1/new_device',
     # mux 0x74 ch2 → i2c-36: PCA9535 GPIO (QSFP presence ports 0-15)
     # mux 0x74 ch3 → i2c-37: PCA9535 GPIO (QSFP presence ports 16-31)
-    # mux 0x74 ch6 → i2c-40: system EEPROM 24c64 (ONIE TLV)
+    # mux 0x74 ch6 → i2c-40: used to register system EEPROM at 0x51.
+    #
+    # COME module I2C topology (devices are directly on i2c-1, NOT behind mux):
+    #   i2c-1/0x50: COME EC chip — 1-byte I2C register interface, ODM format.
+    #               NOT writable via standard AT24 protocol (accepts write ACKs
+    #               but data is not stored).  Do NOT register as at24.
+    #   i2c-1/0x51: AT24C02 EEPROM — writable, holds ONIE TlvInfo for SONiC.
+    #               Registered via bus 40 (transparent to i2c-1 for COME devices).
+    #
+    # The CP2112 cannot hold mux channel selection between HID transactions, so
+    # all of mux 0x74's channels are non-isolating for COME module devices.
     'echo pca9535 0x22 > /sys/bus/i2c/devices/i2c-36/new_device',
     'echo pca9535 0x23 > /sys/bus/i2c/devices/i2c-37/new_device',
-    'echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device',
+    'echo 24c02 0x51 > /sys/bus/i2c/devices/i2c-40/new_device',
 ]
 
 
@@ -236,6 +255,55 @@ def device_uninstall():
     return 0
 
 
+def _cache_eeprom():
+    """Cache EEPROM raw bytes to a file immediately after device registration.
+
+    This must be called before xcvrd/pmon start polling the PCA9535 presence
+    expanders on mux 0x74 channels 2 and 3.  Those polls race with EEPROM reads
+    on channel 6 of the same mux, causing the CP2112 I2C bus to hang (all reads
+    return 0x00 bytes).  By caching here — while only the platform-init service
+    is active — we guarantee that sonic_platform/eeprom.py returns valid TLV data
+    for the lifetime of the boot, regardless of later bus state.
+
+    Skips writing if the cache file already contains valid ONIE TlvInfo data.
+    """
+    if os.path.isfile(EEPROM_CACHE_PATH):
+        try:
+            with open(EEPROM_CACHE_PATH, 'rb') as f:
+                cached_magic = f.read(8)
+            if cached_magic == TLVINFO_MAGIC:
+                my_log("EEPROM cache already valid: {}".format(EEPROM_CACHE_PATH))
+                return
+        except Exception:
+            pass  # fall through to re-read hardware
+
+    # Give the at24 driver a moment to finish probing the newly registered device
+    time.sleep(0.2)
+
+    try:
+        with open(EEPROM_SYSFS_PATH, 'rb') as f:
+            data = f.read()
+    except Exception as e:
+        print("WARNING: Could not read EEPROM from {}: {}".format(EEPROM_SYSFS_PATH, e))
+        return
+
+    if data[:8] != TLVINFO_MAGIC:
+        print("WARNING: EEPROM does not contain ONIE TlvInfo magic "
+              "(got: {}).  Cache NOT written.".format(data[:8].hex()))
+        print("         Program the EEPROM with: sudo write-syseeprom "
+              "-t 0x21 -v 'Wedge-100s-32X' -t 0x22 -v '<part>' "
+              "-t 0x23 -v '<serial>' -t 0x24 -v '<mac>' -t 0x2b -v 'Accton'")
+        return
+
+    try:
+        os.makedirs(os.path.dirname(EEPROM_CACHE_PATH), exist_ok=True)
+        with open(EEPROM_CACHE_PATH, 'wb') as f:
+            f.write(data)
+        print("EEPROM cached to {} ({} bytes)".format(EEPROM_CACHE_PATH, len(data)))
+    except Exception as e:
+        print("WARNING: Could not write EEPROM cache {}: {}".format(EEPROM_CACHE_PATH, e))
+
+
 def do_install():
     print("Checking system...")
     if not driver_check():
@@ -252,6 +320,7 @@ def do_install():
             return status
     else:
         print(PROJECT_NAME.upper() + " I2C devices already registered.")
+    _cache_eeprom()
     print("Platform init complete.")
 
 

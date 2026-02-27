@@ -6,7 +6,10 @@ try:
 except ImportError:
     from sonic_eeprom import eeprom_tlvinfo
 
+EEPROM_CACHE_PATH = '/var/run/platform_cache/syseeprom_cache'
+
 class board(eeprom_tlvinfo.TlvInfoDecoder):
     def __init__(self, name, path, cpld_root, ro):
         self.eeprom_path = "/sys/bus/i2c/devices/40-0050/eeprom"
-        super(board, self).__init__(self.eeprom_path, 0, '', True)
+        super(board, self).__init__(self.eeprom_path, 0, EEPROM_CACHE_PATH, True)
+        self.cache_name = EEPROM_CACHE_PATH

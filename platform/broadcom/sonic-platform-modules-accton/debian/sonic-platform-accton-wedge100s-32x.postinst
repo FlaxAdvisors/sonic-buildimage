@@ -1,0 +1,58 @@
+#!/bin/sh
+set -e
+depmod -a
+systemctl enable wedge100s-platform-init.service
+systemctl start wedge100s-platform-init.service
+
+# Patch pmon.sh to pass ttyACM0 (BMC USB-CDC serial) into the pmon container.
+#
+# Context: pmon.sh is generated at build time from docker_image_ctl.j2.
+# The get_pmon_device_mounts() function already handles i2c-N buses via regex,
+# so /dev/i2c-1..41 (CP2112 mux tree) are passed through automatically.
+# However ttyACM[0-9]* is NOT in that regex; without it the BMC is unreachable
+# inside the container, causing a 140-second timeout per thermal/fan poll cycle.
+#
+# The patch inserts a conditional --device line immediately after the
+# $(get_pmon_device_mounts) call so it is idempotent and safe across upgrades.
+# The container must be recreated (not just restarted) to pick up the new flags;
+# on a fresh .bin install a reboot suffices (pmon is created on first boot).
+PMON_SH="/usr/bin/pmon.sh"
+if [ -f "$PMON_SH" ] && ! grep -q "ttyACM" "$PMON_SH"; then
+    python3 - <<'PYEOF'
+import sys
+
+PMON_SH = "/usr/bin/pmon.sh"
+NEEDLE   = "$(get_pmon_device_mounts) \\"
+INSERT   = '    $(for d in /dev/ttyACM*; do [ -c "$d" ] && echo "--device=$d:$d"; done) \\'
+
+with open(PMON_SH) as fh:
+    text = fh.read()
+
+if NEEDLE not in text:
+    print("wedge100s postinst: WARNING: '$(get_pmon_device_mounts)' not found in "
+          + PMON_SH + " — ttyACM patch skipped", file=sys.stderr)
+    sys.exit(0)
+
+text = text.replace(NEEDLE, NEEDLE + "\n" + INSERT, 1)
+
+with open(PMON_SH, "w") as fh:
+    fh.write(text)
+
+print("wedge100s postinst: patched " + PMON_SH + " — ttyACM* passthrough added")
+PYEOF
+fi
+
+# If pmon container already exists but is stopped, remove it so the next
+# supervisor start recreates it with the updated flags.
+# Do NOT remove a running pmon: xcvrd holds I2C bus locks and forceful removal
+# causes a bus hang requiring a full power cycle.
+if command -v docker >/dev/null 2>&1; then
+    PMON_STATUS=$(docker inspect --format='{{.State.Status}}' pmon 2>/dev/null || true)
+    if [ "$PMON_STATUS" = "exited" ] || [ "$PMON_STATUS" = "created" ]; then
+        docker rm pmon >/dev/null 2>&1 || true
+        echo "wedge100s postinst: removed stopped pmon container — will be recreated on next start"
+    elif [ "$PMON_STATUS" = "running" ]; then
+        echo "wedge100s postinst: NOTE: pmon container is running with old flags." \
+             "Reboot (or stop pmon then 'docker rm pmon') to pick up ttyACM device mapping."
+    fi
+fi

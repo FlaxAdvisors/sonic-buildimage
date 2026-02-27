@@ -1,0 +1,184 @@
+{
+  "_comment": "Verified I2C topology for Accton Wedge 100S-32X on SONiC kernel 6.1.0-29-2-amd64",
+  "_generated": "2026-02-25",
+  "_method": "Live discovery on hare-lorax (SONiC master.0-dirty-20251203.082955)",
+
+  "kernel_version": "6.1.0-29-2-amd64",
+
+  "root_buses": {
+    "smbus": {
+      "bus": 0,
+      "driver": "i2c_i801",
+      "name": "SMBus I801 adapter at f000",
+      "devices": {
+        "0x08": "RTC/Clock device",
+        "0x44": "Voltage monitor",
+        "0x48": "ADS1015 12-bit ADC"
+      }
+    },
+    "cp2112": {
+      "bus": 1,
+      "driver": "hid_cp2112",
+      "name": "CP2112 SMBus Bridge on hidraw0",
+      "usb_vid_pid": "10c4:ea90",
+      "note": "USB HID bridge exposed as standard SMBus adapter by hid_cp2112 kernel module"
+    }
+  },
+
+  "cpld": {
+    "bus": 1,
+    "addr": "0x32",
+    "version_major": "0x02",
+    "version_minor": "0x06",
+    "board_id": "0x65",
+    "registers": {
+      "0x00": "CPLD version major (0x02)",
+      "0x01": "CPLD version minor (0x06)",
+      "0x02": "Board ID (0x65)",
+      "0x10": "PSU presence/status (verified live: 0xe0)"
+    },
+    "psu_register": {
+      "reg": "0x10",
+      "psu1_present_bit": 0,
+      "psu1_pgood_bit": 1,
+      "psu2_present_bit": 4,
+      "psu2_pgood_bit": 5,
+      "polarity": "0=present/good, 1=absent/failed",
+      "live_value": "0xe0",
+      "note": "Bit mask per ONL psui.c. PSU1: bits 0+1, PSU2: bits 4+5. Verify pgood polarity against known-good hardware state."
+    }
+  },
+
+  "mux_tree": {
+    "parent_bus": 1,
+    "driver": "i2c_mux_pca954x",
+    "device": "pca9548",
+    "muxes": [
+      { "addr": "0x70", "bus_range": [2, 9],  "channels": { "0": 2,  "1": 3,  "2": 4,  "3": 5,  "4": 6,  "5": 7,  "6": 8,  "7": 9  } },
+      { "addr": "0x71", "bus_range": [10, 17], "channels": { "0": 10, "1": 11, "2": 12, "3": 13, "4": 14, "5": 15, "6": 16, "7": 17 } },
+      { "addr": "0x72", "bus_range": [18, 25], "channels": { "0": 18, "1": 19, "2": 20, "3": 21, "4": 22, "5": 23, "6": 24, "7": 25 } },
+      { "addr": "0x73", "bus_range": [26, 33], "channels": { "0": 26, "1": 27, "2": 28, "3": 29, "4": 30, "5": 31, "6": 32, "7": 33 } },
+      { "addr": "0x74", "bus_range": [34, 41], "channels": { "0": 34, "1": 35, "2": 36, "3": 37, "4": 38, "5": 39, "6": 40, "7": 41 } }
+    ],
+    "instantiation_order_matters": true,
+    "note": "Bus numbers are assigned sequentially as muxes are registered. Register 0x70 first to preserve this mapping."
+  },
+
+  "idprom": {
+    "bus": 40,
+    "addr": "0x50",
+    "driver": "at24",
+    "device": "24c64",
+    "format": "ONIE TLV",
+    "sysfs_path": "/sys/bus/i2c/devices/40-0050/eeprom",
+    "mux_path": "i2c-1 → mux 0x74 → channel 6",
+    "verified": {
+      "tlv_header": "TlvInfo",
+      "part_number": "20-001688",
+      "serial_number": "AI09019591",
+      "base_mac": "00:90:fb:61:da:a1",
+      "vendor": "Accton",
+      "manufacturer": "Joytech"
+    }
+  },
+
+  "qsfp_presence": {
+    "low_ports": {
+      "bus": 36,
+      "addr": "0x22",
+      "driver": "pca9535",
+      "ports": "0-15",
+      "mux_path": "i2c-1 → mux 0x74 → channel 2",
+      "offset_0_ports": "0-7",
+      "offset_1_ports": "8-15",
+      "live_value_offset_0": "0xfd",
+      "live_value_offset_1": "0xff",
+      "bit_swap_required": true,
+      "bit_swap_note": "Apply onlp_sfpi_reg_val_to_port_sequence() from sfpi.c: swap even/odd bit pairs before checking presence"
+    },
+    "high_ports": {
+      "bus": 37,
+      "addr": "0x23",
+      "driver": "pca9535",
+      "ports": "16-31",
+      "mux_path": "i2c-1 → mux 0x74 → channel 3",
+      "offset_0_ports": "16-23",
+      "offset_1_ports": "24-31",
+      "live_value_offset_0": "0xff",
+      "live_value_offset_1": "0xff"
+    }
+  },
+
+  "qsfp_port_to_bus": {
+    "_comment": "Port N → I2C bus number for QSFP EEPROM at 0x50. Verified: port 0 → bus 3 has QSFP28 (identifier 0x11).",
+    "_source": "ONL sfpi.c sfp_bus_index[] array, confirmed matching on SONiC 6.1.0",
+    "map": {
+      "0":  3,  "1":  2,  "2":  5,  "3":  4,
+      "4":  7,  "5":  6,  "6":  9,  "7":  8,
+      "8":  11, "9":  10, "10": 13, "11": 12,
+      "12": 15, "13": 14, "14": 17, "15": 16,
+      "16": 19, "17": 18, "18": 21, "19": 20,
+      "20": 23, "21": 22, "22": 25, "23": 24,
+      "24": 27, "25": 26, "26": 29, "27": 28,
+      "28": 31, "29": 30, "30": 33, "31": 32
+    },
+    "eeprom_addr": "0x50",
+    "dom_addr": "0x51",
+    "driver_for_instantiation": "optoe1"
+  },
+
+  "bmc": {
+    "tty_device": "/dev/ttyACM0",
+    "baud": 57600,
+    "login_user": "root",
+    "login_pass": "0penBmc",
+    "prompt": "@bmc:",
+    "hostname": "hare-lorax-bmc",
+    "os": "OpenBMC",
+    "note": "All thermal sensor and fan access requires BMC TTY. Thermal sysfs paths (/sys/bus/i2c/drivers/lm75/...) are on the BMC filesystem, not the host.",
+    "bmc_side_devices": {
+      "thermal_sensors": {
+        "tmp75_1_to_5": { "bmc_bus": 3, "addrs": ["0x48","0x49","0x4a","0x4b","0x4c"] },
+        "tmp75_6_to_7": { "bmc_bus": 8, "addrs": ["0x48","0x49"] }
+      },
+      "fan_board": {
+        "bmc_bus": 8,
+        "addr": "0x33",
+        "sysfs": "/sys/bus/i2c/devices/8-0033/",
+        "fan_count": 5,
+        "max_rpm": 15400,
+        "rpm_files": "fan<N>_input (front: odd N, rear: even N)",
+        "presence_file": "fantray_present",
+        "speed_control": "set_fan_speed.sh <percent>"
+      },
+      "psu_pmbus": {
+        "bmc_bus": 7,
+        "mux_addr": "0x70",
+        "psu1": { "mux_val": "0x02", "addr": "0x59" },
+        "psu2": { "mux_val": "0x01", "addr": "0x5a" },
+        "registers": {
+          "0x88": "VIN (linear format)",
+          "0x89": "IIN (linear format)",
+          "0x8c": "IOUT (linear format)",
+          "0x96": "POUT (linear format)",
+          "0x9a": "Model string (i2craw)"
+        }
+      }
+    }
+  },
+
+  "required_kernel_modules": [
+    "i2c_dev",
+    "i2c_i801",
+    "hid_cp2112",
+    "i2c_mux_pca954x",
+    "at24"
+  ],
+
+  "not_required": {
+    "i2c_ismt": "No iSMT controller present; CP2112 USB bridge serves this role",
+    "optoe": "Not required at module load; instantiate per-port at access time",
+    "lm75": "Not needed on host; thermal sensors are on BMC I2C bus",
+    "cp2112 (standalone)": "Use hid_cp2112 kernel module instead; it exposes CP2112 as standard i2c adapter"
+  }
+}

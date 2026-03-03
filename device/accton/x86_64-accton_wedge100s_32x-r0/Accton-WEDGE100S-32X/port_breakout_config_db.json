@@ -1,0 +1,900 @@
+{
+    "PORT": {
+        "Ethernet0": {
+            "admin_status": "up",
+            "alias": "Ethernet1/1",
+            "index": "1",
+            "lanes": "117",
+            "speed": "25000"
+        },
+        "Ethernet1": {
+            "admin_status": "up",
+            "alias": "Ethernet1/2",
+            "index": "1",
+            "lanes": "118",
+            "speed": "25000"
+        },
+        "Ethernet10": {
+            "admin_status": "up",
+            "alias": "Ethernet3/3",
+            "index": "3",
+            "lanes": "127",
+            "speed": "25000"
+        },
+        "Ethernet100": {
+            "admin_status": "up",
+            "alias": "Ethernet26/1",
+            "index": "26",
+            "lanes": "81",
+            "speed": "25000"
+        },
+        "Ethernet101": {
+            "admin_status": "up",
+            "alias": "Ethernet26/2",
+            "index": "26",
+            "lanes": "82",
+            "speed": "25000"
+        },
+        "Ethernet102": {
+            "admin_status": "up",
+            "alias": "Ethernet26/3",
+            "index": "26",
+            "lanes": "83",
+            "speed": "25000"
+        },
+        "Ethernet103": {
+            "admin_status": "up",
+            "alias": "Ethernet26/4",
+            "index": "26",
+            "lanes": "84",
+            "speed": "25000"
+        },
+        "Ethernet104": {
+            "admin_status": "up",
+            "alias": "Ethernet27/1",
+            "index": "27",
+            "lanes": "93",
+            "speed": "25000"
+        },
+        "Ethernet105": {
+            "admin_status": "up",
+            "alias": "Ethernet27/2",
+            "index": "27",
+            "lanes": "94",
+            "speed": "25000"
+        },
+        "Ethernet106": {
+            "admin_status": "up",
+            "alias": "Ethernet27/3",
+            "index": "27",
+            "lanes": "95",
+            "speed": "25000"
+        },
+        "Ethernet107": {
+            "admin_status": "up",
+            "alias": "Ethernet27/4",
+            "index": "27",
+            "lanes": "96",
+            "speed": "25000"
+        },
+        "Ethernet108": {
+            "admin_status": "up",
+            "alias": "Ethernet28/1",
+            "index": "28",
+            "lanes": "89",
+            "speed": "25000"
+        },
+        "Ethernet109": {
+            "admin_status": "up",
+            "alias": "Ethernet28/2",
+            "index": "28",
+            "lanes": "90",
+            "speed": "25000"
+        },
+        "Ethernet11": {
+            "admin_status": "up",
+            "alias": "Ethernet3/4",
+            "index": "3",
+            "lanes": "128",
+            "speed": "25000"
+        },
+        "Ethernet110": {
+            "admin_status": "up",
+            "alias": "Ethernet28/3",
+            "index": "28",
+            "lanes": "91",
+            "speed": "25000"
+        },
+        "Ethernet111": {
+            "admin_status": "up",
+            "alias": "Ethernet28/4",
+            "index": "28",
+            "lanes": "92",
+            "speed": "25000"
+        },
+        "Ethernet112": {
+            "admin_status": "up",
+            "alias": "Ethernet29/1",
+            "index": "29",
+            "lanes": "101",
+            "speed": "25000"
+        },
+        "Ethernet113": {
+            "admin_status": "up",
+            "alias": "Ethernet29/2",
+            "index": "29",
+            "lanes": "102",
+            "speed": "25000"
+        },
+        "Ethernet114": {
+            "admin_status": "up",
+            "alias": "Ethernet29/3",
+            "index": "29",
+            "lanes": "103",
+            "speed": "25000"
+        },
+        "Ethernet115": {
+            "admin_status": "up",
+            "alias": "Ethernet29/4",
+            "index": "29",
+            "lanes": "104",
+            "speed": "25000"
+        },
+        "Ethernet116": {
+            "admin_status": "up",
+            "alias": "Ethernet30/1",
+            "index": "30",
+            "lanes": "97",
+            "speed": "25000"
+        },
+        "Ethernet117": {
+            "admin_status": "up",
+            "alias": "Ethernet30/2",
+            "index": "30",
+            "lanes": "98",
+            "speed": "25000"
+        },
+        "Ethernet118": {
+            "admin_status": "up",
+            "alias": "Ethernet30/3",
+            "index": "30",
+            "lanes": "99",
+            "speed": "25000"
+        },
+        "Ethernet119": {
+            "admin_status": "up",
+            "alias": "Ethernet30/4",
+            "index": "30",
+            "lanes": "100",
+            "speed": "25000"
+        },
+        "Ethernet12": {
+            "admin_status": "up",
+            "alias": "Ethernet4/1",
+            "index": "4",
+            "lanes": "121",
+            "speed": "25000"
+        },
+        "Ethernet120": {
+            "admin_status": "up",
+            "alias": "Ethernet31/1",
+            "index": "31",
+            "lanes": "109",
+            "speed": "25000"
+        },
+        "Ethernet121": {
+            "admin_status": "up",
+            "alias": "Ethernet31/2",
+            "index": "31",
+            "lanes": "110",
+            "speed": "25000"
+        },
+        "Ethernet122": {
+            "admin_status": "up",
+            "alias": "Ethernet31/3",
+            "index": "31",
+            "lanes": "111",
+            "speed": "25000"
+        },
+        "Ethernet123": {
+            "admin_status": "up",
+            "alias": "Ethernet31/4",
+            "index": "31",
+            "lanes": "112",
+            "speed": "25000"
+        },
+        "Ethernet124": {
+            "admin_status": "up",
+            "alias": "Ethernet32/1",
+            "index": "32",
+            "lanes": "105",
+            "speed": "25000"
+        },
+        "Ethernet125": {
+            "admin_status": "up",
+            "alias": "Ethernet32/2",
+            "index": "32",
+            "lanes": "106",
+            "speed": "25000"
+        },
+        "Ethernet126": {
+            "admin_status": "up",
+            "alias": "Ethernet32/3",
+            "index": "32",
+            "lanes": "107",
+            "speed": "25000"
+        },
+        "Ethernet127": {
+            "admin_status": "up",
+            "alias": "Ethernet32/4",
+            "index": "32",
+            "lanes": "108",
+            "speed": "25000"
+        },
+        "Ethernet13": {
+            "admin_status": "up",
+            "alias": "Ethernet4/2",
+            "index": "4",
+            "lanes": "122",
+            "speed": "25000"
+        },
+        "Ethernet14": {
+            "admin_status": "up",
+            "alias": "Ethernet4/3",
+            "index": "4",
+            "lanes": "123",
+            "speed": "25000"
+        },
+        "Ethernet15": {
+            "admin_status": "up",
+            "alias": "Ethernet4/4",
+            "index": "4",
+            "lanes": "124",
+            "speed": "25000"
+        },
+        "Ethernet16": {
+            "admin_status": "up",
+            "alias": "Ethernet5/1",
+            "index": "5",
+            "lanes": "5",
+            "speed": "25000"
+        },
+        "Ethernet17": {
+            "admin_status": "up",
+            "alias": "Ethernet5/2",
+            "index": "5",
+            "lanes": "6",
+            "speed": "25000"
+        },
+        "Ethernet18": {
+            "admin_status": "up",
+            "alias": "Ethernet5/3",
+            "index": "5",
+            "lanes": "7",
+            "speed": "25000"
+        },
+        "Ethernet19": {
+            "admin_status": "up",
+            "alias": "Ethernet5/4",
+            "index": "5",
+            "lanes": "8",
+            "speed": "25000"
+        },
+        "Ethernet2": {
+            "admin_status": "up",
+            "alias": "Ethernet1/3",
+            "index": "1",
+            "lanes": "119",
+            "speed": "25000"
+        },
+        "Ethernet20": {
+            "admin_status": "up",
+            "alias": "Ethernet6/1",
+            "index": "6",
+            "lanes": "1",
+            "speed": "25000"
+        },
+        "Ethernet21": {
+            "admin_status": "up",
+            "alias": "Ethernet6/2",
+            "index": "6",
+            "lanes": "2",
+            "speed": "25000"
+        },
+        "Ethernet22": {
+            "admin_status": "up",
+            "alias": "Ethernet6/3",
+            "index": "6",
+            "lanes": "3",
+            "speed": "25000"
+        },
+        "Ethernet23": {
+            "admin_status": "up",
+            "alias": "Ethernet6/4",
+            "index": "6",
+            "lanes": "4",
+            "speed": "25000"
+        },
+        "Ethernet24": {
+            "admin_status": "up",
+            "alias": "Ethernet7/1",
+            "index": "7",
+            "lanes": "13",
+            "speed": "25000"
+        },
+        "Ethernet25": {
+            "admin_status": "up",
+            "alias": "Ethernet7/2",
+            "index": "7",
+            "lanes": "14",
+            "speed": "25000"
+        },
+        "Ethernet26": {
+            "admin_status": "up",
+            "alias": "Ethernet7/3",
+            "index": "7",
+            "lanes": "15",
+            "speed": "25000"
+        },
+        "Ethernet27": {
+            "admin_status": "up",
+            "alias": "Ethernet7/4",
+            "index": "7",
+            "lanes": "16",
+            "speed": "25000"
+        },
+        "Ethernet28": {
+            "admin_status": "up",
+            "alias": "Ethernet8/1",
+            "index": "8",
+            "lanes": "9",
+            "speed": "25000"
+        },
+        "Ethernet29": {
+            "admin_status": "up",
+            "alias": "Ethernet8/2",
+            "index": "8",
+            "lanes": "10",
+            "speed": "25000"
+        },
+        "Ethernet3": {
+            "admin_status": "up",
+            "alias": "Ethernet1/4",
+            "index": "1",
+            "lanes": "120",
+            "speed": "25000"
+        },
+        "Ethernet30": {
+            "admin_status": "up",
+            "alias": "Ethernet8/3",
+            "index": "8",
+            "lanes": "11",
+            "speed": "25000"
+        },
+        "Ethernet31": {
+            "admin_status": "up",
+            "alias": "Ethernet8/4",
+            "index": "8",
+            "lanes": "12",
+            "speed": "25000"
+        },
+        "Ethernet32": {
+            "admin_status": "up",
+            "alias": "Ethernet9/1",
+            "index": "9",
+            "lanes": "21",
+            "speed": "25000"
+        },
+        "Ethernet33": {
+            "admin_status": "up",
+            "alias": "Ethernet9/2",
+            "index": "9",
+            "lanes": "22",
+            "speed": "25000"
+        },
+        "Ethernet34": {
+            "admin_status": "up",
+            "alias": "Ethernet9/3",
+            "index": "9",
+            "lanes": "23",
+            "speed": "25000"
+        },
+        "Ethernet35": {
+            "admin_status": "up",
+            "alias": "Ethernet9/4",
+            "index": "9",
+            "lanes": "24",
+            "speed": "25000"
+        },
+        "Ethernet36": {
+            "admin_status": "up",
+            "alias": "Ethernet10/1",
+            "index": "10",
+            "lanes": "17",
+            "speed": "25000"
+        },
+        "Ethernet37": {
+            "admin_status": "up",
+            "alias": "Ethernet10/2",
+            "index": "10",
+            "lanes": "18",
+            "speed": "25000"
+        },
+        "Ethernet38": {
+            "admin_status": "up",
+            "alias": "Ethernet10/3",
+            "index": "10",
+            "lanes": "19",
+            "speed": "25000"
+        },
+        "Ethernet39": {
+            "admin_status": "up",
+            "alias": "Ethernet10/4",
+            "index": "10",
+            "lanes": "20",
+            "speed": "25000"
+        },
+        "Ethernet4": {
+            "admin_status": "up",
+            "alias": "Ethernet2/1",
+            "index": "2",
+            "lanes": "113",
+            "speed": "25000"
+        },
+        "Ethernet40": {
+            "admin_status": "up",
+            "alias": "Ethernet11/1",
+            "index": "11",
+            "lanes": "29",
+            "speed": "25000"
+        },
+        "Ethernet41": {
+            "admin_status": "up",
+            "alias": "Ethernet11/2",
+            "index": "11",
+            "lanes": "30",
+            "speed": "25000"
+        },
+        "Ethernet42": {
+            "admin_status": "up",
+            "alias": "Ethernet11/3",
+            "index": "11",
+            "lanes": "31",
+            "speed": "25000"
+        },
+        "Ethernet43": {
+            "admin_status": "up",
+            "alias": "Ethernet11/4",
+            "index": "11",
+            "lanes": "32",
+            "speed": "25000"
+        },
+        "Ethernet44": {
+            "admin_status": "up",
+            "alias": "Ethernet12/1",
+            "index": "12",
+            "lanes": "25",
+            "speed": "25000"
+        },
+        "Ethernet45": {
+            "admin_status": "up",
+            "alias": "Ethernet12/2",
+            "index": "12",
+            "lanes": "26",
+            "speed": "25000"
+        },
+        "Ethernet46": {
+            "admin_status": "up",
+            "alias": "Ethernet12/3",
+            "index": "12",
+            "lanes": "27",
+            "speed": "25000"
+        },
+        "Ethernet47": {
+            "admin_status": "up",
+            "alias": "Ethernet12/4",
+            "index": "12",
+            "lanes": "28",
+            "speed": "25000"
+        },
+        "Ethernet48": {
+            "admin_status": "up",
+            "alias": "Ethernet13/1",
+            "index": "13",
+            "lanes": "37",
+            "speed": "25000"
+        },
+        "Ethernet49": {
+            "admin_status": "up",
+            "alias": "Ethernet13/2",
+            "index": "13",
+            "lanes": "38",
+            "speed": "25000"
+        },
+        "Ethernet5": {
+            "admin_status": "up",
+            "alias": "Ethernet2/2",
+            "index": "2",
+            "lanes": "114",
+            "speed": "25000"
+        },
+        "Ethernet50": {
+            "admin_status": "up",
+            "alias": "Ethernet13/3",
+            "index": "13",
+            "lanes": "39",
+            "speed": "25000"
+        },
+        "Ethernet51": {
+            "admin_status": "up",
+            "alias": "Ethernet13/4",
+            "index": "13",
+            "lanes": "40",
+            "speed": "25000"
+        },
+        "Ethernet52": {
+            "admin_status": "up",
+            "alias": "Ethernet14/1",
+            "index": "14",
+            "lanes": "33",
+            "speed": "25000"
+        },
+        "Ethernet53": {
+            "admin_status": "up",
+            "alias": "Ethernet14/2",
+            "index": "14",
+            "lanes": "34",
+            "speed": "25000"
+        },
+        "Ethernet54": {
+            "admin_status": "up",
+            "alias": "Ethernet14/3",
+            "index": "14",
+            "lanes": "35",
+            "speed": "25000"
+        },
+        "Ethernet55": {
+            "admin_status": "up",
+            "alias": "Ethernet14/4",
+            "index": "14",
+            "lanes": "36",
+            "speed": "25000"
+        },
+        "Ethernet56": {
+            "admin_status": "up",
+            "alias": "Ethernet15/1",
+            "index": "15",
+            "lanes": "45",
+            "speed": "25000"
+        },
+        "Ethernet57": {
+            "admin_status": "up",
+            "alias": "Ethernet15/2",
+            "index": "15",
+            "lanes": "46",
+            "speed": "25000"
+        },
+        "Ethernet58": {
+            "admin_status": "up",
+            "alias": "Ethernet15/3",
+            "index": "15",
+            "lanes": "47",
+            "speed": "25000"
+        },
+        "Ethernet59": {
+            "admin_status": "up",
+            "alias": "Ethernet15/4",
+            "index": "15",
+            "lanes": "48",
+            "speed": "25000"
+        },
+        "Ethernet6": {
+            "admin_status": "up",
+            "alias": "Ethernet2/3",
+            "index": "2",
+            "lanes": "115",
+            "speed": "25000"
+        },
+        "Ethernet60": {
+            "admin_status": "up",
+            "alias": "Ethernet16/1",
+            "index": "16",
+            "lanes": "41",
+            "speed": "25000"
+        },
+        "Ethernet61": {
+            "admin_status": "up",
+            "alias": "Ethernet16/2",
+            "index": "16",
+            "lanes": "42",
+            "speed": "25000"
+        },
+        "Ethernet62": {
+            "admin_status": "up",
+            "alias": "Ethernet16/3",
+            "index": "16",
+            "lanes": "43",
+            "speed": "25000"
+        },
+        "Ethernet63": {
+            "admin_status": "up",
+            "alias": "Ethernet16/4",
+            "index": "16",
+            "lanes": "44",
+            "speed": "25000"
+        },
+        "Ethernet64": {
+            "admin_status": "up",
+            "alias": "Ethernet17/1",
+            "index": "17",
+            "lanes": "53",
+            "speed": "25000"
+        },
+        "Ethernet65": {
+            "admin_status": "up",
+            "alias": "Ethernet17/2",
+            "index": "17",
+            "lanes": "54",
+            "speed": "25000"
+        },
+        "Ethernet66": {
+            "admin_status": "up",
+            "alias": "Ethernet17/3",
+            "index": "17",
+            "lanes": "55",
+            "speed": "25000"
+        },
+        "Ethernet67": {
+            "admin_status": "up",
+            "alias": "Ethernet17/4",
+            "index": "17",
+            "lanes": "56",
+            "speed": "25000"
+        },
+        "Ethernet68": {
+            "admin_status": "up",
+            "alias": "Ethernet18/1",
+            "index": "18",
+            "lanes": "49",
+            "speed": "25000"
+        },
+        "Ethernet69": {
+            "admin_status": "up",
+            "alias": "Ethernet18/2",
+            "index": "18",
+            "lanes": "50",
+            "speed": "25000"
+        },
+        "Ethernet7": {
+            "admin_status": "up",
+            "alias": "Ethernet2/4",
+            "index": "2",
+            "lanes": "116",
+            "speed": "25000"
+        },
+        "Ethernet70": {
+            "admin_status": "up",
+            "alias": "Ethernet18/3",
+            "index": "18",
+            "lanes": "51",
+            "speed": "25000"
+        },
+        "Ethernet71": {
+            "admin_status": "up",
+            "alias": "Ethernet18/4",
+            "index": "18",
+            "lanes": "52",
+            "speed": "25000"
+        },
+        "Ethernet72": {
+            "admin_status": "up",
+            "alias": "Ethernet19/1",
+            "index": "19",
+            "lanes": "61",
+            "speed": "25000"
+        },
+        "Ethernet73": {
+            "admin_status": "up",
+            "alias": "Ethernet19/2",
+            "index": "19",
+            "lanes": "62",
+            "speed": "25000"
+        },
+        "Ethernet74": {
+            "admin_status": "up",
+            "alias": "Ethernet19/3",
+            "index": "19",
+            "lanes": "63",
+            "speed": "25000"
+        },
+        "Ethernet75": {
+            "admin_status": "up",
+            "alias": "Ethernet19/4",
+            "index": "19",
+            "lanes": "64",
+            "speed": "25000"
+        },
+        "Ethernet76": {
+            "admin_status": "up",
+            "alias": "Ethernet20/1",
+            "index": "20",
+            "lanes": "57",
+            "speed": "25000"
+        },
+        "Ethernet77": {
+            "admin_status": "up",
+            "alias": "Ethernet20/2",
+            "index": "20",
+            "lanes": "58",
+            "speed": "25000"
+        },
+        "Ethernet78": {
+            "admin_status": "up",
+            "alias": "Ethernet20/3",
+            "index": "20",
+            "lanes": "59",
+            "speed": "25000"
+        },
+        "Ethernet79": {
+            "admin_status": "up",
+            "alias": "Ethernet20/4",
+            "index": "20",
+            "lanes": "60",
+            "speed": "25000"
+        },
+        "Ethernet8": {
+            "admin_status": "up",
+            "alias": "Ethernet3/1",
+            "index": "3",
+            "lanes": "125",
+            "speed": "25000"
+        },
+        "Ethernet80": {
+            "admin_status": "up",
+            "alias": "Ethernet21/1",
+            "index": "21",
+            "lanes": "69",
+            "speed": "25000"
+        },
+        "Ethernet81": {
+            "admin_status": "up",
+            "alias": "Ethernet21/2",
+            "index": "21",
+            "lanes": "70",
+            "speed": "25000"
+        },
+        "Ethernet82": {
+            "admin_status": "up",
+            "alias": "Ethernet21/3",
+            "index": "21",
+            "lanes": "71",
+            "speed": "25000"
+        },
+        "Ethernet83": {
+            "admin_status": "up",
+            "alias": "Ethernet21/4",
+            "index": "21",
+            "lanes": "72",
+            "speed": "25000"
+        },
+        "Ethernet84": {
+            "admin_status": "up",
+            "alias": "Ethernet22/1",
+            "index": "22",
+            "lanes": "65",
+            "speed": "25000"
+        },
+        "Ethernet85": {
+            "admin_status": "up",
+            "alias": "Ethernet22/2",
+            "index": "22",
+            "lanes": "66",
+            "speed": "25000"
+        },
+        "Ethernet86": {
+            "admin_status": "up",
+            "alias": "Ethernet22/3",
+            "index": "22",
+            "lanes": "67",
+            "speed": "25000"
+        },
+        "Ethernet87": {
+            "admin_status": "up",
+            "alias": "Ethernet22/4",
+            "index": "22",
+            "lanes": "68",
+            "speed": "25000"
+        },
+        "Ethernet88": {
+            "admin_status": "up",
+            "alias": "Ethernet23/1",
+            "index": "23",
+            "lanes": "77",
+            "speed": "25000"
+        },
+        "Ethernet89": {
+            "admin_status": "up",
+            "alias": "Ethernet23/2",
+            "index": "23",
+            "lanes": "78",
+            "speed": "25000"
+        },
+        "Ethernet9": {
+            "admin_status": "up",
+            "alias": "Ethernet3/2",
+            "index": "3",
+            "lanes": "126",
+            "speed": "25000"
+        },
+        "Ethernet90": {
+            "admin_status": "up",
+            "alias": "Ethernet23/3",
+            "index": "23",
+            "lanes": "79",
+            "speed": "25000"
+        },
+        "Ethernet91": {
+            "admin_status": "up",
+            "alias": "Ethernet23/4",
+            "index": "23",
+            "lanes": "80",
+            "speed": "25000"
+        },
+        "Ethernet92": {
+            "admin_status": "up",
+            "alias": "Ethernet24/1",
+            "index": "24",
+            "lanes": "73",
+            "speed": "25000"
+        },
+        "Ethernet93": {
+            "admin_status": "up",
+            "alias": "Ethernet24/2",
+            "index": "24",
+            "lanes": "74",
+            "speed": "25000"
+        },
+        "Ethernet94": {
+            "admin_status": "up",
+            "alias": "Ethernet24/3",
+            "index": "24",
+            "lanes": "75",
+            "speed": "25000"
+        },
+        "Ethernet95": {
+            "admin_status": "up",
+            "alias": "Ethernet24/4",
+            "index": "24",
+            "lanes": "76",
+            "speed": "25000"
+        },
+        "Ethernet96": {
+            "admin_status": "up",
+            "alias": "Ethernet25/1",
+            "index": "25",
+            "lanes": "85",
+            "speed": "25000"
+        },
+        "Ethernet97": {
+            "admin_status": "up",
+            "alias": "Ethernet25/2",
+            "index": "25",
+            "lanes": "86",
+            "speed": "25000"
+        },
+        "Ethernet98": {
+            "admin_status": "up",
+            "alias": "Ethernet25/3",
+            "index": "25",
+            "lanes": "87",
+            "speed": "25000"
+        },
+        "Ethernet99": {
+            "admin_status": "up",
+            "alias": "Ethernet25/4",
+            "index": "25",
+            "lanes": "88",
+            "speed": "25000"
+        }
+    }
+}

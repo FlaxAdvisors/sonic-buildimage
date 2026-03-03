@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Top-level test runner for Wedge 100S-32X SONiC platform tests.
 
 Usage:

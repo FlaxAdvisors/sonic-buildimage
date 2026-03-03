@@ -219,11 +219,11 @@ def _pca9535_check(ssh, bus, addr):
 
 
 def test_pca9535_i2c36_accessible(ssh):
-    """PCA9535 at i2c-36/0x22 (QSFP ports 0–15) is either readable or owned by kernel driver.
+    """PCA9535 at i2c-36/0x22 (QSFP ports 0–15) responds on I2C bus.
 
-    'Device or resource busy' means the sysfs gpio/smbus driver has claimed the
-    device, which is correct — the Python API uses it through that driver.
-    Direct i2cget is blocked by design.
+    'Device or resource busy' means the kernel gpio/smbus driver has claimed the
+    device — this is the expected state when the platform init service has run.
+    The Python API reads presence through that driver (see test_qsfp_api_port_count).
     """
     val, status = _pca9535_check(ssh, 36, 0x22)
     print(f"\nPCA9535 i2c-36/0x22: {status}  (value={val})")
@@ -231,23 +231,13 @@ def test_pca9535_i2c36_accessible(ssh):
         f"Unexpected result from PCA9535 i2c-36/0x22: {status}\n"
         "Check that the mux tree is initialized and i2c-36 is registered."
     )
-    if status == "busy":
-        pytest.xfail(
-            "PCA9535 at i2c-36/0x22 is owned by the kernel gpio/smbus driver "
-            "(Device or resource busy). This is correct — the Python API reads "
-            "QSFP presence through that driver successfully (see test_qsfp_api_port_count)."
-        )
 
 
 def test_pca9535_i2c37_accessible(ssh):
-    """PCA9535 at i2c-37/0x23 (QSFP ports 16–31) is either readable or owned by kernel driver."""
+    """PCA9535 at i2c-37/0x23 (QSFP ports 16–31) responds on I2C bus."""
     val, status = _pca9535_check(ssh, 37, 0x23)
     print(f"\nPCA9535 i2c-37/0x23: {status}  (value={val})")
     assert status in ("ok", "busy"), (
-        f"Unexpected result from PCA9535 i2c-37/0x23: {status}"
+        f"Unexpected result from PCA9535 i2c-37/0x23: {status}\n"
+        "Check that the mux tree is initialized and i2c-37 is registered."
     )
-    if status == "busy":
-        pytest.xfail(
-            "PCA9535 at i2c-37/0x23 is owned by the kernel driver — expected. "
-            "See test_pca9535_i2c36_accessible for details."
-        )

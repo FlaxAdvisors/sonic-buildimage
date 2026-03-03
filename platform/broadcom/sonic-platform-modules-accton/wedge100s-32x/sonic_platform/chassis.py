@@ -22,6 +22,7 @@ from sonic_platform.fan import FanDrawer, NUM_FANS
 from sonic_platform.psu import Psu, NUM_PSUS
 from sonic_platform.sfp import Sfp, NUM_SFPS
 from sonic_platform.eeprom import SysEeprom
+from sonic_platform.watchdog import Watchdog
 
 
 class Chassis(ChassisBase):
@@ -44,6 +45,8 @@ class Chassis(ChassisBase):
             self._sfp_list.append(Sfp(i))  # index 1..32 → port 0..31
         # System EEPROM (24c64 at i2c-40/0x50, ONIE TlvInfo)
         self._eeprom = SysEeprom()
+        # Watchdog stub (x86 iTCO_wdt disabled by BIOS; BMC owns HW WDT)
+        self._watchdog = Watchdog()
         # Previous presence state for get_change_event() polling
         self._prev_presence = {}
 

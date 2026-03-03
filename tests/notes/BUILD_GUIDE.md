@@ -5,37 +5,29 @@
 The build produces `target/sonic-broadcom.bin` — an ONIE-compatible installer
 that can be loaded via ONIE's install mechanism on the Wedge 100S-32X.
 
-The entire build runs inside a Docker container ("sonic-slave-bookworm").
-The host machine provides Docker, disk, and CPU — everything else is
-containerized.
+The build runs inside Docker containers ("sonic-slave"). There are **two build
+passes** required:
 
-## Current Build Host Status
+1. **Bookworm pass** (`BLDENV=bookworm`): compiles packages, docker images,
+   and python wheels. Outputs go to `target/debs/bookworm/` and `target/docker-*.gz`.
+2. **Trixie pass** (`BLDENV=trixie`): builds runtime debs into `target/debs/trixie/`
+   and assembles the final `.bin` installer.
+
+The runtime image root filesystem is **trixie-based** (`IMAGE_DISTRO := trixie`
+is hardcoded in `slave.mk:73`), so both passes are required.
+
+## Build Host Prerequisites
 
 | Resource       | Value                          | Required            |
 |----------------|--------------------------------|---------------------|
 | Docker         | 26.1.3                         | >= 20.10.10         |
-| docker group   | yes                            | yes                 |
+| docker group   | current user in docker group   | yes                 |
 | Disk free      | 5.1 TB on /export              | ~100 GB minimum     |
 | RAM            | 376 GB                         | 8 GB minimum        |
-| CPUs           | 80                             | more = faster       |
-| overlay module | loaded                         | required            |
-| j2 (jinja CLI) | **MISSING**                    | required            |
-| Python (host)  | 3.8.10                         | 3.x                 |
-| .platform      | broadcom (already configured)  | broadcom            |
-| .arch          | amd64 (already configured)     | amd64               |
-
-## Prerequisites to Fix
-
-### Install jinjanator (provides `j2` command)
-
-```bash
-pip3 install jinjanator
-# verify:
-j2 --version
-```
-
-This was the cause of the `make clean` failure — `scripts/build_mirror_config.sh`
-calls `j2` to template mirror configs. It's needed for slave container builds too.
+| CPUs           | 80 (40 physical)               | more = faster       |
+| overlay module | `sudo modprobe overlay`        | required            |
+| j2 (jinja CLI) | `pip3 install jinjanator`      | required            |
+| Python (host)  | 3.x                            | 3.x                 |
 
 ## Build Steps
 
@@ -45,79 +37,101 @@ calls `j2` to template mirror configs. It's needed for slave container builds to
 make init
 ```
 
-This runs `git submodule update --init --recursive`. Already done if submodules
-are populated, but safe to re-run.
+Runs `git submodule update --init --recursive`. Safe to re-run.
 
-### 2. Configure platform (already done)
+### 2. Configure platform
 
 ```bash
 make configure PLATFORM=broadcom
 ```
 
-Writes `broadcom` to `.platform` and `amd64` to `.arch`. These files already
-exist in the working tree from a previous configure, so this step can be skipped.
+Writes `broadcom` to `.platform` and `amd64` to `.arch`. Skip if already done.
 
-### 3. Ensure Accton platform modules are included in the build
+### 3. Ensure Accton platform modules are included
 
-Line 11 of `platform/broadcom/rules.mk` is currently **commented out**:
-
-```makefile
-#include $(PLATFORM_PATH)/platform-modules-accton.mk
-```
-
-This must be uncommented for the Wedge 100S platform .deb to be built and
-included in the image:
+In `platform/broadcom/rules.mk`, uncomment the Accton include:
 
 ```makefile
 include $(PLATFORM_PATH)/platform-modules-accton.mk
 ```
 
-**Note:** This will also build all other Accton platform modules (AS7712, AS5712,
-etc.) as extra packages off the AS7712 primary build. They're bundled into the
-image and only the matching one gets installed at first boot based on platform
-detection.
+All other `platform-modules-*.mk` lines can remain commented out if you only
+need wedge100s.
 
-### 4. Build the ONIE installer image
+### 4. Wedge100S-only Accton build (optional optimization)
+
+In `platform/broadcom/platform-modules-accton.mk`, the wedge100s module is
+configured as a standalone `SONIC_DPKG_DEBS` target (not an `add_extra_package`
+off AS7712). All other Accton platform variables and targets are commented out.
+This avoids building debs for platforms we don't need.
+
+### 5. Build the ONIE installer image
 
 ```bash
-make SONIC_BUILD_JOBS=16 target/sonic-broadcom.bin
+make SONIC_BUILD_JOBS=40 BUILD_SKIP_TEST=y \
+     SONIC_IMAGE_VERSION=wedge100s-1.0 \
+     target/sonic-broadcom.bin
 ```
 
-| Variable            | Description                              | Suggested   |
-|---------------------|------------------------------------------|-------------|
-| SONIC_BUILD_JOBS    | Parallel make jobs inside container      | 16 (of 80)  |
-| SONIC_BUILD_MEMORY  | Docker memory limit                      | (unlimited) |
-| NOSTRETCH/NOBUSTER  | Skip old Debian versions (default: 1)    | leave as-is |
-| NOBOOKWORM          | Must be 0 (default) for bookworm build   | 0           |
+#### Build variables
 
-**Expected output:** `target/sonic-broadcom.bin` (~1.5–2 GB)
+| Variable             | Description                              | Value       |
+|----------------------|------------------------------------------|-------------|
+| SONIC_BUILD_JOBS     | Parallel make jobs inside container      | 40          |
+| BUILD_SKIP_TEST      | Skip unit tests (faster, avoids hangs)   | y           |
+| NOTRIXIE             | **Must be 0** — trixie pass builds .bin  | 0           |
+| NOBOOKWORM           | Must be 0 (default) — builds dockers     | 0           |
+| SONIC_IMAGE_VERSION  | Override version string in image         | wedge100s-1.0 |
+| SONIC_BUILD_MEMORY   | Docker memory limit                      | (unlimited) |
 
-**Expected duration:** 2–4 hours for a clean build on this hardware. Subsequent
-builds with warm caches are faster.
+#### Critical: NOTRIXIE must be 0
+
+The outer `Makefile` defaults to `NOTRIXIE ?= 1`, which **skips the trixie
+build pass**. Without it:
+
+- The bookworm pass builds docker images and wheels (target: `bookworm` in slave.mk)
+- But the `.bin` assembly depends on `target/debs/trixie/` debs
+- The bookworm pass target is just `bookworm` — it does NOT build the installer
+- Only the trixie pass targets `$@` (the actual `target/sonic-broadcom.bin`)
+
+Setting `NOTRIXIE=0` enables the trixie pass which builds runtime debs and
+assembles the final image.
+
+#### Image versioning
+
+The version string comes from `functions.sh:sonic_get_version()`:
+
+- On a tagged commit: `<tag>`
+- On a branch: `<branch>.<BUILD_NUMBER>-<short-sha>`
+- With uncommitted changes: appends `-dirty-<timestamp>`
+- Override with `SONIC_IMAGE_VERSION=<string>` to set explicitly
 
 ### What happens during the build
 
-1. **sonic-slave container** — Docker image is built from `sonic-slave-bookworm/`
-   Dockerfile if it doesn't exist. This installs all build toolchains.
-2. **Packages** — All SONiC components are compiled: swss, syncd, database,
-   platform modules, kernel modules, etc. Outputs go to `target/debs/bookworm/`.
-3. **Docker images** — Runtime containers (docker-database, docker-swss,
-   docker-syncd-brcm, docker-platform-monitor, etc.) are built and saved as
-   `.gz` archives in `target/`.
-4. **Root filesystem** — `build_debian.sh` assembles a Debian bookworm rootfs
-   with all packages and docker images installed.
-5. **ONIE installer** — `build_image.sh` + `onie-mk-demo.sh` wraps the rootfs
-   into a self-extracting ONIE installer binary.
+1. **Bookworm pass** (BLDENV=bookworm, target=`bookworm`):
+   - Builds sonic-slave-bookworm Docker container (first run only)
+   - Compiles all SONiC packages → `target/debs/bookworm/`
+   - Builds python wheels → `target/python-wheels/bookworm/`
+   - Builds runtime Docker images → `target/docker-*.gz`
+
+2. **Trixie pass** (BLDENV=trixie, target=`target/sonic-broadcom.bin`):
+   - Builds sonic-slave-trixie Docker container (first run only)
+   - Compiles runtime debs → `target/debs/trixie/`
+   - Runs `build_debian.sh` — assembles Debian trixie root filesystem
+   - Runs `build_image.sh` + `onie-mk-demo.sh` — wraps rootfs into ONIE installer
+
+**Expected output:** `target/sonic-broadcom.bin` (~1.5–2 GB)
+
+**Expected duration:** 2–4 hours clean build on 40-core host. Subsequent builds
+with warm caches are faster.
 
 ## Building Just the Platform .deb (faster iteration)
-
-If you only need to rebuild the platform module (not the full image):
 
 ```bash
 make target/debs/bookworm/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
 ```
 
-Then deploy directly:
+Deploy directly:
 
 ```bash
 scp target/debs/bookworm/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb admin@192.168.88.12:~
@@ -169,13 +183,33 @@ After ONIE installs the image, the switch reboots into SONiC. First boot:
 
 ## Troubleshooting
 
-### `j2: command not found`
+### `make clean` fails with "j2: command not found"
 ```bash
 pip3 install jinjanator
 ```
+`make clean` runs inside the slave container, which requires `j2` to build.
+Manual cleanup alternative: `rm -rf target/ fsroot*`
+
+### "Nothing to be done for bookworm" but no .bin exists
+
+The bookworm pass only builds docker images — it does NOT produce the `.bin`.
+Ensure `NOTRIXIE=0` is set so the trixie pass runs and assembles the installer.
+
+### `sonic_utilities` test hangs at ~50%
+
+The test `test_get_portchannel_retry_count_timeout` in sonic-utilities hangs
+and gets killed by `BUILD_PROCESS_TIMEOUT`. This is an upstream issue.
+Use `BUILD_SKIP_TEST=y` to skip all unit tests.
+
+### Missing `target/debs/trixie/*.deb`
+
+The runtime image is trixie-based (`IMAGE_DISTRO := trixie` in `slave.mk:73`).
+If `NOTRIXIE=1` (default), trixie debs are never built and the `.bin` target
+fails with missing dependencies. Set `NOTRIXIE=0`.
 
 ### sonic-slave Docker image fails to build
-Check Docker version (need >= 20.10.10 for bookworm). Also ensure:
+
+Check Docker version (need >= 20.10.10 for bookworm/trixie). Also ensure:
 ```bash
 sudo modprobe overlay
 ```
@@ -195,6 +229,14 @@ make sonic-slave-bash
 
 ### Cleaning build artifacts
 ```bash
-# Since make clean requires the slave container, do it manually:
+# make clean requires the slave container; manual cleanup:
 rm -rf target/ fsroot*
+# Then re-run configure to recreate directory structure:
+make configure PLATFORM=broadcom
 ```
+
+### `make configure` must be re-run after cleaning
+
+`rm -rf target/` removes the directory structure that `make configure` creates.
+Without it, the build fails with "No such file or directory" for log files.
+Always run `make configure PLATFORM=broadcom` after a manual clean.

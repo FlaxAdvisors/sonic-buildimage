@@ -2,23 +2,15 @@
 """
 sonic_platform/eeprom.py — System EEPROM for Accton Wedge 100S-32X.
 
-Hardware: AT24C02 (256 B) at i2c-1/0x51, ONIE TlvInfo format.
-The COME module is directly on i2c-1 (the CP2112 root bus), NOT behind
-the PCA9548 mux at 0x74.  The mux channels are non-isolating for these
-devices because the CP2112 cannot hold mux channel selection between HID
-report transactions.
-
-i2c-1/0x50: COME module EC chip — exposes ODM-format platform data via
-            1-byte I2C register reads; NOT writable via standard AT24 protocol.
-i2c-1/0x51: AT24C02 EEPROM — writable via standard I2C; holds ONIE TlvInfo.
+Hardware: 24c64 (8 KiB) at 0x50 on mux 0x74 ch6 (i2c-40), ONIE TlvInfo format.
+ONIE dmesg: "at24 7-0050: 8192 byte 24c64 EEPROM, writable, 1 bytes/write"
 
 The at24 device is registered by accton_wedge100s_util.py at boot via:
-    echo 24c02 0x51 > /sys/bus/i2c/devices/i2c-40/new_device
-Bus 40 is mux 0x74 ch6, which is transparent to i2c-1 for COME devices.
-Sysfs node: /sys/bus/i2c/devices/40-0051/eeprom
+    echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device
+Sysfs node: /sys/bus/i2c/devices/40-0050/eeprom
 
 The EEPROM cache written at platform-init time (before xcvrd/pmon start)
-avoids any residual CP2112 mux-contention issues at runtime.
+avoids CP2112 mux-contention issues at runtime.
 """
 
 try:
@@ -34,7 +26,7 @@ EEPROM_CACHE_PATH = '/var/run/platform_cache/syseeprom_cache'
 
 class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
 
-    EEPROM_PATH = "/sys/bus/i2c/devices/40-0051/eeprom"
+    EEPROM_PATH = "/sys/bus/i2c/devices/40-0050/eeprom"
 
     def __init__(self):
         super(SysEeprom, self).__init__(self.EEPROM_PATH, 0, EEPROM_CACHE_PATH, True)

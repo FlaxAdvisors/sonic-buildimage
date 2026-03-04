@@ -11,8 +11,8 @@
 #     They are NOT accessible via host I2C.  Do NOT load lm75 or i2c_ismt.
 #   - PSU presence/status is read from CPLD register 0x10 at i2c-1/0x32.
 #   - QSFP28 presence is via PCA9535 GPIO expanders at i2c-36/0x22 and i2c-37/0x23.
-#   - System EEPROM (ONIE TLV) was thought to be a 24c64 at i2c-40/0x50 - but then it moved?
-#   - System EEPROM (ONIE TLV, TlvInfo) is an AT24C02 at i2c-1/0x51 (registered via i2c-40/0x51).
+#   - System EEPROM (ONIE TLV, TlvInfo) is a 24c64 at 0x50 (registered via i2c-40/0x50).
+#     ONIE registers it as: at24 7-0050 (8192 byte 24c64).  In SONiC, mux 0x74 ch6 = i2c-40.
 #   - Bus numbers are confirmed stable on SONiC kernel 6.1.0; see i2c_bus_map.json.
 
 """
@@ -46,7 +46,7 @@ FORCE = 0
 # EEPROM cache — written once at platform-init time, before xcvrd/pmon start.
 # This prevents CP2112 I2C bus hangs caused by mux 0x74 contention between
 # EEPROM reads (channel 6) and PCA9535 presence polls (channels 2 and 3).
-EEPROM_SYSFS_PATH = '/sys/bus/i2c/devices/40-0051/eeprom'
+EEPROM_SYSFS_PATH = '/sys/bus/i2c/devices/40-0050/eeprom'
 EEPROM_CACHE_PATH = '/var/run/platform_cache/syseeprom_cache'
 TLVINFO_MAGIC     = bytes([0x54, 0x6c, 0x76, 0x49, 0x6e, 0x66, 0x6f, 0x00])
 
@@ -92,20 +92,12 @@ mknod = [
     'echo pca9548 0x74 > /sys/bus/i2c/devices/i2c-1/new_device',
     # mux 0x74 ch2 → i2c-36: PCA9535 GPIO (QSFP presence ports 0-15)
     # mux 0x74 ch3 → i2c-37: PCA9535 GPIO (QSFP presence ports 16-31)
-    # mux 0x74 ch6 → i2c-40: used to register system EEPROM at 0x51.
-    #
-    # COME module I2C topology (devices are directly on i2c-1, NOT behind mux):
-    #   i2c-1/0x50: COME EC chip — 1-byte I2C register interface, ODM format.
-    #               NOT writable via standard AT24 protocol (accepts write ACKs
-    #               but data is not stored).  Do NOT register as at24.
-    #   i2c-1/0x51: AT24C02 EEPROM — writable, holds ONIE TlvInfo for SONiC.
-    #               Registered via bus 40 (transparent to i2c-1 for COME devices).
-    #
-    # The CP2112 cannot hold mux channel selection between HID transactions, so
-    # all of mux 0x74's channels are non-isolating for COME module devices.
+    # mux 0x74 ch6 → i2c-40: system EEPROM (24c64 at 0x50, ONIE TlvInfo).
+    # ONIE dmesg: "at24 7-0050: 8192 byte 24c64 EEPROM, writable, 1 bytes/write"
+    # In SONiC, mux 0x74 ch6 = i2c-40 (bus numbering differs from ONIE's i2c-7).
     'echo pca9535 0x22 > /sys/bus/i2c/devices/i2c-36/new_device',
     'echo pca9535 0x23 > /sys/bus/i2c/devices/i2c-37/new_device',
-    'echo 24c02 0x51 > /sys/bus/i2c/devices/i2c-40/new_device',
+    'echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device',
 ]
 
 

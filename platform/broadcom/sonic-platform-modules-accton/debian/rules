@@ -84,8 +84,8 @@ override_dh_auto_install:
 		if [ -d $(MOD_SRC_DIR)/$${mod}/modules ]; then \
 			$(MAKE) -C $(KERNEL_SRC)/build M=$(MOD_SRC_DIR) INSTALL_MOD_PATH=$(MOD_SRC_DIR)/debian/platform-modules-$${mod} modules_install; \
 		fi; \
-		dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} usr/local/bin; \
-		cp $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/* debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/local/bin/; \
+		dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} usr/bin; \
+		cp $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/* debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/bin/; \
 		dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} lib/systemd/system; \
 		cp $(MOD_SRC_DIR)/$${mod}/$(SERVICE_DIR)/*.service debian/$(PACKAGE_PRE_NAME)-$${mod}/lib/systemd/system/; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/$(UDEV_DIR) ]; then \

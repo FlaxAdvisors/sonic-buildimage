@@ -61,7 +61,7 @@ class Chassis(ChassisBase):
         Poll all QSFP ports for presence changes.
 
         This platform has no hardware interrupt for SFP insertion/removal;
-        the PCA9535 GPIO expanders must be polled via i2cget.
+        the PCA9535 GPIO expanders must be polled via GPIO sysfs.
 
         xcvrd calls this with timeout in milliseconds.  We poll until
         either a change is detected or the timeout expires, then return.

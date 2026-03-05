@@ -38,6 +38,8 @@ import os
 import time
 
 PROJECT_NAME = 'wedge100s_32x'
+PLATFORM_ROOT_PATH = '/usr/share/sonic/device'
+PLATFORM_API2_WHL_FILE_PY3 = 'sonic_platform-1.0-py3-none-any.whl'
 version = '0.1.0'
 DEBUG = False
 args = []
@@ -182,8 +184,11 @@ def log_os_system(cmd, show):
 
 
 def driver_check():
-    """Return True if hid_cp2112 is loaded (CP2112 bridge / i2c-1 usable)."""
+    """Return True if all required modules are loaded (hid_cp2112 + i2c_dev)."""
     ret, _ = log_os_system("lsmod | grep -q hid_cp2112", 0)
+    if ret != 0:
+        return False
+    ret, _ = log_os_system("lsmod | grep -q i2c_dev", 0)
     return ret == 0
 
 
@@ -296,6 +301,91 @@ def _cache_eeprom():
         print("WARNING: Could not write EEPROM cache {}: {}".format(EEPROM_CACHE_PATH, e))
 
 
+def _export_presence_gpios():
+    """Export PCA9535 QSFP presence GPIOs for kernel sysfs access.
+
+    After device_install() registers the PCA9535 chips, the kernel creates
+    gpiochip entries.  This function discovers their bases from labels and
+    exports all 32 presence GPIOs so that sfp.py can read them via
+    /sys/class/gpio/gpioN/value without needing root to export later.
+
+    GPIO wiring uses interleaved even/odd order (XOR-1 corrects mapping):
+      port → gpio_offset = (port % 16) ^ 1
+      gpio_number = chip_base + gpio_offset
+    """
+    GPIO_SYSFS = '/sys/class/gpio'
+    labels = ['36-0022', '37-0023']   # PCA9535 at i2c-36 and i2c-37
+    bases = [None, None]
+
+    try:
+        for entry in os.listdir(GPIO_SYSFS):
+            if not entry.startswith('gpiochip'):
+                continue
+            try:
+                with open(os.path.join(GPIO_SYSFS, entry, 'label')) as f:
+                    label = f.read().strip()
+                for idx, expected in enumerate(labels):
+                    if label == expected:
+                        with open(os.path.join(GPIO_SYSFS, entry, 'base')) as f:
+                            bases[idx] = int(f.read().strip())
+            except OSError:
+                continue
+    except OSError:
+        print("WARNING: Could not scan GPIO sysfs for presence GPIOs")
+        return
+
+    exported = 0
+    for port in range(NUM_SFP):
+        group = port // 16
+        base = bases[group]
+        if base is None:
+            continue
+        gpio = base + ((port % 16) ^ 1)
+        value_path = '{}/gpio{}/value'.format(GPIO_SYSFS, gpio)
+        if os.path.exists(value_path):
+            exported += 1
+            continue
+        try:
+            with open('{}/export'.format(GPIO_SYSFS), 'w') as f:
+                f.write(str(gpio))
+            exported += 1
+        except OSError as e:
+            my_log("Failed to export GPIO {} (port {}): {}".format(gpio, port, e))
+
+    print("Exported {}/{} QSFP presence GPIOs".format(exported, NUM_SFP))
+
+
+def do_sonic_platform_install():
+    device_path = "{}{}{}{}".format(PLATFORM_ROOT_PATH, '/x86_64-accton_', PROJECT_NAME, '-r0')
+    SONIC_PLATFORM_BSP_WHL_PKG_PY3 = "/".join([device_path, PLATFORM_API2_WHL_FILE_PY3])
+
+    status, output = log_os_system("pip3 show sonic-platform > /dev/null 2>&1", 0)
+    if status:
+        if os.path.exists(SONIC_PLATFORM_BSP_WHL_PKG_PY3):
+            status, output = log_os_system("pip3 install " + SONIC_PLATFORM_BSP_WHL_PKG_PY3, 1)
+            if status:
+                print("Error: Failed to install {}".format(PLATFORM_API2_WHL_FILE_PY3))
+                return status
+            else:
+                print("Successfully installed {} package".format(PLATFORM_API2_WHL_FILE_PY3))
+        else:
+            print('{} is not found'.format(SONIC_PLATFORM_BSP_WHL_PKG_PY3))
+    else:
+        print('{} has installed'.format(PLATFORM_API2_WHL_FILE_PY3))
+
+
+def do_sonic_platform_clean():
+    status, output = log_os_system("pip3 show sonic-platform > /dev/null 2>&1", 0)
+    if status:
+        print('{} does not install, not need to uninstall'.format(PLATFORM_API2_WHL_FILE_PY3))
+    else:
+        status, output = log_os_system("pip3 uninstall sonic-platform -y", 0)
+        if status:
+            print('Error: Failed to uninstall {}'.format(PLATFORM_API2_WHL_FILE_PY3))
+        else:
+            print('{} is uninstalled'.format(PLATFORM_API2_WHL_FILE_PY3))
+
+
 def do_install():
     print("Checking system...")
     if not driver_check():
@@ -312,7 +402,9 @@ def do_install():
             return status
     else:
         print(PROJECT_NAME.upper() + " I2C devices already registered.")
+    _export_presence_gpios()
     _cache_eeprom()
+    do_sonic_platform_install()
     print("Platform init complete.")
 
 
@@ -332,6 +424,7 @@ def do_uninstall():
             return status
     else:
         print(PROJECT_NAME.upper() + " has no drivers to unload.")
+    do_sonic_platform_clean()
 
 
 # ── PCA9535 presence helpers ──────────────────────────────────────────────────

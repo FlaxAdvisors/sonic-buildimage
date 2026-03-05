@@ -5,13 +5,14 @@ sonic_platform/sfp.py — QSFP28 implementation for Accton Wedge 100S-32X.
 All 32 ports are QSFP28 (100G).  Hardware access:
 
 Presence:
-  PCA9535 GPIO expanders on host I2C:
-    i2c-36/0x22: ports 0-15  (mux 0x74 ch2)
-    i2c-37/0x23: ports 16-31 (mux 0x74 ch3)
-  Each PCA9535 has two 8-bit input registers (offset 0 and 1).
-  The GPIO bit order is wired in interleaved even/odd order; apply
-  bit_swap() per ONL sfpi.c onlp_sfpi_reg_val_to_port_sequence().
-  Bit value 0 = module present (active low).
+  PCA9535 GPIO expanders registered as kernel gpiochips:
+    i2c-36/0x22 (gpiochip label "36-0022"): ports 0-15  (mux 0x74 ch2)
+    i2c-37/0x23 (gpiochip label "37-0023"): ports 16-31 (mux 0x74 ch3)
+  Read via GPIO sysfs (/sys/class/gpio/gpioN/value) — the kernel
+  gpio-pca953x driver handles I2C locking, eliminating bus contention
+  from the old i2cget -f -y approach.
+  GPIO wiring is interleaved even/odd (XOR-1 corrects port→pin mapping).
+  Sysfs value 0 = module present (active low).
 
 EEPROM:
   Each QSFP28 EEPROM is at I2C addr 0x50 on its own bus (see _SFP_BUS_MAP).
@@ -33,8 +34,6 @@ Hardware notes (hare-lorax, 2026-02-25):
 """
 
 import os
-import subprocess
-import time
 
 try:
     from sonic_platform_base.sonic_xcvr.sfp_optoe_base import SfpOptoeBase
@@ -56,12 +55,82 @@ _SFP_BUS_MAP = [
 ]
 
 # ---------------------------------------------------------------------------
-# PCA9535 presence registers
+# PCA9535 GPIO presence — kernel sysfs interface
 # ---------------------------------------------------------------------------
 
-# (bus, i2c_addr) indexed by group:  group 0 = ports 0-15, group 1 = ports 16-31
-_PRESENCE_BUS  = [36, 37]
-_PRESENCE_ADDR = [0x22, 0x23]
+# PCA9535 I2C labels used by the kernel gpio-pca953x driver.
+# These match the "{bus}-{addr:04x}" format in /sys/class/gpio/gpiochip*/label.
+_GPIO_LABELS = ['36-0022', '37-0023']   # group 0 (ports 0-15), group 1 (ports 16-31)
+
+_GPIO_SYSFS = '/sys/class/gpio'
+
+# Populated lazily: port -> sysfs value path
+_gpio_value_paths = {}  # {port: '/sys/class/gpio/gpioN/value'}
+_gpio_bases = None       # [base0, base1] discovered from gpiochip labels
+
+
+def _discover_gpio_bases():
+    """Find GPIO chip bases from PCA9535 kernel driver labels."""
+    global _gpio_bases
+    if _gpio_bases is not None:
+        return _gpio_bases
+    bases = [None, None]
+    try:
+        for entry in os.listdir(_GPIO_SYSFS):
+            if not entry.startswith('gpiochip'):
+                continue
+            label_path = os.path.join(_GPIO_SYSFS, entry, 'label')
+            try:
+                with open(label_path) as f:
+                    label = f.read().strip()
+            except OSError:
+                continue
+            for idx, expected in enumerate(_GPIO_LABELS):
+                if label == expected:
+                    base_path = os.path.join(_GPIO_SYSFS, entry, 'base')
+                    with open(base_path) as f:
+                        bases[idx] = int(f.read().strip())
+    except OSError:
+        pass
+    _gpio_bases = bases
+    return bases
+
+
+def _port_gpio_number(port):
+    """
+    Return the Linux GPIO number for a port's PRESENT# pin.
+
+    PCA9535 GPIO lines are wired in interleaved even/odd order (per ONL
+    sfpi.c onlp_sfpi_reg_val_to_port_sequence).  The XOR-1 on the
+    intra-chip offset corrects this: port 0→GPIO offset 1, port 1→0,
+    port 2→3, port 3→2, etc.
+    """
+    bases = _discover_gpio_bases()
+    group = port // 16
+    base = bases[group]
+    if base is None:
+        return None
+    return base + ((port % 16) ^ 1)
+
+
+def _get_presence_path(port):
+    """Return the sysfs value path for a port, exporting the GPIO if needed."""
+    path = _gpio_value_paths.get(port)
+    if path is not None:
+        return path
+    gpio = _port_gpio_number(port)
+    if gpio is None:
+        return None
+    value_path = '{}/gpio{}/value'.format(_GPIO_SYSFS, gpio)
+    if not os.path.exists(value_path):
+        try:
+            with open('{}/export'.format(_GPIO_SYSFS), 'w') as f:
+                f.write(str(gpio))
+        except OSError:
+            return None
+    _gpio_value_paths[port] = value_path
+    return value_path
+
 
 # ---------------------------------------------------------------------------
 # Sysfs paths for EEPROM device instantiation
@@ -69,49 +138,6 @@ _PRESENCE_ADDR = [0x22, 0x23]
 
 _EEPROM_PATH = '/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom'
 _NEW_DEVICE  = '/sys/bus/i2c/devices/i2c-{}/new_device'
-
-# ---------------------------------------------------------------------------
-# Presence cache — shared across all Sfp instances.
-# Reads 4 PCA9535 bytes per cache refresh instead of 32 individual i2cgets.
-# Keys: (bus, addr, offset); values: (timestamp, raw_byte)
-# ---------------------------------------------------------------------------
-
-_CACHE_TTL = 1.0  # seconds; xcvrd polls every few seconds
-_presence_cache = {}   # {(bus, addr, offset): (ts, raw_byte)}
-
-
-def _read_presence_byte(bus, addr, offset):
-    """Read one byte from a PCA9535 with a short-lived cache."""
-    key = (bus, addr, offset)
-    now = time.monotonic()
-    cached = _presence_cache.get(key)
-    if cached and now - cached[0] < _CACHE_TTL:
-        return cached[1]
-    try:
-        cmd = 'i2cget -f -y {} 0x{:02x} 0x{:02x}'.format(bus, addr, offset)
-        raw = int(subprocess.check_output(
-            cmd, shell=True, stderr=subprocess.DEVNULL).decode().strip(), 0)
-        _presence_cache[key] = (now, raw)
-        return raw
-    except Exception:
-        return None
-
-
-def _bit_swap(value):
-    """
-    Swap even/odd bit pairs per ONL sfpi.c onlp_sfpi_reg_val_to_port_sequence().
-
-    PCA9535 GPIO lines are wired in interleaved order relative to the
-    front-panel QSFP port sequence.  This corrects the bit ordering so
-    that bit N corresponds to the Nth port within the group.
-    """
-    result = 0
-    for i in range(8):
-        if i % 2 == 1:
-            result |= (value & (1 << i)) >> 1
-        else:
-            result |= (value & (1 << i)) << 1
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -165,21 +191,19 @@ class Sfp(SfpOptoeBase):
         """
         True when a QSFP28 module is physically inserted in this port.
 
-        Reads the PCA9535 GPIO expander for the port's group and applies
-        the even/odd bit-swap that corrects the hardware GPIO wiring order.
-        The PCA9535 PRESENT# pin is active-low (0 = present).
+        Reads the PCA9535 PRESENT# GPIO via kernel sysfs.  The kernel
+        gpio-pca953x driver handles I2C locking properly, eliminating
+        the bus contention caused by the old i2cget -f -y approach.
+        Active-low: sysfs value 0 = module present.
         """
-        port   = self._port
-        group  = 0 if port < 16 else 1
-        bus    = _PRESENCE_BUS[group]
-        addr   = _PRESENCE_ADDR[group]
-        # sfpi.c: ports 0-7 and 16-23 use offset 0; ports 8-15 and 24-31 use offset 1
-        offset = 0 if (port < 8 or 16 <= port <= 23) else 1
-        raw = _read_presence_byte(bus, addr, offset)
-        if raw is None:
+        path = _get_presence_path(self._port)
+        if path is None:
             return False
-        swapped = _bit_swap(raw)
-        return not bool(swapped & (1 << (port % 8)))
+        try:
+            with open(path) as f:
+                return f.read().strip() == '0'
+        except OSError:
+            return False
 
     def get_status(self):
         return self.get_presence()

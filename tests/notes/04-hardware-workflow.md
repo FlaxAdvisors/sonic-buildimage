@@ -10,42 +10,6 @@
 
 ---
 
-## BMC SSH — After Every Reboot
-
-The BMC clears `~/.ssh/authorized_keys` on every reboot. After a BMC reboot:
-
-- `ping 192.168.88.13` → succeeds (BMC is up)
-- `ssh root@192.168.88.13` → "Connection refused" or "Permission denied"
-
-### Detection
-
-```bash
-ping -c1 -W2 192.168.88.13 && ssh -o ConnectTimeout=5 -o BatchMode=yes root@192.168.88.13 echo ok
-```
-
-If ping succeeds and SSH fails → BMC has rebooted.
-
-### Fix: Re-install your SSH key
-
-```bash
-ssh-copy-id root@192.168.88.13
-# Password: 0penBmc
-```
-
-Verify:
-
-```bash
-ssh root@192.168.88.13 echo "key works"
-```
-
-### CLAUDE.md Integration
-
-The project CLAUDE.md instructs Claude to detect this condition and prompt you before
-attempting any BMC SSH operations. You should not need to diagnose it manually during
-a Claude-assisted session — Claude will stop and tell you.
-
----
-
 ## BMC TTY Fallback
 
 When SSH to the BMC is down and you cannot run `ssh-copy-id` (e.g. no password auth
@@ -99,19 +63,6 @@ pytest stage_05_fan/ -v
 pytest stage_03_i2c_bmc/ -v -s
 ```
 
-### Test Stage Map
-
-| Stage | Directory | Tests |
-|---|---|---|
-| 01 | `stage_01_eeprom/` | System EEPROM TLV fields |
-| 02 | `stage_02_system/` | Platform init, device registration |
-| 03 | `stage_03_i2c_bmc/` | I2C bus topology, BMC TTY |
-| 04 | `stage_04_thermal/` | Thermal sensors (CPU coretemp + 7x TMP75) |
-| 05 | `stage_05_fan/` | Fan trays (5x, RPM and presence) |
-| 06 | `stage_06_psu/` | PSU presence (CPLD) + telemetry (BMC PMBus) |
-| 07 | `stage_07_qsfp/` | QSFP28 presence, EEPROM, port mapping |
-| 08 | `stage_08_led/` | System LED state via CPLD |
-
 ---
 
 ## Safe pmon Restart
@@ -135,7 +86,7 @@ docker exec pmon supervisorctl status
 docker rm -f pmon   # ← hangs I2C bus if xcvrd was active
 ```
 
-Recovery after I2C bus hang: OpenBMC `wedge_power.sh reset` (hard power cycle).
+Recovery after I2C bus hang: OpenBMC `wedge_power.sh reset -s` (hard power cycle).
 
 ---
 
@@ -178,8 +129,8 @@ i2cget -f -y 1 0x32 0x10    # CPLD PSU status
 i2cset -f -y 1 0x32 0x3e 0x02   # CPLD SYS1 LED = green
 
 # Register system EEPROM (if not auto-registered)
-echo 24c02 0x51 > /sys/bus/i2c/devices/i2c-40/new_device
-hexdump -C /sys/bus/i2c/devices/40-0051/eeprom
+echo 24c02 0x50 > /sys/bus/i2c/devices/i2c-40/new_device
+hexdump -C /sys/bus/i2c/devices/40-0050/eeprom
 ```
 
 ---

@@ -37,22 +37,43 @@ class SSHClient:
         self.connect_timeout = int(sect.get("connect_timeout", "30"))
         self._client = None
 
-    def connect(self):
-        self._client = paramiko.SSHClient()
-        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        kwargs = dict(
-            hostname=self.host,
-            port=self.port,
-            username=self.username,
-            timeout=self.connect_timeout,
-            allow_agent=False,
-            look_for_keys=False,
-        )
-        if self.key_file:
-            kwargs["key_filename"] = os.path.expanduser(self.key_file)
-        elif self.password:
-            kwargs["password"] = self.password
-        self._client.connect(**kwargs)
+    def connect(self, retries=5, retry_delay=10):
+        """Connect to the target, retrying on transient timeout failures.
+
+        The Wedge 100S management SSH can be briefly unresponsive (~15-30s)
+        due to BCM ASIC interrupt handling.  Retry up to `retries` times with
+        `retry_delay` seconds between attempts.
+        """
+        import time
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                self._client = paramiko.SSHClient()
+                self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                kwargs = dict(
+                    hostname=self.host,
+                    port=self.port,
+                    username=self.username,
+                    timeout=self.connect_timeout,
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+                if self.key_file:
+                    kwargs["key_filename"] = os.path.expanduser(self.key_file)
+                elif self.password:
+                    kwargs["password"] = self.password
+                self._client.connect(**kwargs)
+                return  # Success
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+                if attempt < retries:
+                    time.sleep(retry_delay)
+        raise last_exc
 
     def run(self, cmd, timeout=60):
         """Run a shell command on the target.
@@ -62,10 +83,31 @@ class SSHClient:
         """
         if self._client is None:
             raise RuntimeError("Not connected — call connect() first")
-        stdin, stdout, stderr = self._client.exec_command(cmd, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
+        # Use a generous open_session timeout; command read uses caller's timeout.
+        # Passing timeout=None to exec_command avoids open_session timeouts on
+        # a temporarily-busy sshd, while per-read timeouts are set on the channel.
+        try:
+            stdin, stdout, stderr = self._client.exec_command(cmd, timeout=None)
+            stdout.channel.settimeout(timeout)
+            stderr.channel.settimeout(timeout)
+        except (paramiko.ssh_exception.SSHException, EOFError, AttributeError):
+            # Transport dropped or channel timed out — reconnect and retry once
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+            self.connect()
+            stdin, stdout, stderr = self._client.exec_command(cmd, timeout=None)
+            stdout.channel.settimeout(timeout)
+            stderr.channel.settimeout(timeout)
+        try:
+            stdin.close()
+            exit_code = stdout.channel.recv_exit_status()
+            out = stdout.read().decode("utf-8", errors="replace")
+            err = stderr.read().decode("utf-8", errors="replace")
+        finally:
+            stdout.channel.close()
         return out, err, exit_code
 
     def run_python(self, code, timeout=60):

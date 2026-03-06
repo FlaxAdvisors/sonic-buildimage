@@ -10,10 +10,10 @@ Phase 14b — DPB enablement (platform.json & hwsku.json):
   correct structure and lane mappings, and that `show interfaces breakout`
   exposes all breakout modes.
 
-  NOTE: Live breakout (`config interface breakout`) is NOT tested because the
-  Broadcom SAI on this Tomahawk does not support dynamic port creation
-  (orchagent SIGABRT on create_port).  Breakout requires `config reload`.
-  See tests/notes/phase-14b-dpb.md for details.
+  NOTE: Live breakout (`config interface breakout`) is NOT tested automatically
+  but works manually with the flex BCM config.  Use:
+    sudo config interface breakout <iface> '4x25G[10G]' -y -f -l
+  See tests/notes/dpb-flex-bcm.md for details.
 
 Hardware context:
   Ethernet0:  Port 1, lanes 117-120, breakout cable, no peer (safe for speed test)
@@ -201,12 +201,12 @@ class TestPlatformJson:
     def platform_json(self, ssh):
         """Load and parse platform.json from the switch."""
         out, err, rc = ssh.run(
-            "cat /usr/share/sonic/platform/platform.json", timeout=10
+            "cat /usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/platform.json", timeout=10
         )
         assert rc == 0, (
             f"Cannot read platform.json (rc={rc}): {err}\n"
             "File may not be deployed. Copy to "
-            "/usr/share/sonic/platform/platform.json on the switch."
+            "/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/platform.json on the switch."
         )
         data = json.loads(out)
         return data
@@ -330,13 +330,13 @@ class TestHwskuJson:
     def hwsku_json(self, ssh):
         """Load and parse hwsku.json from the switch."""
         out, err, rc = ssh.run(
-            "cat /usr/share/sonic/platform/Accton-WEDGE100S-32X/hwsku.json",
+            "cat /usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/Accton-WEDGE100S-32X/hwsku.json",
             timeout=10,
         )
         assert rc == 0, (
             f"Cannot read hwsku.json (rc={rc}): {err}\n"
             "File may not be deployed. Copy to "
-            "/usr/share/sonic/platform/Accton-WEDGE100S-32X/hwsku.json"
+            "/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/Accton-WEDGE100S-32X/hwsku.json"
         )
         return json.loads(out)
 
@@ -386,7 +386,7 @@ class TestBreakoutCli:
         assert rc == 0, (
             f"show interfaces breakout failed (rc={rc}): {err}\n"
             "Ensure platform.json is deployed to "
-            "/usr/share/sonic/platform/platform.json"
+            "/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/platform.json"
         )
         data = json.loads(out)
         assert len(data) == NUM_PORTS, (

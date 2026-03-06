@@ -4,6 +4,18 @@ depmod -a
 systemctl enable wedge100s-platform-init.service
 systemctl start wedge100s-platform-init.service
 
+# Install port_breakout_config_db.json to /etc/sonic/ if not already present.
+# The DPB CLI reads this file from /etc/sonic/ to get default config for new
+# sub-ports created during breakout; it does NOT fall back to the hwsku dir.
+# The /etc/sonic/ overlay is persistent across reboots but not across full
+# image reinstalls, so we install it here on every .deb upgrade.
+HWSKU_DIR="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/Accton-WEDGE100S-32X"
+BREAKOUT_CFG="$HWSKU_DIR/port_breakout_config_db.json"
+if [ -f "$BREAKOUT_CFG" ]; then
+    cp "$BREAKOUT_CFG" /etc/sonic/port_breakout_config_db.json
+    echo "wedge100s postinst: installed port_breakout_config_db.json to /etc/sonic/"
+fi
+
 # Patch pmon.sh to pass ttyACM0 (BMC USB-CDC serial) into the pmon container.
 #
 # Context: pmon.sh is generated at build time from docker_image_ctl.j2.
@@ -41,6 +53,26 @@ with open(PMON_SH, "w") as fh:
 print("wedge100s postinst: patched " + PMON_SH + " — ttyACM* passthrough added")
 PYEOF
 fi
+
+# Regenerate bash completion files for SONiC Click CLIs to Click 8.x format.
+#
+# SONiC ships completion files in /etc/bash_completion.d/ that were generated
+# with Click 7.x (_CONFIG_COMPLETE=complete). Click 8.x changed the env var to
+# _CONFIG_COMPLETE=bash_source; stale files cause tab-completion to fall back
+# to filesystem listing rather than showing breakout modes, show subcommands, etc.
+# We regenerate here so this is fixed on every .deb install without waiting for
+# an upstream sonic-utilities fix.
+for _cli in config show sonic-clear acl-loader crm pfcwd pfc counterpoll; do
+    if [ -f "/etc/bash_completion.d/${_cli}" ] && command -v "${_cli}" >/dev/null 2>&1; then
+        _var="_$(echo "${_cli}" | tr 'a-z-' 'A-Z_')_COMPLETE"
+        _out=$(env "${_var}=bash_source" "${_cli}" 2>/dev/null)
+        if echo "${_out}" | grep -q '_completion()'; then
+            printf '%s\n' "${_out}" > "/etc/bash_completion.d/${_cli}"
+            echo "wedge100s postinst: refreshed bash completion for ${_cli}"
+        fi
+    fi
+done
+unset _cli _var _out
 
 # If pmon container already exists but is stopped, remove it so the next
 # supervisor start recreates it with the updated flags.

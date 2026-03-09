@@ -13,6 +13,12 @@ Subsystem population schedule:
 import time
 
 try:
+    import smbus2
+    _SMBUS2_AVAILABLE = True
+except ImportError:
+    _SMBUS2_AVAILABLE = False
+
+try:
     from sonic_platform_base.chassis_base import ChassisBase
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
@@ -23,6 +29,16 @@ from sonic_platform.psu import Psu, NUM_PSUS
 from sonic_platform.sfp import Sfp, NUM_SFPS
 from sonic_platform.eeprom import SysEeprom
 from sonic_platform.watchdog import Watchdog
+
+# PCA9535 presence registers (bus, i2c_addr, register).
+# Register 0 = INPUT0 (GPIO lines 0-7), register 1 = INPUT1 (GPIO lines 8-15).
+# Lines are wired with XOR-1 interleave: line (r*8+b) ^ 1 = port within chip group.
+_PRESENCE_REGS = [
+    (36, 0x22, 0),   # chip 36-0022 INPUT0 → ports {1,0,3,2,5,4,7,6}
+    (36, 0x22, 1),   # chip 36-0022 INPUT1 → ports {9,8,11,10,13,12,15,14}
+    (37, 0x23, 0),   # chip 37-0023 INPUT0 → ports {17,16,19,18,21,20,23,22}
+    (37, 0x23, 1),   # chip 37-0023 INPUT1 → ports {25,24,27,26,29,28,31,30}
+]
 
 
 class Chassis(ChassisBase):
@@ -49,6 +65,14 @@ class Chassis(ChassisBase):
         self._watchdog = Watchdog()
         # Previous presence state for get_change_event() polling
         self._prev_presence = {}
+        # SMBus handles for bulk presence reads — opened once, kept open
+        self._presence_buses = {}
+        if _SMBUS2_AVAILABLE:
+            for bus_num in (36, 37):
+                try:
+                    self._presence_buses[bus_num] = smbus2.SMBus(bus_num)
+                except OSError:
+                    pass
 
     def get_name(self):
         return "Wedge 100S-32X"
@@ -56,15 +80,52 @@ class Chassis(ChassisBase):
     def get_system_eeprom_info(self):
         return self._eeprom.get_eeprom()
 
+    def _bulk_read_presence(self):
+        """
+        Read all 32 port presence bits in 4 I2C reads via smbus2.
+
+        PCA9535 INPUT registers are active-low: 0 = module present.
+        The GPIO lines use XOR-1 interleave wiring; bit b in register r
+        on chip group g maps to port = g*16 + (r*8 + b) ^ 1.
+
+        Returns dict {port (0-based): bool present} or None on I2C error.
+        Falls back to per-port GPIO sysfs if smbus2 is unavailable.
+        """
+        if not self._presence_buses:
+            # smbus2 unavailable or buses not opened — fall back to sysfs
+            result = {}
+            for idx in range(1, NUM_SFPS + 1):
+                result[idx - 1] = self._sfp_list[idx].get_presence()
+            return result
+
+        result = {}
+        for reg_idx, (bus, addr, reg) in enumerate(_PRESENCE_REGS):
+            handle = self._presence_buses.get(bus)
+            if handle is None:
+                return None
+            try:
+                byte = handle.read_byte_data(addr, reg, force=True)
+            except OSError:
+                return None
+            group = reg_idx // 2    # 0 = chip 36-0022, 1 = chip 37-0023
+            reg_num = reg_idx % 2   # 0 = INPUT0, 1 = INPUT1
+            for bit in range(8):
+                line = reg_num * 8 + bit
+                port = group * 16 + (line ^ 1)
+                result[port] = not bool((byte >> bit) & 1)  # active-low
+        return result
+
     def get_change_event(self, timeout=0):
         """
-        Poll all QSFP ports for presence changes.
+        Poll all QSFP ports for presence changes using bulk I2C reads.
 
-        This platform has no hardware interrupt for SFP insertion/removal;
-        the PCA9535 GPIO expanders must be polled via GPIO sysfs.
+        Replaces the per-port GPIO sysfs loop (330 reads/sec) with 4
+        smbus2 reads of the PCA9535 INPUT registers — matching the ONL
+        onlp_sfpi_presence_bitmap_get() pattern exactly.
 
-        xcvrd calls this with timeout in milliseconds.  We poll until
-        either a change is detected or the timeout expires, then return.
+        xcvrd calls this with timeout in milliseconds.  We sleep 1 second
+        between polls (down from 0.1s), which is appropriate since module
+        insertion/removal is a human-scale event.
 
         Returns:
             (True, {'sfp': {port_idx: '1'|'0', ...}})
@@ -73,14 +134,15 @@ class Chassis(ChassisBase):
         expiry = time.monotonic() + (timeout / 1000.0 if timeout else 0)
 
         while True:
+            presence = self._bulk_read_presence()
             events = {}
-            for idx in range(1, NUM_SFPS + 1):   # 1-based, matching _sfp_list
-                sfp = self._sfp_list[idx]
-                present = sfp.get_presence()
-                prev = self._prev_presence.get(idx)
-                if prev != present:
-                    events[str(idx)] = '1' if present else '0'
-                    self._prev_presence[idx] = present
+            if presence is not None:
+                for port, present in presence.items():
+                    idx = port + 1              # convert to 1-based xcvrd index
+                    prev = self._prev_presence.get(idx)
+                    if prev != present:
+                        events[str(idx)] = '1' if present else '0'
+                        self._prev_presence[idx] = present
 
             if events:
                 return True, {'sfp': events}
@@ -88,4 +150,4 @@ class Chassis(ChassisBase):
             if not timeout or time.monotonic() >= expiry:
                 return True, {'sfp': {}}
 
-            time.sleep(0.1)
+            time.sleep(1.0)

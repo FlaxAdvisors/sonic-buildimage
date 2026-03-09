@@ -65,7 +65,7 @@ fi
 for _cli in config show sonic-clear acl-loader crm pfcwd pfc counterpoll; do
     if [ -f "/etc/bash_completion.d/${_cli}" ] && command -v "${_cli}" >/dev/null 2>&1; then
         _var="_$(echo "${_cli}" | tr 'a-z-' 'A-Z_')_COMPLETE"
-        _out=$(env "${_var}=bash_source" "${_cli}" 2>/dev/null)
+        _out=$(env "${_var}=bash_source" "${_cli}" 2>/dev/null || true)
         if echo "${_out}" | grep -q '_completion()'; then
             printf '%s\n' "${_out}" > "/etc/bash_completion.d/${_cli}"
             echo "wedge100s postinst: refreshed bash completion for ${_cli}"
@@ -87,4 +87,29 @@ if command -v docker >/dev/null 2>&1; then
         echo "wedge100s postinst: NOTE: pmon container is running with old flags." \
              "Reboot (or stop pmon then 'docker rm pmon') to pick up ttyACM device mapping."
     fi
+
+    # Update sonic_platform wheel inside the running pmon container.
+    # The wheel is bind-mounted from the host but docker_init.sh skips reinstall
+    # if sonic_platform is already importable (it is, baked into the image).
+    # Force-reinstall here so the container picks up chassis.py changes immediately
+    # without waiting for a full image rebuild.
+    if [ "$PMON_STATUS" = "running" ]; then
+        PLATFORM_WHEEL="/usr/share/sonic/platform/sonic_platform-1.0-py3-none-any.whl"
+        if docker exec pmon test -f "$PLATFORM_WHEEL" 2>/dev/null; then
+            docker exec pmon pip3 install --quiet --force-reinstall "$PLATFORM_WHEEL" 2>/dev/null || true
+            echo "wedge100s postinst: reinstalled sonic_platform wheel in pmon container"
+        fi
+        # Patch psud poll interval: 3s → 30s (PSU insertion is a human-scale event).
+        # This reduces I2C traffic through the CP2112 USB bridge, improving SSH responsiveness.
+        if docker exec pmon grep -q 'PSU_INFO_UPDATE_PERIOD_SECS = 3' /usr/local/bin/psud 2>/dev/null; then
+            docker exec pmon sed -i 's/PSU_INFO_UPDATE_PERIOD_SECS = 3/PSU_INFO_UPDATE_PERIOD_SECS = 30/' \
+                /usr/local/bin/psud 2>/dev/null || true
+            echo "wedge100s postinst: patched psud poll interval 3s → 30s in pmon container"
+        fi
+        # Restart xcvrd and psud to pick up the updated code.
+        docker exec pmon supervisorctl restart xcvrd psud 2>/dev/null || true
+        echo "wedge100s postinst: restarted xcvrd and psud"
+    fi
 fi
+
+exit 0

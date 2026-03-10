@@ -250,10 +250,28 @@ BCM IRQ 16 fires 4,000-4,400/sec on CPU1 and/or CPU3
 Note: Persistent SSH sessions (like the monitoring script) are **unaffected** — only
 NEW TCP connections whose SYN handshake falls within the 3–5 s spike window fail.
 
-**xcvrd 60-second cycle confirmed:**
-- Cycle start: ~03:55:12 (Phase 2 spike at 03:55:42 = t+30s)
-- Next cycle EEPROM reads (Phase 1): 03:56:11 (exactly 59s after previous t=0)
-- Next cycle Phase 2 spike: 03:56:42 (31s after EEPROM reads)
+**xcvrd 60-second cycle confirmed (3 independent observations):**
+
+From original awk monitor (2 consecutive cycles):
+```
+03:16:11  i18=391  i16=145  HI2=1   ← cycle 1, phase 1 (EEPROM reads)
+03:16:41  i18=32   i16=1694 HI2=0   ← cycle 1, phase 2 begins (+30s)
+03:16:45  i18=32   i16=4180 HI2=0   ← cycle 1 peak; HI2=0
+---
+03:17:11  i18=327  i16=150  HI2=1   ← cycle 2, phase 1 (+60s from cycle 1)
+03:17:41  i18=36   i16=2208 HI2=0   ← cycle 2, phase 2 (+30s)
+03:17:45  i18=36   i16=4029 HI2=0   ← cycle 2 peak; HI2=0
+```
+
+From Python monitor (next boot, 2 more cycles):
+```
+03:55:42  i18=26   i16=3950 HI2=26  ← cycle N, phase 2 spike
+03:56:11  i18=337  i16=147  HI2=28  ← cycle N+1, phase 1 (59s later)
+03:56:42  i18=39   i16=4243 HI2=39  ← cycle N+1, phase 2 (+31s)
+```
+
+Pattern is **deterministic**: every 60s, phase 1 EEPROM reads, then phase 2 BCM spike 30s later.
+HI2 never exceeds 39 during any spike — confirms ISR CPU time is the mechanism, not HI softirq.
 
 ### Counterpoll Intervals (before and after mitigation)
 

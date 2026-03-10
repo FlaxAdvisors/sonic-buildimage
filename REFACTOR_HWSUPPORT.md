@@ -255,15 +255,19 @@ xcvrd DOM poll cycle (60 s period)
   Phase 2 (~30 s later): DOM data update → writes 9 entries to Redis
     → orchagent receives 5+ simultaneous notifications (confirmed: "message repeated 5 times")
       → orchagent makes 5+ rapid SAI calls to syncd
-        → BCM SDK activity spikes to 4,180 IRQ 16/sec (40× steady-state baseline of ~104/sec)
-          → HI softirq saturation → TCP SYN-ACK drops → SSH gap of ~7–33 s
+        → BCM SDK activity spikes to 4,200-4,400 IRQ 16/sec (30× steady-state baseline)
+          → BCM ISR (~100µs/call) consumes ~44% of one CPU in non-preemptable irq context
+            → NET_TX softirq starved → SYN-ACK not sent → new SSH connections fail
 ```
 
 **Hardware evidence (2026-03-10):**
 - syslog: `orchagent [message repeated 5 times]` at 03:16:26, `orchagent` at 03:16:42
-- IRQ 16 peaks at **4,180/sec** at 03:16:41–45 (same window as orchagent log)
+- IRQ 16 peaks at **4,200-4,419/sec** at 03:16:41–45 and 03:55:42-46, 03:56:42 (repeated)
 - Journal has zero entries from 03:16:20–03:17:01 during IRQ storm (system too busy to log)
-- IRQ 18 spike (xcvrd EEPROM) at 03:16:11–13 → 30 s delay → IRQ 16 spike at 03:16:41–45
+- IRQ 18 spike (xcvrd EEPROM) at 03:16:11–13 → ~31 s delay → IRQ 16 spike at 03:16:41–45
+- xcvrd 60 s cycle confirmed: EEPROM at 03:56:11, IRQ 16 spike at 03:56:42 (31 s later)
+- HI softirq on CPU2 stays at **26-32/sec during spikes** — mechanism is ISR time, NOT HI backlog
+- Persistent SSH sessions survive the spike; only NEW connection SYN handshakes fail
 - Ports with transceivers: Ethernet4/20/36/52/68/84/108/112/116 (9 ports)
 
 **Mitigations applied on hardware (persistent):**

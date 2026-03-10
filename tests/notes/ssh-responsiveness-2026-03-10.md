@@ -217,6 +217,44 @@ an internal timer step.
 9 transceivers present: Ethernet4, 20, 36, 52, 68, 84, 108, 112, 116
 (ports 1, 5, 9, 13, 17, 21, 27, 28, 29 per port map).
 
+### Mechanism Correction (revised after clean Python IRQ monitor run)
+
+Earlier analysis assumed the SSH gap was caused by **HI softirq saturation** on CPU2.
+Python-based monitoring (no awk quoting issues) shows this is WRONG:
+
+```
+time       i16/s  i18/s  HI2/s
+03:55:42   3950     26     26   ← IRQ 16 spike to 3,950/sec; HI2 stays at 26 (NOT saturating)
+03:55:43   1207     32     26
+03:55:45   4419     32     26   ← peak 4,419/sec; HI2=32 (barely changed from 26 baseline)
+03:55:46   1956     14     14   ← subsiding
+...60 seconds later (next xcvrd cycle)...
+03:56:11    147    337     28   ← Phase 1: IRQ 18 spikes (EEPROM reads for 9 ports)
+03:56:13    151    430    169
+03:56:16    146    158    158
+...31 seconds later (phase 2)...
+03:56:42   4243     39     39   ← Phase 2: IRQ 16 spikes again (script ends at 90 iterations)
+```
+
+**Correct mechanism: raw ISR CPU time, not HI softirq backlog:**
+```
+BCM IRQ 16 fires 4,000-4,400/sec on CPU1 and/or CPU3
+  → Each BCM ISR disables-processes-reenables (non-preemptable interrupt context)
+    → If each ISR takes ~100 µs: 4,400/sec = ~44% of one CPU in IRQ context
+      → NET_TX softirq cannot run while CPU is in IRQ handler
+        → TCP SYN-ACK packets accumulate in tx ring but are not sent
+          → NEW SSH connection SYN times out (client retries with exponential backoff)
+            → With tcp_syn_retries=6: 63 s gap; with tcp_syn_retries=2: ≤7 s gap
+```
+
+Note: Persistent SSH sessions (like the monitoring script) are **unaffected** — only
+NEW TCP connections whose SYN handshake falls within the 3–5 s spike window fail.
+
+**xcvrd 60-second cycle confirmed:**
+- Cycle start: ~03:55:12 (Phase 2 spike at 03:55:42 = t+30s)
+- Next cycle EEPROM reads (Phase 1): 03:56:11 (exactly 59s after previous t=0)
+- Next cycle Phase 2 spike: 03:56:42 (31s after EEPROM reads)
+
 ### Counterpoll Intervals (before and after mitigation)
 
 | Counter | Before | After |
@@ -228,10 +266,11 @@ an internal timer step.
 Commands: `counterpoll port interval 5000; counterpoll rif interval 5000`
 Confirmed in CONFIG_DB (persistent): `FLEX_COUNTER_TABLE|PORT` POLL_INTERVAL=5000.
 
-Verified that this does NOT reduce the baseline IRQ 16 rate:
-- After change: IRQ 16 = **120/sec** (vs. 104/sec before)
-- Conclusion: The ~100-120/sec baseline is the BCM SDK internal timer, NOT driven by
-  counterpoll frequency. The SPIKES (to 4,180/sec) are the problem, not the baseline.
+Verified that this does NOT reduce the baseline IRQ 16 rate OR the spike magnitude:
+- After change: IRQ 16 baseline = **145-165/sec** (vs. 104/sec before — slightly higher)
+- Spike: still reaches **4,243-4,419/sec** (same as pre-change measurement of 4,180/sec)
+- Conclusion: Spikes are driven entirely by xcvrd→orchagent→SAI→BCM event chain;
+  counterpoll frequency has no effect on them.
 
 ### tcp_syn_retries Mitigation (applied 2026-03-10)
 

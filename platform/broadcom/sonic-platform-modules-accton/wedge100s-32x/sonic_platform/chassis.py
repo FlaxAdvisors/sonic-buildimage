@@ -13,12 +13,6 @@ Subsystem population schedule:
 import time
 
 try:
-    import smbus2
-    _SMBUS2_AVAILABLE = True
-except ImportError:
-    _SMBUS2_AVAILABLE = False
-
-try:
     from sonic_platform_base.chassis_base import ChassisBase
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
@@ -29,6 +23,7 @@ from sonic_platform.psu import Psu, NUM_PSUS
 from sonic_platform.sfp import Sfp, NUM_SFPS
 from sonic_platform.eeprom import SysEeprom
 from sonic_platform.watchdog import Watchdog
+from sonic_platform import platform_smbus
 
 # PCA9535 presence registers (bus, i2c_addr, register).
 # Register 0 = INPUT0 (GPIO lines 0-7), register 1 = INPUT1 (GPIO lines 8-15).
@@ -65,14 +60,9 @@ class Chassis(ChassisBase):
         self._watchdog = Watchdog()
         # Previous presence state for get_change_event() polling
         self._prev_presence = {}
-        # SMBus handles for bulk presence reads — opened once, kept open
-        self._presence_buses = {}
-        if _SMBUS2_AVAILABLE:
-            for bus_num in (36, 37):
-                try:
-                    self._presence_buses[bus_num] = smbus2.SMBus(bus_num)
-                except OSError:
-                    pass
+        # Pre-warm the SMBus pool for presence buses so first poll is fast.
+        platform_smbus.read_byte(36, 0x22, 0)
+        platform_smbus.read_byte(37, 0x23, 0)
 
     def get_name(self):
         return "Wedge 100S-32X"
@@ -82,7 +72,7 @@ class Chassis(ChassisBase):
 
     def _bulk_read_presence(self):
         """
-        Read all 32 port presence bits in 4 I2C reads via smbus2.
+        Read all 32 port presence bits in 4 I2C reads via platform_smbus.
 
         PCA9535 INPUT registers are active-low: 0 = module present.
         The GPIO lines use XOR-1 interleave wiring; bit b in register r
@@ -91,22 +81,15 @@ class Chassis(ChassisBase):
         Returns dict {port (0-based): bool present} or None on I2C error.
         Falls back to per-port GPIO sysfs if smbus2 is unavailable.
         """
-        if not self._presence_buses:
-            # smbus2 unavailable or buses not opened — fall back to sysfs
-            result = {}
-            for idx in range(1, NUM_SFPS + 1):
-                result[idx - 1] = self._sfp_list[idx].get_presence()
-            return result
-
         result = {}
         for reg_idx, (bus, addr, reg) in enumerate(_PRESENCE_REGS):
-            handle = self._presence_buses.get(bus)
-            if handle is None:
-                return None
-            try:
-                byte = handle.read_byte_data(addr, reg, force=True)
-            except OSError:
-                return None
+            byte = platform_smbus.read_byte(bus, addr, reg)
+            if byte is None:
+                # smbus2 unavailable — fall back to sysfs for all ports
+                result = {}
+                for idx in range(1, NUM_SFPS + 1):
+                    result[idx - 1] = self._sfp_list[idx].get_presence()
+                return result
             group = reg_idx // 2    # 0 = chip 36-0022, 1 = chip 37-0023
             reg_num = reg_idx % 2   # 0 = INPUT0, 1 = INPUT1
             for bit in range(8):

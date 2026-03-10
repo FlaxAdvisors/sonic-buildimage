@@ -88,3 +88,63 @@ reads per second from xcvrd's get_change_event() calls.
 | `sonic_platform/chassis.py` | Rewrite get_change_event() with _bulk_read_presence() |
 | `src/sonic-platform-daemons/sonic-psud/scripts/psud` | PSU_INFO_UPDATE_PERIOD_SECS 3→30 |
 | `debian/sonic-platform-accton-wedge100s-32x.postinst` | Add wheel reinstall + psud patch |
+
+---
+
+# Phase 3: SMBus Pool + Eliminate subprocess i2cget (2026-03-09)
+
+## Changes
+
+### New file: `sonic_platform/platform_smbus.py`
+
+Module-level SMBus handle pool with threading.Lock():
+- Each bus (/dev/i2c-N) opened once at first use, kept open for process lifetime
+- `read_byte(bus, addr, reg, force=True)` — single entry point for all byte reads
+- `read_word(bus, addr, reg, force=True)` — for 16-bit registers
+- force=True default allows access to kernel-driver-bound devices
+
+### `psu.py`: Replace subprocess i2cget with platform_smbus
+
+`_read_cpld_reg()` now calls `platform_smbus.read_byte(1, 0x32, 0x10)` instead of
+`subprocess.check_output('i2cget -f -y 1 0x32 0x10', shell=True)`.
+Eliminates fork/exec/wait overhead (~5ms per call) for PSU CPLD reads.
+
+### `chassis.py`: Use platform_smbus in _bulk_read_presence
+
+Replaced self._presence_buses dict with platform_smbus.read_byte() calls.
+Pool buses after init: 1 (CPLD), 36, 37 (PCA9535 presence chips).
+
+## Measured results
+
+- IRQ18/sec with pmon stopped: **3/sec** (USB SOF / ehci_hcd baseline)
+- IRQ18/sec with pmon running (phases 1+2+3): **~69/sec**
+- IRQ18/sec before any phase: **~800/sec**
+- Subprocess overhead eliminated for PSU CPLD reads (was ~5ms/call fork+exec)
+
+The 66/sec above baseline is from active monitoring: xcvrd presence polls
+(8 reads/sec), thermalctld BMC ttyACM0 traffic, ledd polling.
+
+---
+
+# Phase 4: GPIO Edge Detection (INVESTIGATED, NOT FEASIBLE)
+
+## Investigation (2026-03-09)
+
+dmesg shows: `pca953x 36-0022: using no AI` and `pca953x 37-0023: using no AI`
+
+No IRQ assigned to either PCA9535:
+- `/proc/interrupts` has no pca953x entry
+- No "interrupts enabled" message in dmesg
+- cp2112_gpio has no interrupt lines wired
+
+**Conclusion**: PCA9535 INT# pins are not wired to any host CPU GPIO on the
+Wedge 100S-32X. Edge-triggered presence detection is not possible.
+The 1-second polling loop in get_change_event() is the minimum achievable
+without hardware interrupt support.
+
+## ONL comparison
+
+ONL ONLP does not use interrupts either — it polls the PCA9535 registers
+on demand from the ONLP server when applications query SFP state. The key
+ONL advantage over our original implementation is bulk reads (4 vs 330/sec),
+which we've already implemented in Phase 1.

@@ -11,7 +11,7 @@ Presence and power-good:
     PSU1 power good: bit 1  (1 = good)
     PSU2 present:    bit 4  (0 = present)
     PSU2 power good: bit 5  (1 = good)
-  Accessed via subprocess i2cget — no BMC TTY needed.
+  Accessed via platform_smbus (smbus2, persistent fd) — no BMC TTY needed.
 
 PMBus telemetry:
   BMC i2c-7; PCA9546 mux at 0x70 selects the PSU channel.
@@ -37,7 +37,6 @@ Hardware notes (hare-lorax, 2026-02-25):
   - PSU1 had no AC power in the lab (pgood bit 1 = 0); PSU2 is live.
 """
 
-import subprocess
 import time
 
 try:
@@ -46,9 +45,9 @@ except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
 try:
-    from sonic_platform import bmc
+    from sonic_platform import bmc, platform_smbus
 except ImportError:
-    from . import bmc
+    from . import bmc, platform_smbus
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +126,12 @@ def _read_cpld_reg():
     """
     Read PSU status byte from host CPLD register 0x10.
     Returns int (0–255) or None on I2C failure.
+
+    Uses platform_smbus (persistent fd, no subprocess overhead) instead
+    of the former subprocess i2cget approach.  force=True bypasses any
+    kernel driver bound to this address on i2c-1.
     """
-    try:
-        cmd = 'i2cget -f -y {} 0x{:02x} 0x{:02x}'.format(
-            _CPLD_BUS, _CPLD_ADDR, _PSU_REG)
-        out = subprocess.check_output(
-            cmd, shell=True, stderr=subprocess.DEVNULL).decode().strip()
-        return int(out, 0)
-    except Exception:
-        return None
+    return platform_smbus.read_byte(_CPLD_BUS, _CPLD_ADDR, _PSU_REG)
 
 
 def _set_bmc_mux(channel):

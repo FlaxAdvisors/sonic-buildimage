@@ -38,8 +38,8 @@
 | **R26** | **CPLD kernel driver (wedge100s_cpld.c)** | **Done** | 2026-03-11 |
 | **R27** | **Pre-register all 32 optoe1 QSFP at boot** | **Done** | pending hardware test |
 | **R28** | **Compiled BMC polling daemon (C)** | **Done** | pending hardware test |
-| **R29** | **Python API → sysfs/daemon files** | **Planned (follows R26+R28)** | — |
-| **R30** | **GRUB kernel args + BCM IRQ affinity** | **Planned** | — |
+| **R29** | **Python API → sysfs/daemon files** | **Done** | 2026-03-11 |
+| **R30** | **GRUB kernel args + BCM IRQ affinity** | **Done** | 2026-03-11 |
 | **R31** | **IPMI/REST investigation** | **Exploratory** | — |
 
 **Pytest:** 82/82 passing across stages 7, 11–15, 17 (as of 2026-03-03).
@@ -318,6 +318,28 @@ ONL uses `nopat intel_iommu=off noapic` for this platform.
    `echo 1 > /proc/irq/16/smp_affinity`
    (leaves CPUs 1+ free for sshd/userspace)
 4. Measure: `ssh` latency before/after with `time ssh admin@192.168.88.12 hostname`
+
+### Phase R30 — GRUB Kernel Args + BCM IRQ Affinity (Done 2026-03-11)
+
+**Root cause**: BCM56960 fires ~150 HW interrupts/sec on IRQ 16 (`linux-kernel-bde`).
+With default SMP affinity (all CPUs), the HI softirq queue saturates one random CPU,
+creating 15-30 s windows where sshd cannot accept new connections.
+
+**Measured**: First cold SSH connect: **65 s** before fix, **0.25 s** after.
+
+**Implementation** (two layers for belt-and-suspenders coverage):
+
+1. `device/accton/x86_64-accton_wedge100s_32x-r0/installer.conf`:
+   Added `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="nopat intel_iommu=off noapic"` — matches
+   ONL platform YAML.  Effective for freshly installed images.
+
+2. `platform/.../utils/accton_wedge100s_util.py` — `_pin_bcm_irq()`:
+   `echo 1 > /proc/irq/16/smp_affinity` pinning IRQ 16 to CPU 0, called from
+   `do_install()` during platform-init service startup.  Covers running systems
+   regardless of kernel args (including upgrades that don't reinstall).
+
+**Verified on hardware 2026-03-11**: `smp_affinity_list` changes 0-3 → 0 on
+`sudo python3 accton_wedge100s_util.py install`.
 
 ### Phase R31 — IPMI / OpenBMC REST Investigation
 **Priority**: Low (exploratory) | **Effort**: Small investigation

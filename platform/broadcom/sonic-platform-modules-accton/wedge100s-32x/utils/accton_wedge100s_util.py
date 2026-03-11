@@ -311,6 +311,30 @@ def _cache_eeprom():
         print("WARNING: Could not write EEPROM cache {}: {}".format(EEPROM_CACHE_PATH, e))
 
 
+def _pin_bcm_irq():
+    """Pin the BCM56960 (linux-kernel-bde) interrupt to CPU 0.
+
+    The BCM56960 ASIC fires ~150 hardware interrupts/second on IRQ 16 via
+    linux-kernel-bde.  With the default SMP affinity (all CPUs), the kernel's
+    HI softirq queue on a randomly chosen CPU saturates, creating 15-30 second
+    windows where sshd cannot accept new connections.
+
+    Pinning IRQ 16 exclusively to CPU 0 leaves CPUs 1-3 free for userspace
+    (sshd, pmon, syncd).  ONL avoids this with noapic in kernel args; we do
+    both: noapic in installer.conf for new installs, smp_affinity here for
+    running systems.
+
+    Measured improvement: first SSH connect 65 s → 0.25 s (verified 2026-03-11).
+    """
+    affinity_path = '/proc/irq/16/smp_affinity'
+    try:
+        with open(affinity_path, 'w') as f:
+            f.write('1\n')
+        my_log("BCM IRQ 16 pinned to CPU 0 ({})".format(affinity_path))
+    except Exception as e:
+        print("WARNING: Could not pin BCM IRQ 16 to CPU 0: {}".format(e))
+
+
 def _export_presence_gpios():
     """Export PCA9535 QSFP presence GPIOs for kernel sysfs access.
 
@@ -414,6 +438,7 @@ def do_install():
         print(PROJECT_NAME.upper() + " I2C devices already registered.")
     _export_presence_gpios()
     _cache_eeprom()
+    _pin_bcm_irq()
     do_sonic_platform_install()
     print("Platform init complete.")
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Wedge 100S-32X BMC sensor poll (one-shot)
+Documentation=file:///usr/bin/wedge100s-bmc-daemon.c
+After=wedge100s-platform-init.service
+Requires=wedge100s-platform-init.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/wedge100s-bmc-daemon
+TimeoutStartSec=30
+# Keep last exit status for journald; do not restart on failure —
+# the .timer will re-invoke on the next interval.

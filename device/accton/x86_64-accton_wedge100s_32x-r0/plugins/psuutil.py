@@ -6,27 +6,19 @@ try:
 except ImportError:
     from sonic_platform_base.psu_base import PsuBase
 
-# CPLD at i2c-1/0x32, PSU status register 0x10 (confirmed on hardware)
-# Bit layout per ONL psui.c:
-#   PSU1 present:   bit 0  (0 = present)
-#   PSU1 pwr good:  bit 1  (1 = good)
-#   PSU2 present:   bit 4  (0 = present)
-#   PSU2 pwr good:  bit 5  (1 = good)
-# NOTE: live register reads 0xe0 with both PSUs installed and running.
-# PSU2 pgood (bit 5 = 1) confirmed good. PSU1 pgood (bit 1 = 0) may indicate
-# polarity difference or reserved bit — verify against known-good hardware state.
-CPLD_BUS  = 1
-CPLD_ADDR = "0x32"
-PSU_REG   = "0x10"
-
-_PRESENT_BIT = [0, 4]   # index 0 = PSU1, index 1 = PSU2
-_PGOOD_BIT   = [1, 5]
+# CPLD sysfs attributes from wedge100s_cpld driver (Phase R26).
+# Driver binds to i2c-1/0x32; attributes:
+#   psu{N}_present — 1 = present (driver inverts active-low bit)
+#   psu{N}_pgood   — 1 = power good
+_CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
 
 
-def _read_psu_reg():
-    cmd = "i2cget -f -y {} {} {}".format(CPLD_BUS, CPLD_ADDR, PSU_REG)
-    result = subprocess.check_output(cmd, shell=True).decode().strip()
-    return int(result, 0)
+def _cpld_read(attr):
+    try:
+        with open('{}/{}'.format(_CPLD_SYSFS, attr)) as f:
+            return int(f.read().strip(), 0)
+    except Exception:
+        return None
 
 
 class PsuUtil(PsuBase):
@@ -38,21 +30,13 @@ class PsuUtil(PsuBase):
 
     def get_psu_presence(self, index):
         # index is 1-based
-        try:
-            val = _read_psu_reg()
-            bit = _PRESENT_BIT[index - 1]
-            return not bool(val & (1 << bit))  # 0 = present
-        except Exception:
-            return False
+        val = _cpld_read('psu{}_present'.format(index))
+        return bool(val) if val is not None else False
 
     def get_psu_status(self, index):
         # Returns True if PSU is present and power-good
-        try:
-            val = _read_psu_reg()
-            present_bit = _PRESENT_BIT[index - 1]
-            pgood_bit   = _PGOOD_BIT[index - 1]
-            present = not bool(val & (1 << present_bit))
-            pgood   = bool(val & (1 << pgood_bit))
-            return present and pgood
-        except Exception:
+        present = _cpld_read('psu{}_present'.format(index))
+        pgood   = _cpld_read('psu{}_pgood'.format(index))
+        if present is None or pgood is None:
             return False
+        return bool(present) and bool(pgood)

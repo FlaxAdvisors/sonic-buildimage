@@ -80,6 +80,7 @@ kos = [
     'modprobe i2c_mux_pca954x force_deselect_on_exit=1',
     'modprobe at24',
     'modprobe optoe',
+    'modprobe wedge100s_cpld',
 ]
 
 # I2C device registration.  Order is critical for bus number stability:
@@ -90,6 +91,8 @@ kos = [
 # that EEPROM sysfs paths exist before pmon/xcvrd start.  This fixes DAC
 # cable EEPROM reads that fail with lazy per-port registration.
 mknod = [
+    # CPLD is directly on i2c-1 (not behind any mux); register first.
+    'echo wedge100s_cpld 0x32 > /sys/bus/i2c/devices/i2c-1/new_device',
     'echo pca9548 0x70 > /sys/bus/i2c/devices/i2c-1/new_device',
     'echo pca9548 0x71 > /sys/bus/i2c/devices/i2c-1/new_device',
     'echo pca9548 0x72 > /sys/bus/i2c/devices/i2c-1/new_device',

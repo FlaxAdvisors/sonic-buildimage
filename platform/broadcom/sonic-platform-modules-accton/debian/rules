@@ -43,6 +43,7 @@ override_dh_auto_clean:
 		if [ -f $(MOD_SRC_DIR)/$${mod}/setup.py ]; then \
 			PYBUILD_NAME=$${mod} pybuild --clean -d $${mod}; \
 		fi; \
+		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-daemon; \
 	done)
 	dh_clean
 
@@ -60,6 +61,11 @@ override_dh_auto_build:
 		fi; \
 		if [ -f $(MOD_SRC_DIR)/$${mod}/setup.py ]; then \
 			PYBUILD_NAME=$${mod} pybuild --build -d $${mod}; \
+		fi; \
+		if [ -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-daemon.c ]; then \
+			gcc -O2 -o $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-daemon \
+				$(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-daemon.c; \
+			echo "Built wedge100s-bmc-daemon for $$mod"; \
 		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/pddf ]; then \
 			cd $(MOD_SRC_DIR)/$${mod}/pddf; \
@@ -82,12 +88,16 @@ override_dh_auto_test:
 override_dh_auto_install:
 	(set -e; for mod in $(MODULE_DIRS); do \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/modules ]; then \
-			$(MAKE) -C $(KERNEL_SRC)/build M=$(MOD_SRC_DIR) INSTALL_MOD_PATH=$(MOD_SRC_DIR)/debian/platform-modules-$${mod} modules_install; \
+			$(MAKE) -C $(KERNEL_SRC)/build M=$(MOD_SRC_DIR)/$${mod}/modules INSTALL_MOD_PATH=$(MOD_SRC_DIR)/debian/$(PACKAGE_PRE_NAME)-$${mod} modules_install; \
 		fi; \
 		dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} usr/bin; \
-		cp $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/* debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/bin/; \
+		find $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR) -maxdepth 1 -type f ! -name '*.c' \
+			-exec cp {} debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/bin/ \;; \
 		dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} lib/systemd/system; \
 		cp $(MOD_SRC_DIR)/$${mod}/$(SERVICE_DIR)/*.service debian/$(PACKAGE_PRE_NAME)-$${mod}/lib/systemd/system/; \
+		if ls $(MOD_SRC_DIR)/$${mod}/$(SERVICE_DIR)/*.timer > /dev/null 2>&1; then \
+			cp $(MOD_SRC_DIR)/$${mod}/$(SERVICE_DIR)/*.timer debian/$(PACKAGE_PRE_NAME)-$${mod}/lib/systemd/system/; \
+		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/$(UDEV_DIR) ]; then \
 			dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} etc/udev/rules.d; \
 			cp $(MOD_SRC_DIR)/$${mod}/$(UDEV_DIR)/* debian/$(PACKAGE_PRE_NAME)-$${mod}/etc/udev/rules.d/; \

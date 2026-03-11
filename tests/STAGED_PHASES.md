@@ -35,9 +35,9 @@
 | 23 | BGP / L3 routing enablement | Pending (medium) | — |
 | 24 | Breakout testing completion | Pending (low) | — |
 | 25 | Active optics / media settings | Pending (low) | — |
-| **R26** | **CPLD kernel driver (wedge100s_cpld.c)** | **Planned** | — |
+| **R26** | **CPLD kernel driver (wedge100s_cpld.c)** | **Done** | 2026-03-11 |
 | **R27** | **Pre-register all 32 optoe1 QSFP at boot** | **Done** | pending hardware test |
-| **R28** | **Compiled BMC polling daemon (C)** | **Planned** | — |
+| **R28** | **Compiled BMC polling daemon (C)** | **Done** | pending hardware test |
 | **R29** | **Python API → sysfs/daemon files** | **Planned (follows R26+R28)** | — |
 | **R30** | **GRUB kernel args + BCM IRQ affinity** | **Planned** | — |
 | **R31** | **IPMI/REST investigation** | **Exploratory** | — |

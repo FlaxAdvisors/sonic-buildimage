@@ -5,13 +5,12 @@ sonic_platform/psu.py — PSU implementation for Accton Wedge 100S-32X.
 Two AC PSUs.  Hardware access is split between two domains:
 
 Presence and power-good:
-  System CPLD at host i2c-1/0x32, register 0x10.
-  Bit layout (from psui.c / psuutil.py, confirmed on hardware):
-    PSU1 present:    bit 0  (0 = present)
-    PSU1 power good: bit 1  (1 = good)
-    PSU2 present:    bit 4  (0 = present)
-    PSU2 power good: bit 5  (1 = good)
-  Accessed via platform_smbus (smbus2, persistent fd) — no BMC TTY needed.
+  Read from wedge100s_cpld sysfs attributes under /sys/bus/i2c/devices/1-0032/:
+    psu1_present  — 1 = present (driver inverts active-low bit 0 of reg 0x10)
+    psu1_pgood    — 1 = power good (bit 1, active-high)
+    psu2_present  — 1 = present (driver inverts active-low bit 4 of reg 0x10)
+    psu2_pgood    — 1 = power good (bit 5, active-high)
+  Requires wedge100s_cpld kernel module (Phase R26).
 
 PMBus telemetry:
   BMC i2c-7; PCA9546 mux at 0x70 selects the PSU channel.
@@ -45,22 +44,16 @@ except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
 try:
-    from sonic_platform import bmc, platform_smbus
+    from sonic_platform import bmc
 except ImportError:
-    from . import bmc, platform_smbus
+    from . import bmc
 
 
 # ---------------------------------------------------------------------------
-# Host CPLD constants
+# Host CPLD sysfs path (wedge100s_cpld driver, Phase R26)
 # ---------------------------------------------------------------------------
 
-_CPLD_BUS  = 1
-_CPLD_ADDR = 0x32
-_PSU_REG   = 0x10
-
-# Per-PSU bit positions in register 0x10 (0-indexed arrays, PSU1=index 0)
-_PRESENT_BIT = [0, 4]   # 0 = present
-_PGOOD_BIT   = [1, 5]   # 1 = power good
+_CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
 
 
 # ---------------------------------------------------------------------------
@@ -122,16 +115,16 @@ def _pmbus_decode_linear11(raw):
 # Hardware access helpers
 # ---------------------------------------------------------------------------
 
-def _read_cpld_reg():
+def _read_cpld_attr(name):
     """
-    Read PSU status byte from host CPLD register 0x10.
-    Returns int (0–255) or None on I2C failure.
-
-    Uses platform_smbus (persistent fd, no subprocess overhead) instead
-    of the former subprocess i2cget approach.  force=True bypasses any
-    kernel driver bound to this address on i2c-1.
+    Read a sysfs attribute from the wedge100s_cpld driver.
+    Returns the integer value, or None on error.
     """
-    return platform_smbus.read_byte(_CPLD_BUS, _CPLD_ADDR, _PSU_REG)
+    try:
+        with open('{}/{}'.format(_CPLD_SYSFS, name)) as f:
+            return int(f.read().strip(), 0)
+    except Exception:
+        return None
 
 
 def _set_bmc_mux(channel):
@@ -229,11 +222,11 @@ class Psu(PsuBase):
         return 'N/A'
 
     def get_presence(self):
-        """True when the PSU is physically inserted (CPLD bit = 0)."""
-        val = _read_cpld_reg()
+        """True when the PSU is physically inserted."""
+        val = _read_cpld_attr('psu{}_present'.format(self._index))
         if val is None:
             return False
-        return not bool(val & (1 << _PRESENT_BIT[self._idx]))
+        return bool(val)
 
     def get_status(self):
         """True when the PSU is present and power is good."""
@@ -250,11 +243,11 @@ class Psu(PsuBase):
     # ------------------------------------------------------------------
 
     def get_powergood_status(self):
-        """True when the PSU is outputting good power (CPLD bit = 1)."""
-        val = _read_cpld_reg()
+        """True when the PSU is outputting good power."""
+        val = _read_cpld_attr('psu{}_pgood'.format(self._index))
         if val is None:
             return False
-        return bool(val & (1 << _PGOOD_BIT[self._idx]))
+        return bool(val)
 
     def get_type(self):
         """Wedge 100S uses AC input PSUs."""

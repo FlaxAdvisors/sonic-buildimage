@@ -13,36 +13,28 @@
 #   0x02 = green        0x0a = green blinking
 #   0x04 = blue         0x0c = blue blinking
 #
-# ledd calls port_link_state_change(port, state) on every port up/down event.
-# i2c-1 is passed into the pmon container via the /dev/i2c-1 device node
-# (added to pmon.sh as part of Phase 5 / Phase 10 build integration).
+# Phase R26: writes via wedge100s_cpld sysfs attributes (led_sys1, led_sys2)
+# instead of i2cset subprocess.  Sysfs path: /sys/bus/i2c/devices/1-0032/
 #
-
-import subprocess
 
 try:
     from sonic_led.led_control_base import LedControlBase
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
-# CPLD i2c coordinates
-_BUS      = '1'
-_ADDR     = '0x32'
-_REG_SYS1 = '0x3e'   # Chassis LED 1
-_REG_SYS2 = '0x3f'   # Chassis LED 2
+# CPLD sysfs attributes from wedge100s_cpld driver (Phase R26)
+_CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
 
 # Register values
-_LED_OFF   = '0x00'
-_LED_GREEN = '0x02'
+_LED_OFF   = 0x00
+_LED_GREEN = 0x02
 
 
-def _cpld_write(reg, val):
-    """Write one byte to the CPLD via i2cset; silently ignore errors."""
+def _cpld_write(attr, val):
+    """Write one byte to a wedge100s_cpld sysfs LED attribute."""
     try:
-        subprocess.call(
-            ['i2cset', '-f', '-y', _BUS, _ADDR, reg, val],
-            timeout=2,
-        )
+        with open('{}/{}'.format(_CPLD_SYSFS, attr), 'w') as f:
+            f.write(str(val))
     except Exception:
         pass
 
@@ -59,10 +51,10 @@ class LedControl(LedControlBase):
 
     def __init__(self):
         self._port_states = {}          # port_name → bool (True = up)
-        _cpld_write(_REG_SYS1, _LED_GREEN)   # system running
-        _cpld_write(_REG_SYS2, _LED_OFF)     # no ports up yet
+        _cpld_write('led_sys1', _LED_GREEN)   # system running
+        _cpld_write('led_sys2', _LED_OFF)     # no ports up yet
 
     def port_link_state_change(self, port, state):
         self._port_states[port] = (state == 'up')
         any_up = any(self._port_states.values())
-        _cpld_write(_REG_SYS2, _LED_GREEN if any_up else _LED_OFF)
+        _cpld_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)

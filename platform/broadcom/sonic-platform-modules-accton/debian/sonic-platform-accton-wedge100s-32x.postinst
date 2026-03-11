@@ -4,6 +4,15 @@ depmod -a
 systemctl enable wedge100s-platform-init.service
 systemctl start wedge100s-platform-init.service
 
+# Phase R28: enable BMC sensor polling daemon timer.
+# The timer fires every 10 s and invokes wedge100s-bmc-daemon (one-shot),
+# which reads all BMC sensors in a single TTY session and writes plain-integer
+# files to /run/wedge100s/.  Python platform APIs (thermal.py, fan.py, psu.py)
+# will read from these files in Phase R29 instead of issuing per-call TTY I/O.
+mkdir -p /run/wedge100s
+systemctl enable wedge100s-bmc-poller.timer
+systemctl start  wedge100s-bmc-poller.timer || true
+
 # Install port_breakout_config_db.json to /etc/sonic/ if not already present.
 # The DPB CLI reads this file from /etc/sonic/ to get default config for new
 # sub-ports created during breakout; it does NOT fall back to the hwsku dir.
@@ -51,6 +60,56 @@ with open(PMON_SH, "w") as fh:
     fh.write(text)
 
 print("wedge100s postinst: patched " + PMON_SH + " — ttyACM* passthrough added")
+PYEOF
+fi
+
+# Patch pmon.sh to bind-mount /run/wedge100s (BMC daemon output) read-only
+# into the pmon container.  Required for Phase R29 (Python reads daemon files
+# instead of issuing TTY commands).  Pre-applying in R28 is harmless: the
+# volume is mounted but unused until R29 replaces the bmc.py calls.
+#
+# Insertion point: after the ttyACM --device line (if present) or after
+# $(get_pmon_device_mounts); idempotent — skipped if already patched.
+PMON_SH="/usr/bin/pmon.sh"
+if [ -f "$PMON_SH" ] && ! grep -q "run/wedge100s" "$PMON_SH"; then
+    python3 - <<'PYEOF'
+import sys
+
+PMON_SH = "/usr/bin/pmon.sh"
+# Preferred insertion: after the ttyACM --device line we added earlier
+NEEDLE_TTYACM = 'for d in /dev/ttyACM*'
+# Fallback: after get_pmon_device_mounts
+NEEDLE_MOUNTS = "$(get_pmon_device_mounts) \\"
+INSERT = '    $([ -d /run/wedge100s ] && echo "--volume /run/wedge100s:/run/wedge100s:ro") \\'
+
+with open(PMON_SH) as fh:
+    lines = fh.readlines()
+
+new_lines = []
+inserted = False
+for line in lines:
+    new_lines.append(line)
+    if not inserted and NEEDLE_TTYACM in line:
+        new_lines.append(INSERT + '\n')
+        inserted = True
+
+if not inserted:
+    # ttyACM line not present; fall back to get_pmon_device_mounts
+    text = ''.join(new_lines)
+    if NEEDLE_MOUNTS in text:
+        text = text.replace(NEEDLE_MOUNTS, NEEDLE_MOUNTS + "\n" + INSERT, 1)
+        new_lines = [text]
+        inserted = True
+
+if not inserted:
+    print("wedge100s postinst: WARNING: no insertion point for /run/wedge100s in "
+          + PMON_SH + " — volume patch skipped", file=sys.stderr)
+    sys.exit(0)
+
+with open(PMON_SH, "w") as fh:
+    fh.write(''.join(new_lines))
+
+print("wedge100s postinst: patched " + PMON_SH + " — /run/wedge100s volume added")
 PYEOF
 fi
 

@@ -1,6 +1,7 @@
 # ARCHSPEC: SONiC Platform Support for Accton Wedge 100S-32X
 
-*Implementation record — all phases complete and hardware-verified 2026-02-25; pmon device passthrough automated 2026-02-26.*
+*Implementation record — phases 0–10 complete and hardware-verified 2026-02-25; pmon device passthrough automated 2026-02-26.*
+*Refactoring plan (phases R26–R31) added 2026-03-11 following ONL architecture review.*
 
 ---
 
@@ -104,11 +105,43 @@ bit pairs — before testing any individual bit.  This is implemented in
 ### 2.1 ONL (OpenNetworkLinux) Approach
 
 ONL uses the **ONLP** C API consumed by `onlpd`.  All hardware access is in a
-C shared library; the BMC is reached by blocking TTY I/O in `platform_lib.c`.
-ONL source in `/home/dbahi/git/OpenNetworkLinux/` was used as the authoritative
-reference for all hardware addresses, register layouts, and BMC command patterns.
+C shared library (`libonlp-platform.so`).
 
-### 2.2 SONiC Approach
+**Key findings from source audit (2026-03-11):**
+
+- `platform_lib.c` opens `/dev/ttyACM0` at 57600 baud — **identical** to our
+  `bmc.py`.  ONL also uses the OpenBMC serial TTY for all BMC-side sensor access.
+  There is no alternative BMC path (no IPMI KCS, no LPC bus, no USB network).
+- **ONL has zero custom kernel modules** for this platform.
+  `modules/PKG.yml` explicitly includes `no-platform-modules.yml`.
+  All access uses upstream Linux drivers: `hid_cp2112`, `i2c_mux_pca954x`,
+  `at24`, `optoe`, `gpio-pca953x`.
+- `ledi.c` and `psui.c` use `onlp_i2c_readb()` / `onlp_i2c_writeb()` from
+  `onlplib/i2c.h` — this is the Linux `i2c-dev` ioctl API, identical in
+  mechanism to our `smbus2` calls (no subprocess fork).
+- `thermali.c` uses `bmc_file_read_int()` over TTY to read
+  `/sys/bus/i2c/drivers/lm75/<bus>/temp1_input` on the BMC.
+  **Note:** this path (`drivers/lm75/`) is wrong on our OpenBMC — the correct
+  path is `devices/<bus>/hwmon/*/temp1_input` (hwmonN is not stable).
+- `platform-config/__init__.py` registers: 5×pca9548 (0x70–0x74) + 24c64
+  at i2c-40/0x50.  It does **not** register PCA9535 or optoe1 devices.
+
+**ONL vs our SONiC Python layer (current state):**
+
+| Access path | ONL C code | Our Python |
+|---|---|---|
+| CPLD (LED/PSU presence) | `onlp_i2c_readb()` ioctl | `smbus2.read_byte_data()` ioctl |
+| PCA9535 presence | `onlp_i2c_readb()` ioctl | GPIO sysfs (kernel gpio-pca953x) |
+| BMC thermal sensors | TTY `cat /sys/bus/i2c/...` | TTY `cat /sys/bus/i2c/...` |
+| BMC fan board | TTY `cat /sys/.../fan*_input` | TTY `cat /sys/.../fan*_input` |
+| BMC PSU PMBus | TTY `i2cget -f -y` on BMC | TTY `i2cget -f -y` on BMC |
+| QSFP EEPROM | N/A (ONLP only) | sysfs via optoe1 (lazy-registered) |
+
+**Our Python implementation is already comparable to or better than ONL** for
+host-side I2C.  The remaining gaps are (1) CPLD kernel driver, (2) lazy optoe1
+registration causing DAC cable EEPROM failures, (3) no compiled BMC daemon.
+
+### 2.2 SONiC Approach — Current State
 
 ```
 SONiC CLI / APP layer
@@ -121,8 +154,25 @@ SONiC CLI / APP layer
    ├─ Legacy:  device/*/plugins/{sfputil,psuutil,eeprom,led_control}.py
    └─ Modern:  platform/*/sonic_platform/{chassis,fan,thermal,sfp,psu,eeprom,bmc}.py
        │
-   Kernel drivers / sysfs / i2cget+i2cset subprocesses / BMC TTY
+   ┌───────────────────────────────────────────────────────────────┐
+   │  Host I2C (CP2112 bridge, bus 1–41)                           │
+   │  ├─ CPLD/PSU presence:  smbus2.read_byte_data()  [no fork]    │
+   │  ├─ PCA9535 presence:   GPIO sysfs read()        [no fork]    │
+   │  ├─ QSFP EEPROM:        optoe1 sysfs open/read() [no fork]    │
+   │  └─ optoe1 registered:  lazily on first xcvrd access          │
+   └───────────────────────────────────────────────────────────────┘
+       │
+   ┌───────────────────────────────────────────────────────────────┐
+   │  BMC interface (/dev/ttyACM0, 57600 8N1)                      │
+   │  ├─ Thermal sensors:   bmc.file_read_int() via TTY            │
+   │  ├─ Fan presence/RPM:  bmc.file_read_int() via TTY            │
+   │  └─ PSU PMBus:         bmc.i2cget_word() via TTY              │
+   └───────────────────────────────────────────────────────────────┘
 ```
+
+**Subprocess usage is now minimal** — eliminated for all host-side I2C.
+Remaining subprocess calls are in `accton_wedge100s_util.py` (one-time boot
+script) and the util `show` / `set` diagnostic commands.
 
 ### 2.3 ONL-to-SONiC Translation Map
 
@@ -248,6 +298,16 @@ on a lock file if contention is observed in production.
   `port_config.ini` uses a 1-based `index` column (1–32), so `get_sfp(1)`
   must yield port 0, not port 1.
 
+**Known defect — DAC cable EEPROM unreadable:**
+DAC cables (and other transceivers) present at boot are NOT readable on SONiC
+while they ARE readable on Arista EOS on the same hardware.  Root cause: optoe1
+devices are registered **lazily** (first xcvrd access per port).  If xcvrd's
+`update_port_transceiver_status_table()` fails or the mux deselects before the
+first read completes, the EEPROM path does not exist yet when diagnostic tools
+try to read it.  Arista pre-registers all transceiver drivers at boot.
+**Fix (Phase R27):** register all 32 optoe1 devices in `mknod` during platform
+init, before pmon starts.  Eliminates the lazy-init race entirely.
+
 ### 4.6 System EEPROM (`eeprom.py`, `plugins/eeprom.py`)
 
 - 24c64 AT24C64 at i2c-40/0x50, registered by the platform init service.
@@ -316,6 +376,24 @@ I2C bus and requires a full power cycle to recover.
 GRUB on hardware).  The OpenBMC console is NOT on ttyS0 — it is only accessible
 via ttyACM0 at 57600 baud from the host side.
 
+### 5.4 GRUB Kernel Arguments (from ONL platform-config)
+
+ONL's `platform-config/r0/src/lib/x86-64-accton-wedge100s-32x-r0.yml` specifies
+these kernel arguments for the Wedge 100S (designed for kernel 4.9; verify on 6.1):
+
+```
+nopat  intel_iommu=off  noapic
+console=ttyS0,57600n8  rd_NO_MD  rd_NO_LUKS
+```
+
+**Relevant to SSH sluggishness investigation:**
+- `noapic` — disables APIC-based interrupt routing; may reduce BCM56960 IRQ storm
+  impact on sshd responsiveness.  **Not yet applied to our installer.conf.**
+- `intel_iommu=off` — disables VT-d IOMMU; ONL uses this for Broadwell-DE.
+- `nopat` — disables PAT memory attribute table (compatibility flag).
+
+These are targeted for Phase R30.
+
 ---
 
 ## 6. Known Limitations and Open Items
@@ -323,11 +401,15 @@ via ttyACM0 at 57600 baud from the host side.
 | Item | Severity | Notes |
 |------|----------|-------|
 | pmon.sh ttyACM0 passthrough | Resolved | Patched automatically by postinst; see Section 5.1 |
+| DAC cable EEPROM unreadable | **High** | Lazy optoe1 registration; fix is Phase R27 (pre-register all 32 at boot) |
+| SSH interactive sluggishness | **High** | BCM56960 IRQ storm (~150/s); `noapic` kernel arg is Phase R30 |
+| Thermal poll cycle ~65s | Medium | 7 sequential BMC TTY reads; compiled daemon (Phase R28) reduces to <5s |
 | PSU model/serial | Low | SMBus block-read not in bmc.py; `get_model()` returns `'N/A'` |
 | Fan per-tray speed control | N/A | Not supported in hardware; `set_fan_speed.sh` is global |
 | QSFP LP_MODE / RESET | N/A | Pins on mux board, not host-accessible |
 | BMC cross-process lock | Low | Single process (pmon) accesses TTY; contention not yet observed |
 | Bus number stability | Note | Verified on kernel 6.1.0-29-2-amd64 only; re-verify on kernel upgrade |
+| No CPLD kernel driver | Medium | smbus2 works but kernel sysfs is cleaner; Phase R26 |
 
 ---
 
@@ -335,13 +417,239 @@ via ttyACM0 at 57600 baud from the host side.
 
 1. **ONL sfpi.c** (SFP bus map, presence logic, bit-swap):
    `OpenNetworkLinux/packages/platforms/accton/x86-64/wedge100s-32x/onlp/builds/x86_64_accton_wedge100s_32x/module/src/sfpi.c`
-2. **ONL platform_lib.c** (BMC TTY pattern):
+2. **ONL platform_lib.c** (BMC TTY pattern — C equivalent of our bmc.py):
    same path, `platform_lib.c`
 3. **ONL fani.c / thermali.c / psui.c / ledi.c**:
    same path
-4. **Facebook Wedge 100 SONiC config** (BCM reference):
+4. **ONL platform-config yml** (GRUB/kernel args for Wedge 100S):
+   `OpenNetworkLinux/packages/platforms/accton/x86-64/wedge100s-32x/platform-config/r0/src/lib/x86-64-accton-wedge100s-32x-r0.yml`
+5. **ONL platform-config __init__.py** (I2C device registration — reference):
+   `OpenNetworkLinux/packages/platforms/accton/x86-64/wedge100s-32x/platform-config/r0/src/python/x86_64_accton_wedge100s_32x_r0/__init__.py`
+6. **ONL modules/PKG.yml** (confirms no-platform-modules for this platform):
+   `OpenNetworkLinux/packages/platforms/accton/x86-64/wedge100s-32x/modules/PKG.yml`
+7. **Facebook Wedge 100 SONiC config** (BCM reference — non-S, different product):
    `device/facebook/x86_64-facebook_wedge100-r0/`
-5. **Accton AS7712** (similar Tomahawk, fuller SONiC implementation):
-   `device/accton/x86_64-accton_as7712_32x-r0/`
-6. **Hardware discovery log**:
+8. **Accton AS7712 kernel modules** (reference for CPLD driver pattern):
+   `platform/broadcom/sonic-platform-modules-accton/as7712-32x/modules/`
+   — `accton_i2c_cpld.c`, `accton_as7712_32x_fan.c`, `leds-accton_as7712_32x.c`
+9. **Hardware discovery log**:
    `device/accton/x86_64-accton_wedge100s_32x-r0/i2c_bus_map.json`
+
+---
+
+## 8. Refactoring Roadmap — Driver-Based Architecture (Phases R26–R31)
+
+*Planned 2026-03-11.  Builds on the current smbus2/TTY Python baseline.*
+*Priority order matches expected impact; R27 is highest urgency.*
+
+### Why refactor?
+
+The current Python/smbus2/TTY implementation works but has three weaknesses:
+
+1. **DAC cable EEPROMs fail** because optoe1 is lazily registered — not present
+   in sysfs at boot, causing xcvrd or diagnostic tools to see empty reads.
+2. **BMC poll cycle is slow** (~65 s for 7 thermals) because each TMP75 read
+   is a separate TTY round-trip (send cmd, wait for BMC shell output).
+3. **No CPLD kernel driver** means the LED and PSU subsystems depend on smbus2
+   and have no standard kernel sysfs representation.
+
+The SSH sluggishness is caused by the BCM56960 firing ~150 IRQs/second
+(IRQ 16, `linux-kernel-bde`), saturating one CPU's HI softirq queue.
+This is **not** caused by the Python I2C layer — but `noapic` (Phase R30)
+may reduce its severity.
+
+---
+
+### Phase R26 — CPLD Kernel Driver
+
+**Goal:** Replace smbus2 CPLD access with a standard kernel hwmon/sysfs driver.
+
+**Files to create:**
+- `platform/broadcom/sonic-platform-modules-accton/wedge100s-32x/modules/wedge100s_cpld.c`
+
+**Pattern:** Based on `accton_as7712_32x_fan.c` and `accton_i2c_cpld.c` in the
+AS7712 platform modules.  The wedge100s CPLD is much simpler — a single I2C
+client at bus 1/0x32 with these relevant registers:
+
+| Register | Purpose | sysfs attribute |
+|---|---|---|
+| 0x00 | CPLD version major | `cpld_version` |
+| 0x10 | PSU presence/pgood | `psu1_present`, `psu1_pgood`, `psu2_present`, `psu2_pgood` |
+| 0x3e | SYS LED 1 | `led_sys1` (0=off, 1=red, 2=green, 4=blue, blink +8) |
+| 0x3f | SYS LED 2 | `led_sys2` (same encoding) |
+
+**Driver registration:** Load in `kos` list as `modprobe wedge100s_cpld`, then
+register device: `echo wedge100s_cpld 0x32 > /sys/bus/i2c/devices/i2c-1/new_device`
+
+**Platform API update:**
+- `psu.py`: replace `platform_smbus.read_byte(1, 0x32, 0x10)` with
+  `open('/sys/bus/i2c/devices/1-0032/psu1_present').read()`
+- `plugins/led_control.py` + `sonic_platform/` LED functions:
+  write to `/sys/bus/i2c/devices/1-0032/led_sys1`
+
+**Build integration:** Add `wedge100s_cpld.ko` to the `debian/rules` module
+build step (same pattern as other accton platforms).
+
+---
+
+### Phase R27 — Pre-register All 32 optoe1 QSFP Devices at Boot  *(Critical)*
+
+**Goal:** Ensure all 32 QSFP EEPROM paths exist in sysfs before pmon starts.
+This fixes DAC cable EEPROM reads and eliminates the lazy-init race.
+
+**Files to modify:**
+- `utils/accton_wedge100s_util.py`: extend `mknod` list
+
+**Change:** After registering the PCA9548 mux tree, add all 32 optoe1 devices:
+
+```python
+# Pre-register all QSFP EEPROM optoe1 devices (buses from SFP_BUS_MAP)
+# Must come AFTER the PCA9548 muxes are registered so the bus numbers exist.
+for bus in SFP_BUS_MAP:
+    mknod_qsfp.append(
+        'echo optoe1 0x50 > /sys/bus/i2c/devices/i2c-{}/new_device'.format(bus)
+    )
+```
+
+**sfp.py update:** Remove `_register_device()` lazy registration path.  The
+sysfs EEPROM path is always present; `get_transceiver_info()` reads directly
+from `/sys/bus/i2c/devices/i2c-{bus}/{bus}-0050/eeprom` without needing to
+register first.
+
+**Cleanup path:** `device_uninstall()` must delete all optoe1 registrations in
+reverse order (same `delete_device` echo pattern used for PCA9535 and 24c64).
+
+**Expected outcome:** DAC cable EEPROMs readable immediately after platform init,
+before xcvrd first polls the port.  Matches Arista EOS behavior.
+
+---
+
+### Phase R28 — Compiled BMC Polling Daemon
+
+**Goal:** Replace per-call Python TTY I/O with a compiled C daemon that owns
+the TTY, batches all sensor reads, and writes results to `/run/wedge100s/`.
+
+**Files to create:**
+- `utils/wedge100s-bmc-daemon.c` — compiled standalone binary
+- `service/wedge100s-bmc-poller.service` — systemd one-shot wrapper
+- `service/wedge100s-bmc-poller.timer` — systemd timer (10 s interval)
+
+**Design (based directly on ONL `platform_lib.c`):**
+
+```
+wedge100s-bmc-daemon poll
+  ├─ Open /dev/ttyACM0 (57600 8N1, blocking, VMIN=1)
+  ├─ Login to BMC (if needed)
+  ├─ Run one shell pipeline reading ALL sensors:
+  │    cat /sys/bus/i2c/devices/3-0048/hwmon/*/temp1_input
+  │    ... (7 thermal + 10 fan RPM + 5 fan present + PSU mux+readw)
+  ├─ Parse output
+  ├─ Write /run/wedge100s/thermal_{1..7}
+  │        /run/wedge100s/fan_{1..5}_{front,rear}_rpm
+  │        /run/wedge100s/fan_{1..5}_present
+  │        /run/wedge100s/psu_{1,2}_{vin,iin,iout,pout}
+  └─ Close TTY
+```
+
+Single invocation reads ALL 7 thermals + 10 fan RPM + 5 presence + 2×4 PSU
+registers in one TTY session (~3 s).  Current Python makes 24+ separate TTY
+open/close cycles (~65 s).
+
+**Build integration:** Add to `debian/rules` as a compiled binary target
+(`gcc -o wedge100s-bmc-daemon wedge100s-bmc-daemon.c`).  Install to
+`/usr/local/bin/`.
+
+**pmon container:** The `/run/wedge100s/` tmpfs directory must be bind-mounted
+into the pmon container so Python platform code can read the files.  Add to
+postinst (same pattern as ttyACM0 passthrough).
+
+---
+
+### Phase R29 — Python Platform API Update
+
+**Goal:** Update thermal.py, fan.py, psu.py, led_control.py to read from
+kernel sysfs (R26) and daemon output files (R28) instead of TTY/smbus2.
+
+**thermal.py:**
+```python
+# Before (TTY, ~10s per sensor):
+raw = bmc.file_read_int('/sys/bus/i2c/devices/3-0048/hwmon/*/temp1_input')
+# After (file read, ~0.1ms):
+with open('/run/wedge100s/thermal_1') as f:
+    raw = int(f.read().strip())
+```
+
+**fan.py:**  Read from `/run/wedge100s/fan_{n}_{front,rear}_rpm` and
+`fan_{n}_present`.  `set_speed()` still calls `bmc.send_command('set_fan_speed.sh %d')` —
+no change (write path is infrequent).
+
+**psu.py:** Read presence/pgood from CPLD sysfs (R26 driver attributes).
+Read PMBus telemetry from `/run/wedge100s/psu_{n}_{vin,iin,iout,pout}`.
+
+**plugins/led_control.py:** Write to CPLD sysfs attributes instead of
+`i2cset` subprocess.  `sonic_platform/` LED functions same.
+
+---
+
+### Phase R30 — GRUB Kernel Args from ONL Config
+
+**Goal:** Apply ONL's proven kernel arguments for this platform to reduce
+BCM ASIC interrupt overhead and improve SSH responsiveness.
+
+**Files to modify:**
+- `device/accton/x86_64-accton_wedge100s_32x-r0/installer.conf`
+
+**Change:**
+```
+ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="nopat intel_iommu=off noapic"
+```
+
+**Verification needed on kernel 6.1:** `noapic` was valid on kernel 4.9 (ONL's
+target).  Test effect on BCM IRQ handling before committing.  The BCM ASIC
+still needs IRQ 16 to fire — `noapic` changes routing, not masking.
+
+**Alternative:** IRQ affinity — pin `linux-kernel-bde` (IRQ 16) to CPU 0 via
+`/proc/irq/16/smp_affinity`, leaving other CPUs free for sshd.  This can be
+applied in the platform init script without GRUB changes.
+
+---
+
+### Phase R31 — IPMI/REST Investigation (Optional)
+
+**Goal:** Determine whether OpenBMC on this platform exposes IPMI KCS or
+Redfish REST — either would replace the TTY interface entirely.
+
+**Investigation steps:**
+1. Check for `/dev/ipmi0` on the host (IPMI KCS over LPC bus):
+   ```bash
+   ls /dev/ipmi* 2>/dev/null
+   modprobe ipmi_si && ls /dev/ipmi*
+   ```
+2. Check for BMC USB network interface (OpenBMC CDC-ECM gadget):
+   ```bash
+   ip link show | grep -i usb
+   ```
+3. If BMC network exists, test Redfish:
+   ```bash
+   curl -k https://192.168.88.13/redfish/v1/Chassis/chassis/Thermal
+   ```
+
+**Expected outcome:** If IPMI KCS or Redfish is available, the TTY interface
+can be retired in favour of a well-framed request/response protocol, eliminating
+all the TTY-login/prompt-matching fragility.
+
+If neither is available (most likely for this hardware vintage), the compiled
+daemon (R28) is the best achievable approach.
+
+---
+
+### Phase Summary
+
+| Phase | Scope | Priority | Key Files |
+|---|---|---|---|
+| R26 | CPLD kernel driver | Medium | `modules/wedge100s_cpld.c` |
+| **R27** | **Pre-register all 32 optoe1** | **Critical** | `utils/accton_wedge100s_util.py` |
+| R28 | Compiled BMC daemon | High | `utils/wedge100s-bmc-daemon.c` |
+| R29 | Python API → sysfs/files | Follows R26+R28 | `sonic_platform/*.py` |
+| R30 | GRUB kernel args + IRQ affinity | Medium | `installer.conf` / init script |
+| R31 | IPMI/REST investigation | Low (exploratory) | — |

@@ -17,8 +17,7 @@ Presence:
 EEPROM:
   Each QSFP28 EEPROM is at I2C addr 0x50 on its own bus (see _SFP_BUS_MAP).
   The bus is a mux channel from one of the 5 PCA9548 muxes on i2c-1.
-  Device is registered lazily using the optoe1 driver (optoe module must
-  be loaded — see accton_wedge100s_util.py kos list).
+  Device is pre-registered at boot by accton_wedge100s_util.py (Phase R27).
   Sysfs path: /sys/bus/i2c/devices/i2c-{bus}/{bus}-0050/eeprom
 
 DOM:
@@ -133,11 +132,10 @@ def _get_presence_path(port):
 
 
 # ---------------------------------------------------------------------------
-# Sysfs paths for EEPROM device instantiation
+# Sysfs path for QSFP EEPROM (pre-registered at boot by platform init, Phase R27)
 # ---------------------------------------------------------------------------
 
 _EEPROM_PATH = '/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom'
-_NEW_DEVICE  = '/sys/bus/i2c/devices/i2c-{}/new_device'
 
 
 # ---------------------------------------------------------------------------
@@ -160,25 +158,7 @@ class Sfp(SfpOptoeBase):
     # ------------------------------------------------------------------
 
     def get_eeprom_path(self):
-        """
-        Return the sysfs path to this port's EEPROM binary file.
-
-        If the optoe1 kernel device has not yet been instantiated for this
-        bus (i.e., the sysfs file does not exist), register it now using
-        the kernel's new_device interface.  The optoe1 driver is designed
-        for QSFP-type modules and handles upper-page access automatically.
-
-        Prerequisite: 'modprobe optoe' must have been run before this is
-        called (done by accton_wedge100s_util.py install).
-        """
-        path = _EEPROM_PATH.format(self._bus)
-        if not os.path.exists(path):
-            try:
-                with open(_NEW_DEVICE.format(self._bus), 'w') as f:
-                    f.write('optoe1 0x50\n')
-            except OSError:
-                pass
-        return path
+        return _EEPROM_PATH.format(self._bus)
 
     # ------------------------------------------------------------------
     # DeviceBase / SfpBase API

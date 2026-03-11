@@ -86,6 +86,9 @@ kos = [
 # PCA9548 muxes at 0x70–0x74 must be registered in address order so that
 # the kernel assigns buses i2c-2 through i2c-41 matching i2c_bus_map.json.
 # Child devices on mux 0x74 channels (i2c-36, i2c-37, i2c-40) come last.
+# All 32 optoe1 QSFP EEPROM devices are pre-registered here (Phase R27) so
+# that EEPROM sysfs paths exist before pmon/xcvrd start.  This fixes DAC
+# cable EEPROM reads that fail with lazy per-port registration.
 mknod = [
     'echo pca9548 0x70 > /sys/bus/i2c/devices/i2c-1/new_device',
     'echo pca9548 0x71 > /sys/bus/i2c/devices/i2c-1/new_device',
@@ -95,11 +98,15 @@ mknod = [
     # mux 0x74 ch2 → i2c-36: PCA9535 GPIO (QSFP presence ports 0-15)
     # mux 0x74 ch3 → i2c-37: PCA9535 GPIO (QSFP presence ports 16-31)
     # mux 0x74 ch6 → i2c-40: system EEPROM (24c64 at 0x50, ONIE TlvInfo).
-    # ONIE dmesg: "at24 7-0050: 8192 byte 24c64 EEPROM, writable, 1 bytes/write"
-    # In SONiC, mux 0x74 ch6 = i2c-40 (bus numbering differs from ONIE's i2c-7).
     'echo pca9535 0x22 > /sys/bus/i2c/devices/i2c-36/new_device',
     'echo pca9535 0x23 > /sys/bus/i2c/devices/i2c-37/new_device',
     'echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device',
+] + [
+    # optoe1 QSFP EEPROM on each port's dedicated bus (SFP_BUS_MAP order).
+    # Registering all 32 here ensures /sys/bus/i2c/devices/i2c-N/N-0050/eeprom
+    # exists before xcvrd starts, eliminating the lazy-init race.
+    'echo optoe1 0x50 > /sys/bus/i2c/devices/i2c-{0}/new_device'.format(bus)
+    for bus in SFP_BUS_MAP
 ]
 
 
@@ -507,11 +514,11 @@ def show_eeprom(index):
 
     port = int(index) - 1  # convert 1-based to 0-based
     bus = SFP_BUS_MAP[port]
-    eeprom_path = "/sys/class/i2c-adapter/i2c-{0}/{0}-0050/eeprom".format(bus)
+    eeprom_path = "/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom".format(bus)
 
-    if not subprocess.getstatusoutput("ls " + eeprom_path)[0] == 0:
+    if not os.path.exists(eeprom_path):
         print("Port {} eeprom not found at {}.".format(index, eeprom_path))
-        print("Ensure optoe1 is registered on i2c-{} (enabled in Phase 6).".format(bus))
+        print("Run 'install' to register I2C devices.")
         return
 
     ret, log = log_os_system("which hexdump", 0)

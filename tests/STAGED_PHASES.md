@@ -1,6 +1,6 @@
 # Staged Phases — Wedge 100S-32X SONiC Port
 *Consolidated from phases.md, INTERFACE_PLAN.md, and next-phase-plan.md.*
-*Last updated: 2026-03-03.*
+*Last updated: 2026-03-11. Refactoring phases R26–R31 added.*
 
 ---
 
@@ -35,6 +35,12 @@
 | 23 | BGP / L3 routing enablement | Pending (medium) | — |
 | 24 | Breakout testing completion | Pending (low) | — |
 | 25 | Active optics / media settings | Pending (low) | — |
+| **R26** | **CPLD kernel driver (wedge100s_cpld.c)** | **Planned** | — |
+| **R27** | **Pre-register all 32 optoe1 QSFP at boot** | **Done** | pending hardware test |
+| **R28** | **Compiled BMC polling daemon (C)** | **Planned** | — |
+| **R29** | **Python API → sysfs/daemon files** | **Planned (follows R26+R28)** | — |
+| **R30** | **GRUB kernel args + BCM IRQ affinity** | **Planned** | — |
+| **R31** | **IPMI/REST investigation** | **Exploratory** | — |
 
 **Pytest:** 82/82 passing across stages 7, 11–15, 17 (as of 2026-03-03).
 
@@ -220,6 +226,111 @@ No `media_settings.json` exists; serdes pre-emphasis is baked into BCM config.
 1. Acquire SR4 or LR4 QSFP28 optic
 2. Test DOM population (temperature, voltage, TX/RX power)
 3. If signal integrity issues → create `media_settings.json`
+
+---
+
+## Refactoring Phase Details (R26–R31)
+
+*Full rationale and design in `tests/ARCHSPEC.md` Section 8.*
+*These replace the Python I2C mess with kernel drivers and compiled code.*
+
+### ONL Architecture Finding (2026-03-11)
+ONL `platform_lib.c` ALSO uses `/dev/ttyACM0` for all BMC access — same as our
+`bmc.py`.  ONL has ZERO custom kernel modules for this platform (`no-platform-modules.yml`).
+We are already at parity with ONL for host I2C (smbus2 vs subprocess).
+The gaps are: lazy optoe1 (→ DAC EEPROM fails), no CPLD sysfs driver, slow
+per-call TTY (→ 65s poll cycles), missing kernel args.
+
+### Phase R26 — CPLD Kernel Driver
+**Priority**: Medium | **Effort**: Medium
+
+**Tasks**:
+1. Write `platform/broadcom/sonic-platform-modules-accton/wedge100s-32x/modules/wedge100s_cpld.c`
+   - Bind to i2c-1/0x32; expose sysfs: `cpld_version`, `psu1_present`, `psu1_pgood`,
+     `psu2_present`, `psu2_pgood`, `led_sys1`, `led_sys2`
+   - Pattern: `as7712-32x/modules/accton_i2c_cpld.c` + `leds-accton_as7712_32x.c`
+2. Add module to `debian/rules` kernel module build step
+3. Add to `kos` list in `accton_wedge100s_util.py`: `modprobe wedge100s_cpld`
+4. Add device registration in `mknod`: `echo wedge100s_cpld 0x32 > /sys/bus/i2c/devices/i2c-1/new_device`
+5. Update `psu.py` and `plugins/psuutil.py` to read from sysfs
+6. Update `plugins/led_control.py` to write to sysfs
+
+### Phase R27 — Pre-register All 32 optoe1 QSFP Devices at Boot *(Critical)*
+**Priority**: Critical | **Effort**: Small
+
+**Root cause of DAC cable EEPROM failure**: optoe1 registered lazily → EEPROM
+path not in sysfs until xcvrd first touches the port → diagnostic reads fail.
+Arista EOS pre-registers all transceiver drivers at boot.
+
+**Tasks**:
+1. Extend `mknod` list in `accton_wedge100s_util.py` to register optoe1 on all
+   32 QSFP buses after PCA9548 muxes are registered:
+   ```python
+   for bus in SFP_BUS_MAP:
+       mknod_qsfp.append('echo optoe1 0x50 > /sys/bus/i2c/devices/i2c-{}/new_device'.format(bus))
+   ```
+2. Add corresponding `delete_device` entries to `device_uninstall()`
+3. Remove `_register_device()` lazy-init from `sfp.py` — EEPROM path always exists
+4. Test: `cat /sys/bus/i2c/devices/i2c-3/3-0050/eeprom | hexdump -C | head` before
+   xcvrd starts — should return valid QSFP28 data for DAC cable on port 0
+
+### Phase R28 — Compiled BMC Polling Daemon
+**Priority**: High | **Effort**: Medium-Large
+
+**Problem**: 7 thermal reads × ~8s TTY round-trip = ~65s poll cycle.
+**Solution**: compiled C binary reads ALL sensors in one TTY session (~3s total).
+
+**Tasks**:
+1. Write `utils/wedge100s-bmc-daemon.c` based on ONL `platform_lib.c` TTY code:
+   - Single TTY session reads: 7×thermal, 10×fan RPM, 5×fan presence, 2×4 PSU PMBus
+   - Outputs to `/run/wedge100s/` (one file per value, plain integer format)
+   - Invoked as one-shot: `wedge100s-bmc-daemon poll`
+2. Write `service/wedge100s-bmc-poller.service` + `.timer` (10s interval)
+3. Add compiled binary to `debian/rules`, install to `/usr/local/bin/`
+4. Bind-mount `/run/wedge100s/` into pmon container (add to postinst)
+5. Document PSU PMBus mux sequence (i2cset channel select, then i2cget word reads)
+
+### Phase R29 — Python Platform API → sysfs/Daemon Files
+**Priority**: Follows R26+R28 | **Effort**: Medium
+
+**Tasks**:
+1. `thermal.py`: replace `bmc.file_read_int()` with `open('/run/wedge100s/thermal_N').read()`
+2. `fan.py`: replace `bmc.file_read_int()` with reads from `/run/wedge100s/fan_*`
+3. `psu.py` PMBus: replace `bmc.i2cget_word()` with reads from `/run/wedge100s/psu_*`
+4. `psu.py` presence: replace `platform_smbus.read_byte()` with CPLD sysfs reads (R26)
+5. `plugins/led_control.py`: replace smbus2/i2cset with CPLD sysfs writes (R26)
+6. Remove `bmc.i2cget_byte/word/set` functions (TTY-based BMC i2c still used only
+   for `set_fan_speed.sh` write path)
+
+### Phase R30 — GRUB Kernel Args + BCM IRQ Affinity
+**Priority**: Medium | **Effort**: Small
+
+**Context**: SSH interactive sluggishness is BCM56960 IRQ storm (~150 IRQ/s on
+IRQ 16 `linux-kernel-bde`), saturating one CPU's HI softirq queue.
+ONL uses `nopat intel_iommu=off noapic` for this platform.
+
+**Tasks**:
+1. Test `noapic` on kernel 6.1 — does it affect BCM IRQ behavior?
+   `sudo sh -c 'echo noapic >> /proc/cmdline'` (runtime test only, needs reboot to persist)
+2. If effective: add to `device/accton/x86_64-accton_wedge100s_32x-r0/installer.conf`:
+   `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="nopat intel_iommu=off noapic"`
+3. Alternative: pin IRQ 16 to CPU 0 in platform init service:
+   `echo 1 > /proc/irq/16/smp_affinity`
+   (leaves CPUs 1+ free for sshd/userspace)
+4. Measure: `ssh` latency before/after with `time ssh admin@192.168.88.12 hostname`
+
+### Phase R31 — IPMI / OpenBMC REST Investigation
+**Priority**: Low (exploratory) | **Effort**: Small investigation
+
+**Goal**: Determine if there's a better BMC communication channel than raw TTY.
+
+**Tasks**:
+1. Check for IPMI KCS: `modprobe ipmi_si && ls /dev/ipmi*` — if `/dev/ipmi0` exists,
+   `ipmitool sdr list` would replace all BMC TTY sensor reads
+2. Check for BMC USB CDC-ECM (network gadget): `ip link show | grep -i usb`
+   If present, BMC REST API via `curl -k https://<bmc-ip>/redfish/v1/...` is available
+3. Check for IPMI over LAN: `ipmitool -H 192.168.88.13 -U admin -P 0penBmc sdr list`
+4. Document findings regardless — these are architectural decisions for future work
 
 ---
 

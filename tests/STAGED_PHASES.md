@@ -1,6 +1,6 @@
 # Staged Phases — Wedge 100S-32X SONiC Port
 *Consolidated from phases.md, INTERFACE_PLAN.md, and next-phase-plan.md.*
-*Last updated: 2026-03-11. Refactoring phases R26–R31 added.*
+*Last updated: 2026-03-11. Refactoring phases R26–R31 complete.*
 
 ---
 
@@ -40,7 +40,7 @@
 | **R28** | **Compiled BMC polling daemon (C)** | **Done** | pending hardware test |
 | **R29** | **Python API → sysfs/daemon files** | **Done** | 2026-03-11 |
 | **R30** | **GRUB kernel args + BCM IRQ affinity** | **Done** | 2026-03-11 |
-| **R31** | **IPMI/REST investigation** | **Exploratory** | — |
+| **R31** | **IPMI/REST investigation** | **Done** | 2026-03-11 |
 
 **Pytest:** 82/82 passing across stages 7, 11–15, 17 (as of 2026-03-03).
 
@@ -342,17 +342,25 @@ creating 15-30 s windows where sshd cannot accept new connections.
 `sudo python3 accton_wedge100s_util.py install`.
 
 ### Phase R31 — IPMI / OpenBMC REST Investigation
-**Priority**: Low (exploratory) | **Effort**: Small investigation
+**Priority**: Low (exploratory) | **Effort**: Small investigation | **Done**: 2026-03-11
 
-**Goal**: Determine if there's a better BMC communication channel than raw TTY.
+**Findings** (see `tests/notes/phase-r31-ipmi-rest-investigation.md` for full details):
 
-**Tasks**:
-1. Check for IPMI KCS: `modprobe ipmi_si && ls /dev/ipmi*` — if `/dev/ipmi0` exists,
-   `ipmitool sdr list` would replace all BMC TTY sensor reads
-2. Check for BMC USB CDC-ECM (network gadget): `ip link show | grep -i usb`
-   If present, BMC REST API via `curl -k https://<bmc-ip>/redfish/v1/...` is available
-3. Check for IPMI over LAN: `ipmitool -H 192.168.88.13 -U admin -P 0penBmc sdr list`
-4. Document findings regardless — these are architectural decisions for future work
+- **IPMI KCS**: Dead end. `modprobe ipmi_si` → "No such device". No KCS exposed to host.
+- **IPMI over LAN**: Dead end. Port 623 not listening; BMC doesn't run ipmid.
+- **USB CDC-ECM + Facebook REST API**: Works, but not an improvement.
+  - `usb0` is DOWN at boot on SONiC side; after `ip link set usb0 up`, IPv6 link-local
+    autoconfigures and BMC is reachable at `fe80::ff:fe00:1%usb0`
+  - BMC runs Facebook-OpenBMC REST (aiohttp) on port 8080; no Redfish/IPMI
+  - `GET /api/sys/sensors` returns all 7 thermal temps + 10 fan RPMs in one JSON call
+  - Latency: ~1.1–1.4s/call (REST server runs `sensors` subprocess each time)
+  - **No fan speed write endpoint** — `writable=false` in `/etc/rest.cfg`; POST routes
+    are power control and PSU firmware update only
+  - Current C daemon + `/run/wedge100s/` files reads in <1ms; REST is strictly slower
+
+**Conclusion**: No code changes. R28/R29 architecture is already optimal. The only
+remaining TTY dependency (fan speed write via `set_fan_speed.sh`) cannot be replaced
+by REST. Notes filed; no further action needed.
 
 ---
 

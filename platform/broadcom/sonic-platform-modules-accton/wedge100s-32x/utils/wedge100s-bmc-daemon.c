@@ -177,15 +177,15 @@ static int tty_login(void)
 
     for (i = 0; i < LOGIN_RETRY; i++) {
         /* One CR refreshes the prompt without double-prompt race */
-        write(g_fd, "\r\x00", 2);
+        (void)write(g_fd, "\r\x00", 2);
         read_until(buf, sizeof(buf), TTY_PROMPT, 1.0);
         if (strstr(buf, TTY_PROMPT)) return 0;
 
         if (strstr(buf, " login:")) {
-            write(g_fd, "root\r\x00", 6);
+            (void)write(g_fd, "root\r\x00", 6);
             read_until(buf, sizeof(buf), "Password:", LOGIN_TIMEOUT);
             if (strstr(buf, "Password:")) {
-                write(g_fd, "0penBmc\r\x00", 9);
+                (void)write(g_fd, "0penBmc\r\x00", 9);
                 read_until(buf, sizeof(buf), TTY_PROMPT, LOGIN_TIMEOUT);
                 if (strstr(buf, TTY_PROMPT)) return 0;
             }
@@ -212,7 +212,7 @@ static int send_cmd(const char *cmd, char *out, int outsz)
     line[n + 1] = '\0';
 
     drain();
-    write(g_fd, line, n + 1);   /* includes the null byte */
+    (void)write(g_fd, line, n + 1);   /* includes the null byte */
 
     read_until(out, outsz, TTY_PROMPT, CMD_TIMEOUT);
     return strstr(out, TTY_PROMPT) ? 0 : -1;

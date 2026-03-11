@@ -12,18 +12,13 @@ Presence and power-good:
     psu2_pgood    — 1 = power good (bit 5, active-high)
   Requires wedge100s_cpld kernel module (Phase R26).
 
-PMBus telemetry:
-  BMC i2c-7; PCA9546 mux at 0x70 selects the PSU channel.
-    PSU1: mux channel byte 0x02, PMBus addr 0x59
-    PSU2: mux channel byte 0x01, PMBus addr 0x5a
-  Mux is selected with a single-byte I2C write (PCA9546 protocol —
-  no register address prefix; use 'i2cset BUS ADDR BYTE' form).
-
-  Registers read (LINEAR11 format):
-    0x88  READ_VIN   AC input voltage (V)
-    0x89  READ_IIN   AC input current (A)
-    0x8c  READ_IOUT  DC output current (A)
-    0x96  READ_POUT  DC output power (W)
+PMBus telemetry (Phase R29):
+  Read from /run/wedge100s/ files written by wedge100s-bmc-daemon (R28).
+  Files contain raw LINEAR11 16-bit words as plain decimal integers:
+    psu_{1,2}_vin   READ_VIN  (0x88) AC input voltage (V)
+    psu_{1,2}_iin   READ_IIN  (0x89) AC input current (A)
+    psu_{1,2}_iout  READ_IOUT (0x8c) DC output current (A)
+    psu_{1,2}_pout  READ_POUT (0x96) DC output power (W)
 
   DC output voltage (VOUT) is computed as POUT/IOUT to avoid
   LINEAR16 VOUT_MODE complexity (mirrors psui.c approach).
@@ -31,8 +26,6 @@ PMBus telemetry:
 Source: psui.c in ONL (OpenNetworkLinux).
 
 Hardware notes (hare-lorax, 2026-02-25):
-  - PSU1@0x59 ACKs directly on BMC i2c-7 without mux setup (confirmed
-    via i2cdetect); mux setup is still performed for correctness.
   - PSU1 had no AC power in the lab (pgood bit 1 = 0); PSU2 is live.
 """
 
@@ -43,11 +36,6 @@ try:
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
-try:
-    from sonic_platform import bmc
-except ImportError:
-    from . import bmc
-
 
 # ---------------------------------------------------------------------------
 # Host CPLD sysfs path (wedge100s_cpld driver, Phase R26)
@@ -57,25 +45,13 @@ _CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
 
 
 # ---------------------------------------------------------------------------
-# BMC PMBus constants
+# Daemon output directory (wedge100s-bmc-poller, Phase R28)
+# Files: psu_{1,2}_{vin,iin,iout,pout} — raw LINEAR11 word, decimal integer.
 # ---------------------------------------------------------------------------
 
-_BMC_MUX_BUS  = 7
-_BMC_MUX_ADDR = 0x70
+_RUN_DIR = '/run/wedge100s'
 
-# (mux_channel_byte, pmbus_addr) for each PSU (0-indexed)
-_PSU_BMC = [
-    (0x02, 0x59),   # PSU1
-    (0x01, 0x5a),   # PSU2
-]
-
-# PMBus registers (LINEAR11 format)
-_REG_VIN  = 0x88
-_REG_IIN  = 0x89
-_REG_IOUT = 0x8c
-_REG_POUT = 0x96
-
-# Telemetry cache: psud polls every ~60 s; 30 s cache reduces BMC load.
+# Telemetry cache: psud polls every ~60 s; 30 s cache reduces read load.
 _CACHE_TTL  = 30.0
 _psu_cache  = [{} for _ in range(2)]   # one dict per PSU (0-indexed)
 
@@ -127,29 +103,26 @@ def _read_cpld_attr(name):
         return None
 
 
-def _set_bmc_mux(channel):
-    """
-    Select a PCA9546 mux channel on BMC i2c-7 by writing a single byte
-    to the mux device (PCA9546 protocol: no register address).
-
-    Uses bmc.send_command() to issue 'i2cset -f -y BUS ADDR BYTE' with
-    three arguments — not four — because PCA9546 expects exactly one
-    configuration byte after the I2C address, not a register + value pair.
-
-    Returns True on success, False on BMC error.
-    """
-    cmd = 'i2cset -f -y {} 0x{:02x} 0x{:02x}'.format(
-        _BMC_MUX_BUS, _BMC_MUX_ADDR, channel)
-    return bmc.send_command(cmd) is not None
+def _read_daemon_int(path):
+    """Read a plain decimal integer from a bmc-poller daemon output file."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (IOError, OSError, ValueError):
+        return None
 
 
 def _read_psu_telemetry(psu_idx):
     """
-    Read PMBus telemetry for psu_idx (0-based) via BMC TTY.
+    Read PMBus telemetry for psu_idx (0-based) from daemon output files.
+
+    wedge100s-bmc-daemon writes raw LINEAR11 words (decimal) to:
+      /run/wedge100s/psu_{N}_{vin,iin,iout,pout}
+    where N = psu_idx + 1 (1-based).
 
     Returns a dict with any subset of keys:
       'vin', 'iin', 'iout', 'pout', 'vout', 'ts'
-    Missing keys mean the corresponding register read failed.
+    Missing keys mean the corresponding file was unreadable.
     Results are cached for _CACHE_TTL seconds.
     """
     now = time.monotonic()
@@ -157,25 +130,19 @@ def _read_psu_telemetry(psu_idx):
     if cached.get('ts', 0) + _CACHE_TTL > now:
         return cached
 
-    mux_ch, pmbus_addr = _PSU_BMC[psu_idx]
-
-    # Select mux channel; abort cache refresh on failure.
-    if not _set_bmc_mux(mux_ch):
-        _psu_cache[psu_idx] = {'ts': now}
-        return _psu_cache[psu_idx]
-
+    psu_n  = psu_idx + 1   # 1-based for file names
     result = {'ts': now}
 
-    def _rw(reg):
-        raw = bmc.i2cget_word(_BMC_MUX_BUS, pmbus_addr, reg)
+    def _rf(reg_name):
+        raw = _read_daemon_int('{}/psu_{}_{}'.format(_RUN_DIR, psu_n, reg_name))
         if raw is None:
             return None
         return _pmbus_decode_linear11(raw)
 
-    vin  = _rw(_REG_VIN)
-    iin  = _rw(_REG_IIN)
-    iout = _rw(_REG_IOUT)
-    pout = _rw(_REG_POUT)
+    vin  = _rf('vin')
+    iin  = _rf('iin')
+    iout = _rf('iout')
+    pout = _rf('pout')
 
     if vin  is not None: result['vin']  = vin
     if iin  is not None: result['iin']  = iin

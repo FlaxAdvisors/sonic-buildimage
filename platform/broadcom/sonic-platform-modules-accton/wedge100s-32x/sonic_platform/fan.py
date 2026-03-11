@@ -49,9 +49,9 @@ except ImportError:
 # Constants (from fani.c)
 # ---------------------------------------------------------------------------
 
-_FAN_BOARD_PATH = '/sys/bus/i2c/devices/8-0033/'
-_MAX_FAN_SPEED  = 15400   # RPM at 100 % duty cycle (per fani.c)
-NUM_FANS        = 5       # 5 fan trays
+_RUN_DIR       = '/run/wedge100s'
+_MAX_FAN_SPEED = 15400   # RPM at 100 % duty cycle (per fani.c)
+NUM_FANS       = 5       # 5 fan trays
 
 
 # ---------------------------------------------------------------------------
@@ -74,16 +74,26 @@ _fantray_cache = {'ts': 0.0, 'val': None}   # fantray_present bitmask
 _rpm_cache     = {}                           # {fan_index: {'ts', 'front', 'rear'}}
 
 
+def _daemon_read_int(path):
+    """Read a plain decimal integer from a bmc-poller daemon output file."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (IOError, OSError, ValueError):
+        return None
+
+
 def _cached_fantray_present():
     """
-    Return the fantray_present bitmask (hex), or None on BMC error.
+    Return the fantray_present bitmask, or None on failure.
+    Read from /run/wedge100s/fan_present (written as decimal by the daemon).
     Result is cached for _CACHE_TTL seconds; all 5 Fan objects share it.
     """
     now = time.monotonic()
     if (_fantray_cache['val'] is not None
             and now - _fantray_cache['ts'] < _CACHE_TTL):
         return _fantray_cache['val']
-    val = bmc.file_read_int(_FAN_BOARD_PATH + 'fantray_present', base=16)
+    val = _daemon_read_int(_RUN_DIR + '/fan_present')
     _fantray_cache['ts'] = now
     _fantray_cache['val'] = val
     return val
@@ -93,17 +103,15 @@ def _cached_rpm_pair(fan_index):
     """
     Return (front_rpm, rear_rpm) for fan tray fan_index (1-based).
     Each pair is cached for _CACHE_TTL seconds.
-    Returns (None, None) when the BMC is unreadable.
+    Returns (None, None) when the daemon files are unreadable.
     """
     now   = time.monotonic()
     entry = _rpm_cache.get(fan_index)
     if entry and now - entry['ts'] < _CACHE_TTL:
         return entry['front'], entry['rear']
 
-    front_path = _FAN_BOARD_PATH + 'fan{}_input'.format(fan_index * 2 - 1)
-    rear_path  = _FAN_BOARD_PATH + 'fan{}_input'.format(fan_index * 2)
-    front = bmc.file_read_int(front_path, base=10)
-    rear  = bmc.file_read_int(rear_path,  base=10)
+    front = _daemon_read_int('{}/fan_{}_front'.format(_RUN_DIR, fan_index))
+    rear  = _daemon_read_int('{}/fan_{}_rear'.format(_RUN_DIR, fan_index))
     _rpm_cache[fan_index] = {'ts': now, 'front': front, 'rear': rear}
     return front, rear
 

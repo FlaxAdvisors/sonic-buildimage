@@ -45,6 +45,10 @@ import time
 # Constants (match platform_lib.c)
 # ---------------------------------------------------------------------------
 
+# Public API (R29): only send_command() remains after R29 refactor.
+# Thermal/fan/PSU reads now come from /run/wedge100s/ daemon files.
+# send_command() is retained for fan.set_speed() → 'set_fan_speed.sh <pct>'.
+
 _TTY_DEVICE    = '/dev/ttyACM0'
 # OpenBMC root shell prompt: "root@HOSTNAME:~# "
 # Using ":~# " matches any root-at-home-dir prompt regardless of hostname.
@@ -227,85 +231,3 @@ def send_command(cmd):
     return None
 
 
-def _parse_int(buf, cmd, base):
-    """
-    Extract an integer from a BMC command response.
-
-    Mirrors bmc_command_read_int() in platform_lib.c:
-      - Finds the last echo of cmd in buf.
-      - Parses the first numeric token that follows it.
-
-    buf  -- response string returned by send_command
-    cmd  -- the original command string (without \\r\\n)
-    base -- numeric base (10 for decimal sysfs values, 16 for i2cget hex)
-    """
-    idx = buf.rfind(cmd)
-    if idx == -1:
-        return None
-    rest = buf[idx + len(cmd):]
-    for token in rest.split():
-        try:
-            return int(token, base)
-        except (ValueError, TypeError):
-            continue
-    return None
-
-
-def file_read_int(path, base=10):
-    """
-    Read an integer from a file on the BMC filesystem via 'cat'.
-
-    path -- absolute path on the BMC, e.g.
-            '/sys/bus/i2c/drivers/lm75/3-0048/temp1_input'
-    base -- 10 for decimal (temperature sysfs), 16 for hex registers
-
-    Returns integer value or None on failure.
-    Mirrors bmc_file_read_int() in platform_lib.c.
-    """
-    cmd = 'cat {}'.format(path)
-    buf = send_command(cmd)
-    if buf is None:
-        return None
-    return _parse_int(buf, cmd, base)
-
-
-def i2cget_byte(bus, addr, reg):
-    """
-    Read a byte from a BMC I2C bus via i2cget.
-
-    bus, addr, reg -- BMC-local bus number and device/register addresses
-
-    Returns integer byte value (0–255) or None on failure.
-    Mirrors bmc_i2c_readb() in platform_lib.c.
-    """
-    cmd = 'i2cget -f -y {} 0x{:02x} 0x{:02x}'.format(bus, addr, reg)
-    buf = send_command(cmd)
-    if buf is None:
-        return None
-    return _parse_int(buf, cmd, 16)
-
-
-def i2cget_word(bus, addr, reg):
-    """
-    Read a 16-bit word from a BMC I2C bus via 'i2cget ... w'.
-
-    Returns integer word value or None on failure.
-    Mirrors bmc_i2c_readw() in platform_lib.c.
-    """
-    cmd = 'i2cget -f -y {} 0x{:02x} 0x{:02x} w'.format(bus, addr, reg)
-    buf = send_command(cmd)
-    if buf is None:
-        return None
-    return _parse_int(buf, cmd, 16)
-
-
-def i2cset_byte(bus, addr, reg, value):
-    """
-    Write a byte to a BMC I2C bus via i2cset.
-
-    Returns True on success, False on failure.
-    Mirrors bmc_i2c_writeb() in platform_lib.c.
-    """
-    cmd = 'i2cset -f -y {} 0x{:02x} 0x{:02x} 0x{:02x}'.format(
-        bus, addr, reg, value)
-    return send_command(cmd) is not None

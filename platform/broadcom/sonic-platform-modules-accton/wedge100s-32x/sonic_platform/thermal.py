@@ -14,13 +14,8 @@ sonic_platform/thermal.py — Thermal sensors for Accton Wedge 100S-32X.
   Index 7 — TMP75-7      BMC i2c-8/0x49
 
 CPU Core is read directly from host sysfs (coretemp driver).
-TMP75 sensors live on the OpenBMC I2C buses; they are accessed by sending
-'cat <sysfs-path>' to the BMC via /dev/ttyACM0 using bmc.file_read_int().
-
-BMC paths use a hwmon wildcard (hwmonN number is not stable on OpenBMC).
-Wildcard in the path is expanded by the BMC shell; bmc.py's _parse_int()
-searches for the original (pre-expansion) command string in the echo, so
-the wildcard form is safe to pass directly to file_read_int().
+TMP75 sensors are read from /run/wedge100s/thermal_N files written by
+wedge100s-bmc-daemon (Phase R28); values are millidegrees C (decimal).
 
 Verified on hardware (hare-lorax, SONiC 6.1.0-29-2-amd64, 2026-02-25):
   3-0048 → 23.75 °C,  3-0049 → 22.9 °C,  3-004a → 23.1 °C,
@@ -35,19 +30,17 @@ try:
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
-try:
-    from sonic_platform import bmc
-except ImportError:
-    from . import bmc
-
 
 # ---------------------------------------------------------------------------
 # Sensor table
 #   (name, source, path, high_threshold_C, high_critical_threshold_C)
 #
-# 'host' — read with Python glob directly from the host filesystem.
-# 'bmc'  — read via BMC TTY using bmc.file_read_int(path).
+# 'host'   — read with Python glob directly from the host filesystem.
+# 'daemon' — read from /run/wedge100s/thermal_N written by bmc-poller.timer.
 # ---------------------------------------------------------------------------
+
+_RUN_DIR = '/run/wedge100s'
+
 _SENSORS = [
     # Index 0: CPU Core — report the highest reading across all cores.
     # Broadwell-DE D1508 Tjmax ≈ 105 °C; thresholds match common SONiC policy.
@@ -59,14 +52,14 @@ _SENSORS = [
         102.0,
     ),
     # Indices 1–5: mainboard TMP75 sensors on BMC i2c-3.
-    ("TMP75-1", "bmc", "/sys/bus/i2c/devices/3-0048/hwmon/*/temp1_input", 70.0, 80.0),
-    ("TMP75-2", "bmc", "/sys/bus/i2c/devices/3-0049/hwmon/*/temp1_input", 70.0, 80.0),
-    ("TMP75-3", "bmc", "/sys/bus/i2c/devices/3-004a/hwmon/*/temp1_input", 70.0, 80.0),
-    ("TMP75-4", "bmc", "/sys/bus/i2c/devices/3-004b/hwmon/*/temp1_input", 70.0, 80.0),
-    ("TMP75-5", "bmc", "/sys/bus/i2c/devices/3-004c/hwmon/*/temp1_input", 70.0, 80.0),
+    ("TMP75-1", "daemon", _RUN_DIR + "/thermal_1", 70.0, 80.0),
+    ("TMP75-2", "daemon", _RUN_DIR + "/thermal_2", 70.0, 80.0),
+    ("TMP75-3", "daemon", _RUN_DIR + "/thermal_3", 70.0, 80.0),
+    ("TMP75-4", "daemon", _RUN_DIR + "/thermal_4", 70.0, 80.0),
+    ("TMP75-5", "daemon", _RUN_DIR + "/thermal_5", 70.0, 80.0),
     # Indices 6–7: fan-board TMP75 sensors on BMC i2c-8.
-    ("TMP75-6", "bmc", "/sys/bus/i2c/devices/8-0048/hwmon/*/temp1_input", 70.0, 80.0),
-    ("TMP75-7", "bmc", "/sys/bus/i2c/devices/8-0049/hwmon/*/temp1_input", 70.0, 80.0),
+    ("TMP75-6", "daemon", _RUN_DIR + "/thermal_6", 70.0, 80.0),
+    ("TMP75-7", "daemon", _RUN_DIR + "/thermal_7", 70.0, 80.0),
 ]
 
 NUM_THERMALS = len(_SENSORS)
@@ -96,7 +89,7 @@ class Thermal(ThermalBase):
         """Return current temperature in °C, or None on failure."""
         if self._source == "host":
             return self._read_host_temp_max()
-        return self._read_bmc_temp()
+        return self._read_daemon_temp()
 
     def _read_host_temp_max(self):
         """
@@ -118,17 +111,17 @@ class Thermal(ThermalBase):
                 pass
         return best
 
-    def _read_bmc_temp(self):
+    def _read_daemon_temp(self):
         """
-        Read a TMP75 temperature via BMC TTY.
-        bmc.file_read_int() sends 'cat <path>' to the BMC shell and parses
-        the integer result.  The sysfs value is in millidegrees; divide by
-        1000 to get °C.
+        Read a TMP75 temperature from the bmc-poller daemon output file.
+        The file contains a plain decimal integer in millidegrees C written
+        by wedge100s-bmc-daemon (R28); divide by 1000 to get °C.
         """
-        raw = bmc.file_read_int(self._path)
-        if raw is None:
+        try:
+            with open(self._path) as f:
+                return int(f.read().strip()) / 1000.0
+        except (IOError, OSError, ValueError):
             return None
-        return raw / 1000.0
 
     def _update_minmax(self, temp):
         if temp is not None:

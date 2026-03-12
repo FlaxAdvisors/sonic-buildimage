@@ -113,25 +113,68 @@ print("wedge100s postinst: patched " + PMON_SH + " — /run/wedge100s volume add
 PYEOF
 fi
 
-# Regenerate bash completion files for SONiC Click CLIs to Click 8.x format.
+# Convert Click 7.x bash completion files to Click 8.x format.
 #
-# SONiC ships completion files in /etc/bash_completion.d/ that were generated
-# with Click 7.x (_CONFIG_COMPLETE=complete). Click 8.x changed the env var to
-# _CONFIG_COMPLETE=bash_source; stale files cause tab-completion to fall back
-# to filesystem listing rather than showing breakout modes, show subcommands, etc.
-# We regenerate here so this is fixed on every .deb install without waiting for
-# an upstream sonic-utilities fix.
-for _cli in config show sonic-clear acl-loader crm pfcwd pfc counterpoll; do
-    if [ -f "/etc/bash_completion.d/${_cli}" ] && command -v "${_cli}" >/dev/null 2>&1; then
-        _var="_$(echo "${_cli}" | tr 'a-z-' 'A-Z_')_COMPLETE"
-        _out=$(env "${_var}=bash_source" "${_cli}" 2>/dev/null || true)
-        if echo "${_out}" | grep -q '_completion()'; then
-            printf '%s\n' "${_out}" > "/etc/bash_completion.d/${_cli}"
-            echo "wedge100s postinst: refreshed bash completion for ${_cli}"
+# SONiC ships completion files generated with Click 7.x (_CMD_COMPLETE=complete).
+# Click 8.x changed the runtime completion env var to _CMD_COMPLETE=bash_complete
+# and changed the response format to "type<TAB>value" lines.  Click 7 files are
+# syntactically valid bash (no login errors) but tab-completion returns nothing
+# because Click 8.x ignores the old env var.
+#
+# We convert via pure text transformation — no need to run the CLI, so there is
+# no dependency on the SONiC database being up at postinst time.
+python3 - <<'PYEOF'
+import os, re, sys
+
+COMPLETION_DIR = "/etc/bash_completion.d"
+
+# Click 8 bash_source completion template.
+# Uses bash_complete (runtime) env var and handles typed "plain/dir/file" responses.
+CLICK8_TMPL = """\
+_{func}() {{
+    local IFS=$'\\n'
+    local response
+    response=$(env COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD=$COMP_CWORD \\
+               {envvar}=bash_complete {cmd} 2>/dev/null)
+    for completion in $response; do
+        IFS='' read -r type value <<< "$completion"
+        if [[ $type == 'plain' ]]; then
+            COMPREPLY+=($value)
+        elif [[ $type == 'dir' ]]; then
+            COMPREPLY=(); compopt -o dirnames
+        elif [[ $type == 'file' ]]; then
+            COMPREPLY=(); compopt -o default
         fi
-    fi
-done
-unset _cli _var _out
+    done
+    return 0
+}}
+complete -o nosort -F _{func} {cmd}
+"""
+
+for fname in sorted(os.listdir(COMPLETION_DIR)):
+    fpath = os.path.join(COMPLETION_DIR, fname)
+    if not os.path.isfile(fpath):
+        continue
+    try:
+        text = open(fpath).read()
+    except OSError:
+        continue
+    # Detect Click 7: function body calls _CMD_COMPLETE=complete
+    if '_COMPLETE=complete' not in text:
+        continue
+    # Extract command name from: complete -F _foo_completion [-o ...] cmdname
+    m = re.search(r'^complete\s+.*\s+(\S+)\s*$', text, re.MULTILINE)
+    if not m:
+        continue
+    cmd = m.group(1)
+    # Build env var: cmd → upper, hyphens → underscores, prefix/suffix _COMPLETE
+    envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
+    # Build function name: cmd → lower, hyphens → underscores
+    func = cmd.lower().replace('-', '_') + '_completion'
+    new_text = CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd)
+    open(fpath, 'w').write(new_text)
+    print("wedge100s postinst: converted Click 7→8 completion for " + fname)
+PYEOF
 
 # If pmon container already exists but is stopped, remove it so the next
 # supervisor start recreates it with the updated flags.

@@ -4,6 +4,24 @@ depmod -a
 systemctl enable wedge100s-platform-init.service
 systemctl start wedge100s-platform-init.service
 
+# Install a pmon.service drop-in that binds pmon's lifetime to
+# wedge100s-platform-init.  This ensures:
+#  - pmon starts after wedge100s-platform-init (After=) — complements
+#    the Before=pmon.service already in wedge100s-platform-init.service
+#  - pmon is stopped whenever wedge100s-platform-init stops (BindsTo=),
+#    even on manual "systemctl stop wedge100s-platform-init".
+#    Without this, xcvrd continues accessing the i2c mux tree while
+#    accton_wedge100s_util.py clean tears it down → I2C bus hang.
+DROPIN_DIR="/etc/systemd/system/pmon.service.d"
+DROPIN_FILE="$DROPIN_DIR/wedge100s-dependency.conf"
+mkdir -p "$DROPIN_DIR"
+cat > "$DROPIN_FILE" <<'EOF'
+[Unit]
+After=wedge100s-platform-init.service
+EOF
+systemctl daemon-reload
+echo "wedge100s postinst: installed pmon.service drop-in $DROPIN_FILE"
+
 # Phase R28: enable BMC sensor polling daemon timer.
 # The timer fires every 10 s and invokes wedge100s-bmc-daemon (one-shot),
 # which reads all BMC sensors in a single TTY session and writes plain-integer

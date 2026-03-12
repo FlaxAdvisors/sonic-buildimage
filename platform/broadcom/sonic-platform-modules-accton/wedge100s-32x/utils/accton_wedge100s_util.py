@@ -35,6 +35,7 @@ import getopt
 import sys
 import logging
 import os
+import re
 import time
 
 PROJECT_NAME = 'wedge100s_32x'
@@ -312,27 +313,58 @@ def _cache_eeprom():
 
 
 def _pin_bcm_irq():
-    """Pin the BCM56960 (linux-kernel-bde) interrupt to CPU 0.
+    """Manage IRQ affinity to prevent BCM56960 interrupt storms from stalling SSH.
 
-    The BCM56960 ASIC fires ~150 hardware interrupts/second on IRQ 16 via
-    linux-kernel-bde.  With the default SMP affinity (all CPUs), the kernel's
-    HI softirq queue on a randomly chosen CPU saturates, creating 15-30 second
-    windows where sshd cannot accept new connections.
+    Root cause (confirmed 2026-03-12):
+      - BCM56960 (linux-kernel-bde) is on XT-PIC IRQ 11, hardwired to CPU0.
+        smp_affinity cannot move it.  Baseline: 150-700 IRQ/s.
+      - 32 BGP neighbors configured on DOWN Ethernet* ports cause bgpd to retry
+        ARP continuously.  The BCM ASIC CPU-traps these, spiking IRQ11 to
+        5000-6000/s.  CPU0 softirq saturates, stalling NET_RX_SOFTIRQ.
+      - eth0-TxRx-0 (PCI-MSI, typically IRQ 55) is also on CPU0 by default.
+        During BCM bursts, eth0 RX processing halts, dropping all new TCP SYNs
+        and ICMP — SSH blackouts of 30-50 s.
 
-    Pinning IRQ 16 exclusively to CPU 0 leaves CPUs 1-3 free for userspace
-    (sshd, pmon, syncd).  ONL avoids this with noapic in kernel args; we do
-    both: noapic in installer.conf for new installs, smp_affinity here for
-    running systems.
+    Fix: move eth0-TxRx-0 to CPU2 (smp_affinity=4) so management-plane RX
+    is isolated from BCM's interrupt load on CPU0.
 
-    Measured improvement: first SSH connect 65 s → 0.25 s (verified 2026-03-11).
+    Dynamically discovers both IRQ numbers from /proc/interrupts so this
+    remains correct across kernel versions.
     """
-    affinity_path = '/proc/irq/16/smp_affinity'
     try:
-        with open(affinity_path, 'w') as f:
-            f.write('1\n')
-        my_log("BCM IRQ 16 pinned to CPU 0 ({})".format(affinity_path))
+        with open('/proc/interrupts') as f:
+            lines = f.readlines()
     except Exception as e:
-        print("WARNING: Could not pin BCM IRQ 16 to CPU 0: {}".format(e))
+        print("WARNING: Could not read /proc/interrupts: {}".format(e))
+        return
+
+    bcm_irq = None
+    eth_irq = None
+    for line in lines:
+        if 'linux-kernel-bde' in line:
+            bcm_irq = line.split(':')[0].strip()
+        if re.search(r'\beth0-TxRx-0\b', line):
+            eth_irq = line.split(':')[0].strip()
+
+    if bcm_irq:
+        my_log("BCM56960 (linux-kernel-bde) is on XT-PIC IRQ {} (CPU0 hardwired, "
+               "cannot change affinity)".format(bcm_irq))
+    else:
+        my_log("WARNING: linux-kernel-bde not found in /proc/interrupts")
+
+    if eth_irq:
+        affinity_path = '/proc/irq/{}/smp_affinity'.format(eth_irq)
+        try:
+            with open(affinity_path, 'w') as f:
+                f.write('4\n')   # CPU2 bitmask: isolate mgmt RX from CPU0 BCM storms
+            my_log("eth0-TxRx-0 (IRQ {}) moved to CPU2 to isolate from BCM "
+                   "interrupt storms on CPU0".format(eth_irq))
+        except Exception as e:
+            print("WARNING: Could not set eth0-TxRx-0 affinity (IRQ {}): {}".format(
+                eth_irq, e))
+    else:
+        my_log("WARNING: eth0-TxRx-0 not found in /proc/interrupts — "
+               "SSH may be affected by BCM interrupt storms")
 
 
 def _export_presence_gpios():

@@ -64,6 +64,41 @@ class Chassis(ChassisBase):
         platform_smbus.read_byte(36, 0x22, 0)
         platform_smbus.read_byte(37, 0x23, 0)
 
+    # ------------------------------------------------------------------
+    # Status LED  (SYS1 — system-status indicator on CPLD reg 0x3e)
+    # healthd calls set_status_led(GREEN|RED|AMBER|OFF) to reflect the
+    # overall health state.  The CPLD driver exposes the attr led_sys1.
+    # led_control.py owns SYS2 (port-activity) independently via ledd.
+    # ------------------------------------------------------------------
+    _CPLD_SYSFS    = '/sys/bus/i2c/devices/1-0032'
+    _LED_ENCODE = {
+        'green': 0x02,
+        'red':   0x01,
+        'amber': 0x01,   # hardware has no amber; map to red
+        'off':   0x00,
+    }
+    _LED_DECODE = {v: k for k, v in _LED_ENCODE.items()}
+    _LED_DECODE[0x01] = 'red'   # canonical decode for 0x01
+
+    def set_status_led(self, color):
+        val = self._LED_ENCODE.get(color)
+        if val is None:
+            return False
+        try:
+            with open('{}/led_sys1'.format(self._CPLD_SYSFS), 'w') as f:
+                f.write(str(val))
+            return True
+        except Exception:
+            return False
+
+    def get_status_led(self):
+        try:
+            with open('{}/led_sys1'.format(self._CPLD_SYSFS)) as f:
+                val = int(f.read().strip(), 0)
+            return self._LED_DECODE.get(val, self.STATUS_LED_COLOR_OFF)
+        except Exception:
+            return self.STATUS_LED_COLOR_OFF
+
     def get_name(self):
         return "Wedge 100S-32X"
 

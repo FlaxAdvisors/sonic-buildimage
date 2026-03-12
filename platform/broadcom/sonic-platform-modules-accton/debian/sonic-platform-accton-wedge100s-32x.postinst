@@ -4,6 +4,13 @@ depmod -a
 systemctl enable wedge100s-platform-init.service
 systemctl start wedge100s-platform-init.service
 
+# sysstat was enabled for SSH-blackout investigation; disable it to reduce
+# journal noise (8,640 "Starting/Finished sysstat-collect" lines/day at 10 min intervals).
+if systemctl is-enabled sysstat >/dev/null 2>&1; then
+    systemctl disable --now sysstat >/dev/null 2>&1 || true
+    echo "wedge100s postinst: disabled sysstat (not needed on this platform)"
+fi
+
 # Install a pmon.service drop-in that binds pmon's lifetime to
 # wedge100s-platform-init.  This ensures:
 #  - pmon starts after wedge100s-platform-init (After=) — complements
@@ -225,6 +232,115 @@ for fname in sorted(os.listdir(COMPLETION_DIR)):
     open(fpath, 'w').write(CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd))
     print('wedge100s postinst: repaired completion for ' + fname + ' (cmd=' + cmd + ')')
 PYEOF
+
+# Silence memory_checker's routine syslog output during normal (within-threshold) checks.
+#
+# memory_checker fires every 60 s per monitored container and logs 4 INFO lines
+# ("Container ID / memory / cache / total") unconditionally, even when everything
+# is fine.  On threshold breach it exits with code 3 and prints to stdout (which
+# monit captures); on errors it logs LOG_ERR.  The routine INFO lines have no
+# operational value and generate ~6,000 journal lines/day.
+#
+# Fix 1: Remove the bmp and otel monit checks — those containers are not deployed
+#         on this platform; the "not running" message fires every 60 s for nothing.
+# Fix 2: Strip the four routine syslog.LOG_INFO calls from check_memory_usage()
+#         so the script is silent on success and noisy only on error/threshold.
+#
+# Note: an earlier postinst version demoted these to LOG_DEBUG; if that marker is
+# present the patch below re-targets LOG_DEBUG instead of LOG_INFO.
+
+for f in /etc/monit/conf.d/monit_bmp /etc/monit/conf.d/monit_otel; do
+    if [ -f "$f" ]; then
+        rm -f "$f"
+        echo "wedge100s postinst: removed unused monit check $f"
+    fi
+done
+
+MEMORY_CHECKER="/usr/bin/memory_checker"
+if [ -f "$MEMORY_CHECKER" ] && ! grep -q "wedge100s: routine-checks-silenced" "$MEMORY_CHECKER"; then
+    python3 - <<'PYEOF'
+import re, sys
+
+MEM_CHECKER = "/usr/bin/memory_checker"
+
+try:
+    text = open(MEM_CHECKER).read()
+except OSError as e:
+    print("wedge100s postinst: WARNING: cannot read {}: {}".format(MEM_CHECKER, e), file=sys.stderr)
+    sys.exit(0)
+
+# Accept either LOG_INFO (fresh install) or LOG_DEBUG (old postinst patched file).
+LVL = r'LOG_(?:INFO|DEBUG)'
+
+# Remove the four syslog calls that fire on every successful check.
+# Each is a two-line statement: syslog.syslog(..., "msg"\n    .format(...))
+patterns = [
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] Container ID of[^\n]*\n[^\n]*\)',
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] The memory usage of container[^\n]*\n[^\n]*\)',
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] The cache usage of container[^\n]*\n[^\n]*\)',
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] Total memory usage of container[^\n]*\n[^\n]*\)',
+]
+
+new_text = text
+for pat in patterns:
+    new_text = re.sub(pat, '', new_text)
+
+if new_text == text:
+    print("wedge100s postinst: WARNING: memory_checker patch matched nothing — skipped", file=sys.stderr)
+    sys.exit(0)
+
+open(MEM_CHECKER, 'w').write(new_text)
+print("wedge100s postinst: patched memory_checker — removed routine check_memory_usage syslog calls")
+PYEOF
+    echo "# wedge100s: routine-checks-silenced" >> "$MEMORY_CHECKER"
+fi
+
+# Patch the chrony dhclient exit hook to skip reload when NTP servers are unchanged.
+# The stock hook unconditionally deletes and rewrites the sources file on every
+# DHCP RENEW (even with identical IPs), causing chrony to log a burst of
+# "Removed source / Added source" messages every ~60 min (DHCP lease renewal).
+# The patched version compares new vs existing content and skips the reload if equal.
+CHRONY_HOOK="/etc/dhcp/dhclient-exit-hooks.d/chrony"
+if [ -f "$CHRONY_HOOK" ] && ! grep -q "wedge100s: idempotent" "$CHRONY_HOOK"; then
+    cat > "$CHRONY_HOOK" <<'EOF'
+# wedge100s: idempotent
+CHRONY_SOURCEDIR=/run/chrony-dhcp
+SERVERFILE=$CHRONY_SOURCEDIR/$interface.sources
+
+chrony_config() {
+    mkdir -p "$CHRONY_SOURCEDIR"
+    # Build the new file content without writing it yet.
+    local newcontent=""
+    for server in $new_ntp_servers; do
+        newcontent="${newcontent}server $server iburst
+"
+    done
+    # Skip the reload entirely when the server list is unchanged.
+    if [ -f "$SERVERFILE" ] && [ "$(cat "$SERVERFILE")" = "$newcontent" ]; then
+        return
+    fi
+    printf '%s' "$newcontent" > "$SERVERFILE"
+    /usr/bin/chronyc reload sources > /dev/null 2>&1 || :
+}
+
+chrony_restore() {
+    if [ -f "$SERVERFILE" ]; then
+        rm -f "$SERVERFILE"
+        /usr/bin/chronyc reload sources > /dev/null 2>&1 || :
+    fi
+}
+
+case $reason in
+    BOUND|RENEW|REBIND|REBOOT)
+        chrony_config
+        ;;
+    EXPIRE|FAIL|RELEASE|STOP)
+        chrony_restore
+        ;;
+esac
+EOF
+    echo "wedge100s postinst: patched $CHRONY_HOOK — idempotent NTP source reload"
+fi
 
 # If pmon container already exists but is stopped, remove it so the next
 # supervisor start recreates it with the updated flags.

@@ -444,6 +444,22 @@ def do_install():
 
 
 def do_uninstall():
+    # Safety check: deleting PCA9548 mux devices while xcvrd holds the CP2112
+    # I2C bus causes i2c_del_adapter() to block forever → kernel hung_task panic.
+    # Refuse to uninstall if the pmon container is running.
+    try:
+        import subprocess as _sp
+        status_out = _sp.run(
+            ['docker', 'inspect', '--format={{.State.Status}}', 'pmon'],
+            capture_output=True, text=True
+        ).stdout.strip()
+        if status_out == 'running':
+            print("ABORT: pmon is running — stopping it would race with xcvrd on the I2C bus.")
+            print("Run 'sudo systemctl stop pmon' and wait for xcvrd to exit before cleaning.")
+            return 1
+    except Exception:
+        pass  # docker not available; proceed
+
     print("Checking system...")
     if device_exist():
         print("Unregistering I2C devices...")

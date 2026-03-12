@@ -137,7 +137,7 @@ _{func}() {{
     response=$(env COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD=$COMP_CWORD \\
                {envvar}=bash_complete {cmd} 2>/dev/null)
     for completion in $response; do
-        IFS='' read -r type value <<< "$completion"
+        IFS=',' read type value <<< "$completion"
         if [[ $type == 'plain' ]]; then
             COMPREPLY+=($value)
         elif [[ $type == 'dir' ]]; then
@@ -162,11 +162,13 @@ for fname in sorted(os.listdir(COMPLETION_DIR)):
     # Detect Click 7: function body calls _CMD_COMPLETE=complete
     if '_COMPLETE=complete' not in text:
         continue
-    # Extract command name from: complete -F _foo_completion [-o ...] cmdname
-    m = re.search(r'^complete\s+.*\s+(\S+)\s*$', text, re.MULTILINE)
+    # Extract command name from: complete [-o ...] -F _foo_completion cmdname
+    # Allow leading whitespace (some files indent the complete call inside a setup fn).
+    # Strip trailing semicolons that some generators append.
+    m = re.search(r'^[ \t]*complete[ \t]+.*[ \t]+(\S+)[ \t]*$', text, re.MULTILINE)
     if not m:
         continue
-    cmd = m.group(1)
+    cmd = m.group(1).rstrip(';')
     # Build env var: cmd → upper, hyphens → underscores, prefix/suffix _COMPLETE
     envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
     # Build function name: cmd → lower, hyphens → underscores
@@ -174,6 +176,36 @@ for fname in sorted(os.listdir(COMPLETION_DIR)):
     new_text = CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd)
     open(fpath, 'w').write(new_text)
     print("wedge100s postinst: converted Click 7→8 completion for " + fname)
+
+# Second pass: fix any completion file that fails bash -n syntax check.
+# This catches files previously broken by a failed bash_source regeneration
+# attempt (e.g. Python import error prepended to otherwise valid completion).
+# Third pass: fix any file whose complete line has a semicolon in the command name.
+# bash -n passes these (semicolon is valid syntax) but at runtime bash executes
+# the part before ';' as a command, causing login errors.
+import subprocess
+for fname in sorted(os.listdir(COMPLETION_DIR)):
+    fpath = os.path.join(COMPLETION_DIR, fname)
+    if not os.path.isfile(fpath):
+        continue
+    try:
+        text = open(fpath).read()
+    except OSError:
+        continue
+    syntax_ok = subprocess.run(['bash', '-n', fpath], capture_output=True).returncode == 0
+    m = re.search(r'^[ \t]*complete[ \t]+.*[ \t]+(\S+)[ \t]*$', text, re.MULTILINE)
+    raw_cmd = m.group(1) if m else ''
+    cmd = raw_cmd.rstrip(';')
+    needs_fix = not syntax_ok or (cmd != raw_cmd)
+    if not needs_fix:
+        continue
+    if not cmd or not m:
+        print('wedge100s postinst: WARNING: cannot fix broken completion ' + fname)
+        continue
+    envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
+    func = cmd.lower().replace('-', '_') + '_completion'
+    open(fpath, 'w').write(CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd))
+    print('wedge100s postinst: repaired completion for ' + fname + ' (cmd=' + cmd + ')')
 PYEOF
 
 # If pmon container already exists but is stopped, remove it so the next

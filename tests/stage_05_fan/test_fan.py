@@ -131,8 +131,8 @@ def test_fan_api_present_fans_spinning(ssh):
     all_zero = all(f["speed_pct"] == 0 and f["speed_rpm"] is None for f in present_fans)
     if all_zero:
         pytest.xfail(
-            "All present fans report speed=0% and RPM=None — likely a transient "
-            "BMC TTY timeout from earlier tests exhausting the serial port. "
+            "All present fans report speed=0% and RPM=None — bmc-daemon fan files "
+            "unreadable (wedge100s-bmc-poller may not be running). "
             "Re-run the stage in isolation to confirm: ./run_tests.py stage_05_fan"
         )
 
@@ -162,7 +162,7 @@ def test_fan_api_present_fans_rpm(ssh):
     all_none = all(f["speed_rpm"] is None for f in present_fans)
     if all_none:
         pytest.xfail(
-            "All present fans returned RPM=None — transient BMC TTY timeout. "
+            "All present fans returned RPM=None — bmc-daemon fan files unreadable. "
             "Re-run the fan stage in isolation to confirm: ./run_tests.py stage_05_fan"
         )
 
@@ -201,26 +201,44 @@ def test_fan_api_status_matches_presence(ssh):
 
 
 # ------------------------------------------------------------------
-# BMC fan sysfs (direct check)
+# Daemon file direct check
 # ------------------------------------------------------------------
 
-def test_bmc_fan_sysfs_readable(ssh):
-    """Fan RPM files are readable on the BMC fan board (i2c-8/0x33)."""
+def test_fan_daemon_files_readable(ssh):
+    """Fan RPM daemon files (/run/wedge100s/fan_N_{front,rear}) are readable.
+
+    wedge100s-bmc-poller writes per-tray front/rear RPM values and a
+    presence bitmask to /run/wedge100s/.  fan.py reads these directly.
+    """
     code = """\
-from sonic_platform import bmc
-# Fan board at BMC i2c-8/0x33
-base = '/sys/bus/i2c/devices/8-0033'
+_RUN_DIR = '/run/wedge100s'
 results = []
-for i in range(1, 11):
-    val = bmc.file_read_int(f'{base}/fan{i}_input')
-    results.append(f'fan{i}_input={val}')
+for i in range(1, 6):
+    for side in ('front', 'rear'):
+        path = f'{_RUN_DIR}/fan_{i}_{side}'
+        try:
+            val = int(open(path).read().strip())
+            results.append(f'fan_{i}_{side}={val}')
+        except Exception as e:
+            results.append(f'fan_{i}_{side}=ERR({e})')
+# presence bitmask
+try:
+    pres = int(open(f'{_RUN_DIR}/fan_present').read().strip())
+    results.append(f'fan_present=0x{pres:02x}')
+except Exception as e:
+    results.append(f'fan_present=ERR({e})')
 print(' | '.join(results))
 """
-    out, err, rc = ssh.run_python(code, timeout=30)
-    print(f"\nBMC fan sysfs: {out.strip()}")
-    assert rc == 0, f"BMC fan sysfs script failed: {err}"
-    assert "fan1_input" in out, "No fan sysfs data returned from BMC"
-    # At least one fan should be non-zero
+    out, err, rc = ssh.run_python(code, timeout=15)
+    print(f"\nFan daemon files: {out.strip()}")
+    assert rc == 0, f"Fan daemon file script failed: {err}"
     import re
-    values = [int(m) for m in re.findall(r"=(\d+)", out) if int(m) > 0]
-    assert values, f"All BMC fan RPM readings are 0 or None: {out}"
+    good_rpm = [int(m) for m in re.findall(r"fan_\d+_(?:front|rear)=(\d+)", out)
+                if int(m) > 0]
+    assert good_rpm, (
+        f"All fan daemon RPM readings are 0 or unreadable: {out}\n"
+        "Is wedge100s-bmc-poller running? Check: systemctl status wedge100s-bmc-poller"
+    )
+    assert "fan_present=ERR" not in out, (
+        f"fan_present bitmask unreadable: {out}"
+    )

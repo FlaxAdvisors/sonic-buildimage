@@ -39,20 +39,46 @@ def _cpld_write(attr, val):
         pass
 
 
+def _state_db_port_states():
+    """
+    Read current netdev_oper_status for all PORT_TABLE entries from STATE_DB.
+    Returns a dict of {port_name: bool} (True = up).
+    Falls back to an empty dict if swsscommon is unavailable.
+
+    SONiC's ledd only fires port_link_state_change() on transitions, so
+    without this initial scan SYS2 stays off whenever ledd starts after
+    ports are already up (e.g. after a pmon restart).
+    """
+    try:
+        from swsscommon.swsscommon import DBConnector, Table
+        db  = DBConnector('STATE_DB', 0)
+        tbl = Table(db, 'PORT_TABLE')
+        states = {}
+        for key in tbl.getKeys():
+            _, fvs = tbl.get(key)
+            for field, value in fvs:
+                if field == 'netdev_oper_status':
+                    states[key] = (value == 'up')
+        return states
+    except Exception:
+        return {}
+
+
 class LedControl(LedControlBase):
     """
     LED control plugin for Accton Wedge 100S-32X.
 
-    On init  : SYS1 = green (system running), SYS2 = off (no links yet)
+    On init  : SYS1 = green (system running), SYS2 reflects current STATE_DB
     On link-up   : SYS2 → green
     On last link-down: SYS2 → off
     SYS1 remains green for the lifetime of ledd.
     """
 
     def __init__(self):
-        self._port_states = {}          # port_name → bool (True = up)
-        _cpld_write('led_sys1', _LED_GREEN)   # system running
-        _cpld_write('led_sys2', _LED_OFF)     # no ports up yet
+        self._port_states = _state_db_port_states()
+        _cpld_write('led_sys1', _LED_GREEN)
+        any_up = any(self._port_states.values())
+        _cpld_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)
 
     def port_link_state_change(self, port, state):
         self._port_states[port] = (state == 'up')

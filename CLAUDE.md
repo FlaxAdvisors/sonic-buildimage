@@ -47,6 +47,12 @@ I need claude to act as the expert here. Take direction for changes but be sure 
 - Fallback: `/dev/ttyACM0` at 57600 baud (blocking mode, login: root / 0penBmc)
 - Use: no python is available
 
+### Peer wedge100s running Arista EOS
+- Access: `sshpass -p '0penSesame' ssh -o StrictHostKeyChecking=no -J admin@192.168.88.12 admin@192.168.88.14 '<command>'`
+- Platform: Accton Wedge 100S-32X running Arista EOS
+- PortChannel1: `10.0.1.0/31` (SONiC peer is `10.0.1.1/31`), members Et13/1 + Et14/1
+- Note: direct SSH from dev host blocked when LACP links are up; always jump via 192.168.88.12
+
 ### BMC Reachability Warning
 **BEFORE attempting SSH to hardware targets check if they are ping-reachable but SSH-unreachable.
 This happens after every BMC reboot because `authorized_keys` is cleared on reset.

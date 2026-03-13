@@ -4,12 +4,16 @@ Verifies FEC and auto-negotiation configuration on the Wedge 100S-32X
 Tomahawk platform.  Tests config CLI acceptance, CONFIG_DB/APP_DB
 propagation, and ASIC_DB programming.
 
-Hardware findings (verified 2026-03-02):
+Hardware findings (verified 2026-03-02, updated 2026-03-13):
   - FEC modes supported by this SAI: 'rs' (RS-FEC CL91), 'none'
   - FEC mode 'fc' (FC-FEC CL74) is REJECTED — not in this SAI's allowed set
-  - Auto-negotiation: CLI and CONFIG_DB accept it, but ASIC_DB
-    SAI_PORT_ATTR_AUTO_NEG_MODE stays false — Broadcom SAI on this
-    Tomahawk does not implement AN at the hardware level
+  - Auto-negotiation: CLI and CONFIG_DB accept it; ASIC_DB
+    SAI_PORT_ATTR_AUTO_NEG_MODE is now written 'true' by the SAI when
+    autoneg is enabled.  However, the subsequent hardware programming step
+    fails ("autoneg speed workaround failed / Feature not initialized") and
+    the attribute cannot be cleared back to 'false' by the SAI.  Hardware
+    AN is still non-functional — BCM config has phy_an_c73=0x0 (Clause 73
+    AN disabled at firmware level).
   - BCM config: phy_an_c73=0x0 (Clause 73 disabled), phy_an_c37=0x3
   - Supported speeds (STATE_DB): 40000, 100000
 
@@ -192,10 +196,12 @@ class TestFecConfig:
 class TestAutonegConfig:
     """Test auto-negotiation configuration on disconnected port (Ethernet0).
 
-    Key finding: The Broadcom SAI on this Tomahawk accepts autoneg
-    configuration at the CONFIG_DB/APP_DB level but does NOT program
-    SAI_PORT_ATTR_AUTO_NEG_MODE=true into ASIC_DB.  The BCM config
-    has phy_an_c73=0x0 (Clause 73 AN disabled at firmware level).
+    Key finding (updated 2026-03-13): The Broadcom SAI on this Tomahawk now
+    DOES write SAI_PORT_ATTR_AUTO_NEG_MODE=true to ASIC_DB when autoneg is
+    enabled.  However, the hardware programming step fails internally
+    ("autoneg speed workaround failed / Feature not initialized"), and the SAI
+    cannot clear the attribute back to 'false' when autoneg is disabled.
+    Hardware AN remains non-functional — BCM config has phy_an_c73=0x0.
     """
 
     def test_autoneg_enable_accepted(self, ssh):
@@ -241,13 +247,14 @@ class TestAutonegConfig:
         finally:
             _cleanup_port(ssh, TEST_PORT)
 
-    def test_autoneg_not_applied_in_asic_db(self, ssh):
-        """ASIC_DB SAI_PORT_ATTR_AUTO_NEG_MODE stays false (SAI limitation).
+    def test_autoneg_programs_asic_db(self, ssh):
+        """ASIC_DB SAI_PORT_ATTR_AUTO_NEG_MODE is written 'true' by SAI.
 
-        The Broadcom SAI on this Tomahawk does not actually program
-        auto-negotiation into hardware.  The BCM config has
-        phy_an_c73=0x0 (Clause 73 AN disabled).  This is a known
-        limitation, not a bug.
+        The SAI now accepts and writes the autoneg attribute to ASIC_DB,
+        but the subsequent hardware programming step fails internally
+        (BCM phy_an_c73=0x0, Clause 73 disabled).  The attribute also
+        cannot be cleared back to 'false' once set — this is a known SAI
+        limitation on this Tomahawk platform.
         """
         try:
             ssh.run(
@@ -259,11 +266,10 @@ class TestAutonegConfig:
                 ssh, TEST_PORT, "SAI_PORT_ATTR_AUTO_NEG_MODE"
             )
             print(f"  ASIC_DB AUTO_NEG_MODE={val!r}")
-            # On this platform, SAI silently keeps AN disabled
-            assert val == "false", (
-                f"ASIC_DB AUTO_NEG_MODE={val!r} — unexpected! If this changed "
-                "to 'true', the SAI may now support AN. Update this test and "
-                "test link behavior with Arista peer."
+            assert val == "true", (
+                f"ASIC_DB AUTO_NEG_MODE={val!r} — expected 'true' (SAI writes "
+                "the attribute even though hardware AN is not functional on "
+                "this Tomahawk with phy_an_c73=0x0)"
             )
         finally:
             _cleanup_port(ssh, TEST_PORT)

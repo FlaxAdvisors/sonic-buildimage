@@ -1,9 +1,12 @@
-"""Stage 03 — I2C topology and BMC TTY interface.
+"""Stage 03 — Platform infrastructure: I2C topology, BMC TTY, and daemon health.
 
-Validates the CP2112 USB HID I2C bridge, PCA9548 mux tree (i2c-1 → i2c-2..41),
-CPLD presence at i2c-1/0x32, and BMC communications over /dev/ttyACM0.
+Validates:
+  - CP2112 USB HID I2C bridge and PCA9548 mux tree (i2c-1 → i2c-2..41)
+  - CPLD presence at i2c-1/0x32 (wedge100s_cpld sysfs driver)
+  - BMC communications over /dev/ttyACM0
+  - wedge100s-bmc-poller is running and writing /run/wedge100s/ files
 
-Phase references: Phase 0 (I2C topology), Phase 2 (BMC TTY helper).
+Phase references: Phase 0 (I2C topology), Phase 2 (BMC TTY helper), Phase R28 (bmc-daemon).
 """
 
 import re
@@ -74,26 +77,31 @@ def test_i2cdetect_lists_pca9548_mux_buses(ssh):
 # ------------------------------------------------------------------
 
 def test_cpld_reachable(ssh):
-    """CPLD at i2c-1/0x32 responds to i2cget."""
-    cmd = f"sudo i2cget -y {CPLD_BUS} 0x{CPLD_ADDR:02x} 0x{CPLD_PSU_STATUS_REG:02x}"
-    out, err, rc = ssh.run(cmd)
-    print(f"\nCPLD PSU status register (0x{CPLD_PSU_STATUS_REG:02x}): {out.strip()}")
+    """CPLD at i2c-1/0x32 is accessible via wedge100s_cpld sysfs driver."""
+    path = '/sys/bus/i2c/devices/1-0032/led_sys1'
+    out, err, rc = ssh.run(f"cat {path} 2>/dev/null")
+    print(f"\nCPLD sysfs led_sys1: {out.strip()!r}")
     assert rc == 0, (
-        f"i2cget to CPLD i2c-{CPLD_BUS}/0x{CPLD_ADDR:02x} failed: {err}\n"
-        "Is the platform init service running?"
+        f"Cannot read {path}: {err}\n"
+        "Is the wedge100s_cpld driver bound to i2c-1/0x32?"
     )
-    assert re.match(r"0x[0-9a-fA-F]{2}", out.strip()), (
-        f"Unexpected i2cget output: {out.strip()}"
-    )
+    try:
+        int(out.strip(), 0)
+    except ValueError:
+        pytest.fail(f"Unexpected sysfs value: {out.strip()!r}")
 
 
 def test_cpld_led_register_readable(ssh):
-    """CPLD SYS LED registers (0x3e, 0x3f) are readable."""
-    for reg in (CPLD_SYS1_LED_REG, CPLD_SYS2_LED_REG):
-        cmd = f"sudo i2cget -y {CPLD_BUS} 0x{CPLD_ADDR:02x} 0x{reg:02x}"
-        out, err, rc = ssh.run(cmd)
-        print(f"  CPLD reg 0x{reg:02x}: {out.strip()}")
-        assert rc == 0, f"Cannot read CPLD LED reg 0x{reg:02x}: {err}"
+    """CPLD SYS LED sysfs attributes (led_sys1, led_sys2) are readable."""
+    sysfs = '/sys/bus/i2c/devices/1-0032'
+    for attr in ('led_sys1', 'led_sys2'):
+        out, err, rc = ssh.run(f"cat {sysfs}/{attr} 2>/dev/null")
+        print(f"  CPLD {attr}: {out.strip()!r}")
+        assert rc == 0, f"Cannot read {sysfs}/{attr}: {err}"
+        try:
+            int(out.strip(), 0)
+        except ValueError:
+            pytest.fail(f"Unexpected sysfs value for {attr}: {out.strip()!r}")
 
 
 # ------------------------------------------------------------------
@@ -196,3 +204,86 @@ def test_platform_init_service_active(ssh):
         assert result in ("success", ""), (
             f"Platform init service did not succeed: {result}"
         )
+
+
+# ------------------------------------------------------------------
+# wedge100s-bmc-poller / /run/wedge100s health
+# ------------------------------------------------------------------
+
+def test_bmc_poller_timer_active(ssh):
+    """wedge100s-bmc-poller.timer is active (triggers sensor poll every 10 s).
+
+    The poller itself is a oneshot service; the timer is what must be running.
+    """
+    out, _, _ = ssh.run(
+        "systemctl is-active wedge100s-bmc-poller.timer 2>/dev/null || echo UNKNOWN"
+    )
+    state = out.strip()
+    print(f"\nwedge100s-bmc-poller.timer: {state}")
+    assert state == "active", (
+        f"wedge100s-bmc-poller.timer is {state!r} — /run/wedge100s/ files will go stale.\n"
+        "Start with: sudo systemctl start wedge100s-bmc-poller.timer"
+    )
+
+
+def test_run_wedge100s_dir_populated(ssh):
+    """/run/wedge100s/ exists and contains expected daemon output files."""
+    out, _, rc = ssh.run("ls /run/wedge100s/ 2>/dev/null")
+    print(f"\n/run/wedge100s/: {out.strip()}")
+    assert rc == 0 and out.strip(), (
+        "/run/wedge100s/ is empty or missing — wedge100s-bmc-poller has not written any files."
+    )
+    files = out.split()
+    expected_prefixes = ('thermal_', 'fan_', 'psu_')
+    found = {p: [f for f in files if f.startswith(p)] for p in expected_prefixes}
+    for prefix, matches in found.items():
+        assert matches, (
+            f"No {prefix}* files in /run/wedge100s/ — bmc-daemon may have crashed.\n"
+            f"Files present: {files}"
+        )
+
+
+def test_run_wedge100s_thermal_values(ssh):
+    """At least one /run/wedge100s/thermal_N file contains a plausible temperature."""
+    code = """\
+_RUN_DIR = '/run/wedge100s'
+ok = []
+for i in range(1, 8):
+    try:
+        val = int(open(f'{_RUN_DIR}/thermal_{i}').read().strip())
+        if val > 0:
+            ok.append(f'thermal_{i}={val}')
+    except Exception:
+        pass
+print(' '.join(ok) if ok else 'NONE')
+"""
+    out, _, rc = ssh.run_python(code, timeout=15)
+    print(f"\nThermal daemon values: {out.strip()}")
+    assert rc == 0
+    assert "NONE" not in out and out.strip(), (
+        "All /run/wedge100s/thermal_N files are missing or zero.\n"
+        "Check: systemctl status wedge100s-bmc-poller"
+    )
+
+
+def test_run_wedge100s_fan_values(ssh):
+    """At least one /run/wedge100s/fan_N_front file contains a non-zero RPM."""
+    code = """\
+_RUN_DIR = '/run/wedge100s'
+ok = []
+for i in range(1, 6):
+    try:
+        val = int(open(f'{_RUN_DIR}/fan_{i}_front').read().strip())
+        if val > 0:
+            ok.append(f'fan_{i}_front={val}')
+    except Exception:
+        pass
+print(' '.join(ok) if ok else 'NONE')
+"""
+    out, _, rc = ssh.run_python(code, timeout=15)
+    print(f"\nFan daemon values: {out.strip()}")
+    assert rc == 0
+    assert "NONE" not in out and out.strip(), (
+        "All /run/wedge100s/fan_N_front files are missing or zero.\n"
+        "Check: systemctl status wedge100s-bmc-poller"
+    )

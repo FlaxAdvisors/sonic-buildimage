@@ -41,10 +41,10 @@ def _available_stages():
 
 def _run_report(stage_names, cfg_path):
     # --- TEMPORARY DEBUGGING: Enable verbose paramiko logging ---
-    import logging
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
-    paramiko_log = logging.getLogger("paramiko")
-    paramiko_log.setLevel(logging.DEBUG)
+    # import logging
+    # logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+    # paramiko_log = logging.getLogger("paramiko")
+    # paramiko_log.setLevel(logging.DEBUG)
     # ------------------------------------------------------------
 
     from lib.ssh_client import SSHClient

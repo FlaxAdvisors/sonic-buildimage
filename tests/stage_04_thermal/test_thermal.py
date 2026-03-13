@@ -121,11 +121,11 @@ def test_thermal_api_temperatures_in_range(ssh):
             f"CPU Core sensor returned None — host coretemp sysfs may be broken"
         )
 
-    # BMC sensors: None means transient TTY timeout → xfail
+    # BMC sensors: None means daemon file unreadable → xfail
     bmc_none = [t["name"] for t in data if "TMP75" in t["name"] and t["temperature"] is None]
     if bmc_none:
         pytest.xfail(
-            f"BMC TMP75 sensor(s) returned None temperature (transient TTY timeout): "
+            f"BMC TMP75 sensor(s) returned None temperature (bmc-daemon file unreadable): "
             f"{bmc_none}. Re-run in isolation: ./run_tests.py stage_04_thermal"
         )
 
@@ -170,7 +170,7 @@ def test_thermal_api_status_ok(ssh):
         return  # all good — every sensor readable
 
     pytest.xfail(
-        f"Sensor(s) report status=False (transient BMC TTY timeout): {false_status}. "
+        f"Sensor(s) report status=False (bmc-daemon thermal file unreadable): {false_status}. "
         f"Re-run in isolation: ./run_tests.py stage_04_thermal"
     )
 
@@ -187,6 +187,33 @@ def test_thermal_api_positions_sequential(ssh):
 # ------------------------------------------------------------------
 # Host coretemp sysfs (direct, no BMC)
 # ------------------------------------------------------------------
+
+def test_thermal_daemon_files_readable(ssh):
+    """TMP75 daemon files (/run/wedge100s/thermal_1..7) are readable with valid values.
+
+    These files are written by wedge100s-bmc-poller (Phase R28) with
+    temperature in millidegrees C as a plain decimal integer.
+    """
+    code = """\
+_RUN_DIR = '/run/wedge100s'
+for i in range(1, 8):
+    path = f'{_RUN_DIR}/thermal_{i}'
+    try:
+        val = int(open(path).read().strip())
+        print(f'thermal_{i}={val}')
+    except Exception as e:
+        print(f'thermal_{i}=ERR({e})')
+"""
+    out, err, rc = ssh.run_python(code, timeout=15)
+    print(f"\nThermal daemon files:\n{out.strip()}")
+    assert rc == 0, f"Script failed: {err}"
+    import re
+    good = [l for l in out.splitlines() if re.match(r"thermal_\d+=\d+", l)]
+    assert good, (
+        f"No /run/wedge100s/thermal_N files returned valid values.\n"
+        "Is wedge100s-bmc-poller running? Check: systemctl status wedge100s-bmc-poller"
+    )
+
 
 def test_host_coretemp_sysfs(ssh):
     """CPU coretemp is readable directly from host sysfs (no BMC needed)."""

@@ -376,6 +376,47 @@ class TestHwskuJson:
 class TestBreakoutCli:
     """Phase 14b: Verify DPB CLI integration on the switch."""
 
+    @pytest.fixture(scope="class", autouse=True)
+    def _normalise_breakout(self, ssh):
+        """Snapshot any non-default breakout modes, reset to 1x100G[40G] for
+        the duration of this class, then restore on teardown.
+
+        This allows ports that are intentionally left broken out (e.g.
+        Ethernet64/Ethernet80 in 4x25G mode) to coexist with the test
+        suite without causing false failures.
+        """
+        saved = {}
+        for port in PARENT_PORTS:
+            out, _, rc = ssh.run(
+                f"redis-cli -n 4 hget 'BREAKOUT_CFG|{port}' brkout_mode",
+                timeout=10,
+            )
+            mode = out.strip()
+            if mode and mode != "1x100G[40G]":
+                saved[port] = mode
+
+        if saved:
+            print(f"\n  [fixture] Resetting {len(saved)} port(s) to 1x100G[40G] "
+                  f"for test: {sorted(saved.keys())}")
+            for port in saved:
+                ssh.run(
+                    f"sudo config interface breakout {port} '1x100G[40G]' -y -f -l",
+                    timeout=60,
+                )
+            time.sleep(5)  # allow portmgrd to settle
+
+        yield  # --- run tests ---
+
+        if saved:
+            print(f"\n  [fixture] Restoring breakout modes: "
+                  f"{[f'{p}={m}' for p, m in saved.items()]}")
+            for port, mode in saved.items():
+                ssh.run(
+                    f"sudo config interface breakout {port} '{mode}' -y -f -l",
+                    timeout=60,
+                )
+            time.sleep(5)
+
     def test_show_interfaces_breakout(self, ssh):
         """show interfaces breakout returns valid JSON with all 32 ports.
 

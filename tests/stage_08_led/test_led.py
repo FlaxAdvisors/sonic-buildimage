@@ -16,8 +16,6 @@ Phase reference: Phase 9 (LED Control).
 import re
 import pytest
 
-CPLD_BUS  = 1
-CPLD_ADDR = 0x32
 SYS1_REG  = 0x3E
 SYS2_REG  = 0x3F
 
@@ -28,18 +26,22 @@ LED_BLUE  = 0x04
 
 LED_NAMES = {LED_OFF: "off", LED_RED: "red", LED_GREEN: "green", LED_BLUE: "blue"}
 
+CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
+_REG_TO_ATTR = {SYS1_REG: 'led_sys1', SYS2_REG: 'led_sys2'}
+
 
 def _read_cpld_reg(ssh, reg):
-    """Read one CPLD register byte; returns int or raises."""
-    cmd = f"sudo i2cget -y {CPLD_BUS} 0x{CPLD_ADDR:02x} 0x{reg:02x}"
-    out, err, rc = ssh.run(cmd)
+    """Read CPLD LED state via wedge100s_cpld sysfs attribute; returns int or raises."""
+    attr = _REG_TO_ATTR[reg]
+    out, err, rc = ssh.run(f"cat {CPLD_SYSFS}/{attr}")
     assert rc == 0, (
-        f"i2cget CPLD reg 0x{reg:02x} failed: {err}\n"
-        "Is the CPLD accessible on i2c-1/0x32?"
+        f"sysfs read of {CPLD_SYSFS}/{attr} failed: {err}\n"
+        "Is the wedge100s_cpld driver bound to 1-0032?"
     )
-    m = re.match(r"0x([0-9a-fA-F]{2})", out.strip())
-    assert m, f"Unexpected i2cget output for reg 0x{reg:02x}: {out.strip()!r}"
-    return int(m.group(1), 16)
+    try:
+        return int(out.strip(), 0)
+    except ValueError:
+        raise AssertionError(f"Unexpected sysfs value for {attr}: {out.strip()!r}")
 
 
 # ------------------------------------------------------------------
@@ -67,12 +69,17 @@ def test_led_sys2_register_readable(ssh):
 
 
 def test_led_sys1_is_green(ssh):
-    """SYS1 (system-status) LED is green while SONiC is running."""
-    val = _read_cpld_reg(ssh, SYS1_REG)
-    name = LED_NAMES.get(val, f"0x{val:02x}")
-    print(f"\nSYS1 LED: {name}")
-    assert val == LED_GREEN, (
-        f"SYS1 LED is {name!r} (0x{val:02x}), expected green (0x{LED_GREEN:02x}).\n"
+    """SYS1 (system-status) LED is green while SONiC is running (chassis API)."""
+    code = """\
+from sonic_platform.platform import Platform
+print(Platform().get_chassis().get_status_led())
+"""
+    out, err, rc = ssh.run_python(code, timeout=20)
+    color = out.strip()
+    print(f"\nSYS1 LED (chassis API): {color!r}")
+    assert rc == 0, f"chassis.get_status_led() failed: {err}"
+    assert color == 'green', (
+        f"SYS1 LED is {color!r}, expected 'green'.\n"
         "ledd may not be running or platform init may have failed."
     )
 
@@ -113,15 +120,15 @@ LED_INIT_CODE = """\
 import sys
 sys.path.insert(0, '/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/plugins')
 from led_control import LedControl
-import smbus
 
 lc = LedControl()
 
-# Read back SYS1 after init — should be green
-bus = smbus.SMBus(1)
-sys1 = bus.read_byte_data(0x32, 0x3e)
-sys2 = bus.read_byte_data(0x32, 0x3f)
-bus.close()
+# Read back LED states via wedge100s_cpld sysfs attributes
+_sysfs = '/sys/bus/i2c/devices/1-0032'
+with open(f'{_sysfs}/led_sys1') as f:
+    sys1 = int(f.read().strip(), 0)
+with open(f'{_sysfs}/led_sys2') as f:
+    sys2 = int(f.read().strip(), 0)
 print(f'SYS1=0x{sys1:02x} SYS2=0x{sys2:02x}')
 """
 
@@ -149,21 +156,35 @@ LED_PORT_CHANGE_CODE = """\
 import sys
 sys.path.insert(0, '/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/plugins')
 from led_control import LedControl
-import smbus
 
 lc = LedControl()
-bus = smbus.SMBus(1)
+_sysfs = '/sys/bus/i2c/devices/1-0032'
 
-# Simulate port-up event
+# Bring a test port up — ensures at least one port is up regardless of real state
 lc.port_link_state_change('Ethernet0', 'up')
-sys2_up = bus.read_byte_data(0x32, 0x3f)
+with open(f'{_sysfs}/led_sys2') as f:
+    sys2_up = int(f.read().strip(), 0)
 
-# Simulate port-down event
-lc.port_link_state_change('Ethernet0', 'down')
-sys2_down = bus.read_byte_data(0x32, 0x3f)
+# Mark ALL known ports down so that "last port down" fires SYS2=off
+for port in list(lc._port_states.keys()):
+    lc.port_link_state_change(port, 'down')
+with open(f'{_sysfs}/led_sys2') as f:
+    sys2_down = int(f.read().strip(), 0)
 
-bus.close()
 print(f'after_up=0x{sys2_up:02x} after_down=0x{sys2_down:02x}')
+
+# Restore: re-read STATE_DB so ledd's hardware state is consistent
+from swsscommon.swsscommon import DBConnector, Table
+db  = DBConnector('STATE_DB', 0)
+tbl = Table(db, 'PORT_TABLE')
+any_up = False
+for key in tbl.getKeys():
+    _, fvs = tbl.get(key)
+    for field, value in fvs:
+        if field == 'netdev_oper_status' and value == 'up':
+            any_up = True
+with open(f'{_sysfs}/led_sys2', 'w') as f:
+    f.write('0x02' if any_up else '0x00')
 """
 
 

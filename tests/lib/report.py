@@ -151,8 +151,8 @@ def report_system(ssh):
 # Stage 03 — I2C topology + BMC
 # ---------------------------------------------------------------------------
 
-def report_i2c_bmc(ssh):
-    """Stage 03 — I2C bus topology and BMC status."""
+def report_platform(ssh):
+    """Stage 03 — Platform infrastructure: I2C topology, BMC TTY, and daemon health."""
     buses_out, _, _ = ssh.run("ls /dev/i2c-* 2>/dev/null")
     buses = [b.strip() for b in buses_out.splitlines() if b.strip()]
     first, last = (buses[0], buses[-1]) if buses else ("?", "?")
@@ -170,17 +170,20 @@ def report_i2c_bmc(ssh):
         if len(rows) > 16:
             print(f"      … and {len(rows) - 16} more")
 
-    # CPLD registers
-    regs = [
-        ("PSU Status",  "0x10"),
-        ("SYS1 LED",    "0x3e"),
-        ("SYS2 LED",    "0x3f"),
-    ]
+    # CPLD LED registers via sysfs (wedge100s_cpld driver holds the device)
+    sysfs = '/sys/bus/i2c/devices/1-0032'
     cpld_rows = []
-    for label, reg in regs:
-        val, _, rc = ssh.run(f"sudo i2cget -y 1 0x32 {reg} 2>/dev/null")
-        cpld_rows.append((label, reg, val.strip() if rc == 0 else "read error"))
-    _table(["Register", "Offset", "Raw Value"], cpld_rows, title="CPLD (i2c-1/0x32)")
+    for label, attr, reg in [("SYS1 LED", 'led_sys1', "0x3e"), ("SYS2 LED", 'led_sys2', "0x3f")]:
+        val, _, rc = ssh.run(f"cat {sysfs}/{attr} 2>/dev/null")
+        if rc == 0:
+            try:
+                iv = int(val.strip(), 0)
+                cpld_rows.append((label, reg, f"0x{iv:02x}"))
+            except ValueError:
+                cpld_rows.append((label, reg, val.strip()))
+        else:
+            cpld_rows.append((label, reg, "read error"))
+    _table(["Register", "Offset", "Raw Value"], cpld_rows, title="CPLD LEDs (sysfs)")
 
     # BMC
     bmc_code = """\
@@ -200,6 +203,16 @@ print(result.strip()[:120])
         "--property=ActiveState,Result --value 2>/dev/null | paste - -"
     )
     print(f"  platform-init svc: {svc.strip()}")
+
+    # wedge100s-bmc-poller and /run/wedge100s health
+    timer_state, _, _ = ssh.run(
+        "systemctl is-active wedge100s-bmc-poller.timer 2>/dev/null || echo unknown"
+    )
+    print(f"  bmc-poller timer : {timer_state.strip()}")
+
+    files_out, _, rc = ssh.run("ls /run/wedge100s/ 2>/dev/null | wc -l")
+    file_count = files_out.strip() if rc == 0 else "?"
+    print(f"  /run/wedge100s/  : {file_count} file(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -415,25 +428,25 @@ def report_qsfp(ssh):
 # ---------------------------------------------------------------------------
 
 def report_led(ssh):
-    """Stage 08 — System LED states (CPLD i2c-1/0x32) and ledd daemon."""
-    regs = [
-        ("SYS1 (system-status)", 0x3E),
-        ("SYS2 (port-activity)",  0x3F),
+    """Stage 08 — System LED states (wedge100s_cpld sysfs) and ledd daemon."""
+    sysfs = '/sys/bus/i2c/devices/1-0032'
+    leds = [
+        ("SYS1 (system-status)", 'led_sys1', 0x3E),
+        ("SYS2 (port-activity)",  'led_sys2', 0x3F),
     ]
     rows = []
-    for label, reg in regs:
-        raw, _, rc = ssh.run(f"sudo i2cget -y 1 0x32 0x{reg:02x} 2>/dev/null")
+    for label, attr, reg in leds:
+        raw, _, rc = ssh.run(f"cat {sysfs}/{attr} 2>/dev/null")
         if rc != 0:
             rows.append((label, f"0x{reg:02x}", "--", "read error"))
             continue
-        m = re.match(r"0x([0-9a-fA-F]{2})", raw.strip())
-        if m:
-            val   = int(m.group(1), 16)
+        try:
+            val   = int(raw.strip(), 0)
             state = LED_NAMES.get(val, f"unknown (0x{val:02x})")
             rows.append((label, f"0x{reg:02x}", f"0x{val:02x}", state))
-        else:
+        except ValueError:
             rows.append((label, f"0x{reg:02x}", raw.strip(), "parse error"))
-    _table(["LED", "Reg", "Raw", "State"], rows, title="System LEDs (CPLD i2c-1/0x32)")
+    _table(["LED", "Reg", "Raw", "State"], rows, title="System LEDs (CPLD sysfs)")
 
     link_out, _, _ = ssh.run(
         "show interfaces status 2>/dev/null | grep -c ' up ' || echo 0"
@@ -456,16 +469,61 @@ def report_led(ssh):
 
 
 # ---------------------------------------------------------------------------
+# Stage 13 — Link status
+# ---------------------------------------------------------------------------
+
+_CONNECTED_PORTS = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
+
+def report_link(ssh):
+    """Stage 13 — Link status and port state pipeline for connected ports."""
+    status_out, _, _ = ssh.run("show interfaces status 2>/dev/null", timeout=30)
+    rows = []
+    for line in status_out.splitlines():
+        m = re.match(
+            r"\s*(Ethernet\d+)\s+[\d,]+\s+(\S+)\s+\d+\s+(\S+)\s+\S+\s+(\S+)\s+(\S+)\s+(\S+)",
+            line,
+        )
+        if m and m.group(1) in _CONNECTED_PORTS:
+            rows.append((m.group(1), m.group(2), m.group(3), m.group(5), m.group(6)))
+    _table(
+        ["Port", "Speed", "FEC", "Oper", "Admin"],
+        rows,
+        title="Connected Ports (100G DAC to rabbit-lorax)",
+    )
+
+    # SYS2 LED via sysfs
+    raw, _, rc = ssh.run("cat /sys/bus/i2c/devices/1-0032/led_sys2 2>/dev/null")
+    if rc == 0:
+        try:
+            val   = int(raw.strip(), 0)
+            state = LED_NAMES.get(val, f"unknown (0x{val:02x})")
+            print(f"\n  SYS2 LED (port-activity): 0x{val:02x} = {state}")
+        except ValueError:
+            print(f"\n  SYS2 LED: {raw.strip()}")
+    else:
+        print("\n  SYS2 LED: read error")
+
+    lldp_out, _, _ = ssh.run("show lldp neighbors 2>/dev/null", timeout=15)
+    neighbors = [l for l in lldp_out.strip().splitlines() if l.strip()]
+    print(f"\n  LLDP neighbors: {len(neighbors)} line(s)")
+    for line in neighbors[:12]:
+        print(f"    {line}")
+    if len(neighbors) > 12:
+        print(f"    … and {len(neighbors) - 12} more")
+
+
+# ---------------------------------------------------------------------------
 # Registry: stage name → reporter function
 # ---------------------------------------------------------------------------
 
 REPORTERS = {
     "stage_01_eeprom":   report_eeprom,
     "stage_02_system":   report_system,
-    "stage_03_i2c_bmc":  report_i2c_bmc,
+    "stage_03_platform":  report_platform,
     "stage_04_thermal":  report_thermal,
     "stage_05_fan":      report_fan,
     "stage_06_psu":      report_psu,
     "stage_07_qsfp":     report_qsfp,
     "stage_08_led":      report_led,
+    "stage_13_link":     report_link,
 }

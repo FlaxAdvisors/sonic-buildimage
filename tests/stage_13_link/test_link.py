@@ -208,37 +208,42 @@ def test_asic_db_port_admin_state(ssh):
 # ------------------------------------------------------------------
 
 def _read_sys2_led(ssh):
-    """Read SYS2 LED register (CPLD 0x3f on i2c-1/0x32)."""
-    out, _, rc = ssh.run("sudo i2cget -y 1 0x32 0x3f", timeout=10)
-    return out.strip() if rc == 0 else None
+    """Read SYS2 LED via wedge100s_cpld sysfs; returns int or None."""
+    out, _, rc = ssh.run("cat /sys/bus/i2c/devices/1-0032/led_sys2", timeout=10)
+    if rc != 0:
+        return None
+    try:
+        return int(out.strip(), 0)
+    except ValueError:
+        return None
 
 
 def test_sys2_led_green_when_link_up(ssh):
-    """SYS2 LED (CPLD reg 0x3f on i2c-1/0x32) is green (0x02) when any port is up.
+    """SYS2 LED is green (0x02) when any port is up.
 
     ledd monitors STATE_DB PORT_TABLE netdev_oper_status and sets SYS2 LED.
     If ledd lost track of port states (e.g. after CPLD reset), the test restarts
     ledd and re-checks before failing.
     """
     val = _read_sys2_led(ssh)
-    assert val is not None, "SYS2 LED read failed (i2cget returned non-zero)"
-    print(f"\nSYS2 LED (0x3f): {val}")
+    assert val is not None, "SYS2 LED read failed (sysfs read returned non-zero or unparseable)"
+    print(f"\nSYS2 LED: 0x{val:02x}")
 
-    if val != "0x02":
+    if val != 0x02:
         # ledd may have lost track of port states — restart and re-check
         print("  SYS2 LED not green; restarting ledd to resync port states...")
         ssh.run("docker exec pmon supervisorctl restart ledd", timeout=15)
         import time
         time.sleep(3)
         val = _read_sys2_led(ssh)
-        print(f"  SYS2 LED after ledd restart: {val}")
+        print(f"  SYS2 LED after ledd restart: {f'0x{val:02x}' if val is not None else 'read failed'}")
 
-    assert val == "0x02", (
-        f"SYS2 LED = {val!r}; expected 0x02 (green) after ledd restart.\n"
+    assert val == 0x02, (
+        f"SYS2 LED = 0x{val:02x}; expected 0x02 (green) after ledd restart.\n"
         "Possible causes:\n"
         "  - ledd not subscribing to STATE_DB PORT_TABLE events\n"
         "  - No ports with netdev_oper_status=up in STATE_DB\n"
-        "  - CPLD I2C write failure (check i2c-1 bus)"
+        "  - CPLD sysfs write failure (check wedge100s_cpld driver)"
     )
 
 

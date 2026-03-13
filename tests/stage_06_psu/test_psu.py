@@ -84,32 +84,31 @@ def test_psu_cli_both_listed(ssh):
 
 
 # ------------------------------------------------------------------
-# CPLD direct read (host side)
+# CPLD sysfs (wedge100s_cpld driver)
 # ------------------------------------------------------------------
 
-def test_cpld_psu_status_register(ssh):
-    """Read raw PSU status register from CPLD and decode it."""
-    cmd = f"sudo i2cget -y {CPLD_BUS} 0x{CPLD_ADDR:02x} 0x{CPLD_PSU_REG:02x}"
-    out, err, rc = ssh.run(cmd)
-    print(f"\nCPLD PSU status reg: {out.strip()}")
-    assert rc == 0, f"i2cget CPLD PSU reg failed: {err}"
+def test_cpld_psu_status_sysfs(ssh):
+    """Read PSU presence and power-good from wedge100s_cpld sysfs attributes.
 
-    import re
-    m = re.match(r"0x([0-9a-fA-F]{2})", out.strip())
-    assert m, f"Could not parse hex value from: {out.strip()}"
-    reg_val = int(m.group(1), 16)
+    psu.py uses these attrs (not raw i2cget) because the wedge100s_cpld
+    driver holds the device and inverts the active-low present bits.
+    """
+    sysfs = '/sys/bus/i2c/devices/1-0032'
+    attrs = {}
+    for attr in ('psu1_present', 'psu1_pgood', 'psu2_present', 'psu2_pgood'):
+        out, err, rc = ssh.run(f"cat {sysfs}/{attr} 2>/dev/null")
+        assert rc == 0, f"Cannot read {sysfs}/{attr}: {err}"
+        try:
+            attrs[attr] = int(out.strip(), 0)
+        except ValueError:
+            pytest.fail(f"Unexpected sysfs value for {attr}: {out.strip()!r}")
+        print(f"  {attr} = {attrs[attr]}")
 
-    psu1_present = not bool(reg_val & (1 << PSU1_PRESENT_BIT))
-    psu1_pgood   = bool(reg_val & (1 << PSU1_PGOOD_BIT))
-    psu2_present = not bool(reg_val & (1 << PSU2_PRESENT_BIT))
-    psu2_pgood   = bool(reg_val & (1 << PSU2_PGOOD_BIT))
+    print(f"  PSU1: present={bool(attrs['psu1_present'])} pgood={bool(attrs['psu1_pgood'])}")
+    print(f"  PSU2: present={bool(attrs['psu2_present'])} pgood={bool(attrs['psu2_pgood'])}")
 
-    print(f"  PSU1: present={psu1_present} power_good={psu1_pgood}")
-    print(f"  PSU2: present={psu2_present} power_good={psu2_pgood}")
-
-    assert psu1_present or psu2_present, (
-        f"CPLD reports both PSUs absent (reg=0x{reg_val:02x}). "
-        "Is the system actually powered?"
+    assert attrs['psu1_present'] or attrs['psu2_present'], (
+        "CPLD sysfs reports both PSUs absent. Is the system actually powered?"
     )
 
 
@@ -259,3 +258,37 @@ def test_psu_api_positions(ssh):
     data = _get_psus(ssh)
     positions = sorted(p["position"] for p in data)
     assert positions == [1, 2], f"Unexpected PSU positions: {positions}"
+
+
+# ------------------------------------------------------------------
+# Daemon file direct check
+# ------------------------------------------------------------------
+
+def test_psu_daemon_files_readable(ssh):
+    """PSU PMBus daemon files (/run/wedge100s/psu_N_*) are readable.
+
+    wedge100s-bmc-poller writes raw LINEAR11 words (decimal integers) for
+    each powered PSU.  Files for an unpowered/absent PSU may be missing or
+    zero — only check that the directory and at least one file are present.
+    """
+    code = """\
+import os
+_RUN_DIR = '/run/wedge100s'
+files = [f for f in os.listdir(_RUN_DIR) if f.startswith('psu_')]
+results = []
+for fname in sorted(files):
+    path = os.path.join(_RUN_DIR, fname)
+    try:
+        val = int(open(path).read().strip())
+        results.append(f'{fname}={val}')
+    except Exception as e:
+        results.append(f'{fname}=ERR({e})')
+print(' | '.join(results) if results else 'NO_FILES')
+"""
+    out, err, rc = ssh.run_python(code, timeout=15)
+    print(f"\nPSU daemon files: {out.strip()}")
+    assert rc == 0, f"PSU daemon file script failed: {err}"
+    assert "NO_FILES" not in out, (
+        "No psu_* files found in /run/wedge100s/\n"
+        "Is wedge100s-bmc-poller running? Check: systemctl status wedge100s-bmc-poller"
+    )

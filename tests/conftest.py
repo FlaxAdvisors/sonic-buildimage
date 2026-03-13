@@ -1,8 +1,13 @@
 """Shared pytest fixtures for Wedge 100S-32X SONiC platform tests."""
 
+import logging
 import os
 import sys
 import pytest
+
+# Silence noisy paramiko transport/sftp INFO chatter — our tests emit their
+# own structured output via print(); we don't need SSH negotiation details.
+logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 sys.path.insert(0, os.path.dirname(__file__))
 

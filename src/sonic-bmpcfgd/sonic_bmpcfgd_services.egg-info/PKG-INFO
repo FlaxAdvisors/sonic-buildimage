@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: sonic-bmpcfgd-services
+Version: 1.0
+Summary: Python services which run in the bmp container
+Home-page: https://github.com/Azure/sonic-buildimage
+Author: SONiC Team
+Author-email: linuxnetdev@microsoft.com
+Maintainer: Feng Pan
+Maintainer-email: fenpan@microsoft.com
+License: Apache 2.0

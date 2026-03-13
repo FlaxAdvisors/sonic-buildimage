@@ -1,0 +1,15 @@
+onie-syseeprom \
+    -s 0x21='WEDGE100S12V' \
+    -s 0x22='20-001688' \
+    -s 0x23='AI09019591' \
+    -s 0x24='00:90:FB:61:DA:A1' \
+    -s 0x25='03/09/2018 00:00:00' \
+    -s 0x26='1' \
+    -s 0x27='R01' \
+    -s 0x28='x86_64-accton_wedge100s_32x-r0' \
+    -s 0x29='master-11171931-dirty' \
+    -s 0x2A='129' \
+    -s 0x2B='Joytech' \
+    -s 0x2C='CN' \
+    -s 0x2D='Accton' \
+    -s 0x2F='4358633'

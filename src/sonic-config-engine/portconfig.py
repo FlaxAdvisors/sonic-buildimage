@@ -376,6 +376,7 @@ class BreakoutCfg(object):
                 lanes = self._lanes[lane_id:lane_id + lanes_per_port]
 
                 port_config = {
+                    'admin_status': 'up',
                     'alias': self._breakout_capabilities[alias_id],
                     'lanes': ','.join(lanes),
                     'speed': str(entry.default_speed),
@@ -383,9 +384,17 @@ class BreakoutCfg(object):
                     'subport': "0" if total_num_ports == 1 else str(alias_id + 1)
                 }
                 
-                # If the lane speed is greater than 50G, enable FEC
-                if entry.default_speed // lanes_per_port >= 50000:
+                # Set FEC based on port speed:
+                # - >= 40G (100G, 50G, 40G): RS-FEC (CL91) required for CR4 links.
+                #   Original condition used per-lane speed which gave 25000 for
+                #   100G/4-lane, incorrectly excluding it.
+                # - < 40G (25G, 10G): explicit 'none' so CONFIG_DB shows 'none'
+                #   rather than N/A. SAI accepts ['none', 'fc'] for 25G; 'rs' is
+                #   rejected. DAC cables on this platform link up without FEC.
+                if entry.default_speed >= 40000:
                     port_config['fec'] = 'rs'
+                else:
+                    port_config['fec'] = 'none'
 
                 ports[interface_name] = port_config
 

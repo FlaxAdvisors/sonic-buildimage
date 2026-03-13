@@ -240,3 +240,87 @@ make configure PLATFORM=broadcom
 `rm -rf target/` removes the directory structure that `make configure` creates.
 Without it, the build fails with "No such file or directory" for log files.
 Always run `make configure PLATFORM=broadcom` after a manual clean.
+
+## Full command sequence (clean build)
+
+```bash
+# 1. Initialize submodules (one-time or after fresh clone)
+make init
+
+# 2. Configure platform — writes .platform and .arch, creates target/ dir structure
+make configure PLATFORM=broadcom
+
+# 3. Build platform deb (fast iteration, ~5 min)
+BLDENV=trixie make SONIC_BUILD_JOBS=40 \
+    target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
+
+# 4. Build full ONIE installer (~2-3h on 40-core host)
+make SONIC_BUILD_JOBS=40 BUILD_SKIP_TEST=y target/sonic-broadcom.bin
+```
+
+Output: `target/sonic-broadcom.bin` (~961 MB)
+
+## Distclean / reset procedure
+
+`make distclean` is unreliable (see below). Use manual clean:
+
+```bash
+rm -rf target/
+make configure PLATFORM=broadcom   # MUST re-run — recreates target/ subdirs
+```
+
+**Configure must match final build flags.** If NOBOOKWORM or NOTRIXIE are changed
+between configure and build, subdirectories (e.g. `target/python-wheels/bookworm/`)
+may be missing and the build will fail mid-run with "No such file or directory".
+
+## Makefile fixes committed this session
+
+### 1. `distclean` routed through `make_work`
+
+`distclean` was not an explicit target in the top-level `Makefile`, so it fell
+through to the `%::` catch-all which unconditionally ran the bookworm pass
+(building `docker-base-bookworm.gz`) before delegating. Fixed by adding
+`distclean` to the explicit target list:
+
+```makefile
+# Makefile line 127 (before fix):
+clean showtag docker-cleanup sonic-slave-build sonic-slave-bash :
+
+# After fix:
+clean distclean showtag docker-cleanup sonic-slave-build sonic-slave-bash :
+```
+
+### 2. NOBOOKWORM cannot be 1 for full image builds
+
+37 docker service images (`SONIC_BOOKWORM_DOCKERS`) are built during the bookworm
+pass and bundled into `sonic-broadcom.bin`. Setting `NOBOOKWORM=1` skips that pass
+entirely, causing:
+
+```
+make: *** No rule to make target 'target/docker-bmp-watchdog.gz',
+      needed by 'target/sonic-broadcom.bin'.  Stop.
+```
+
+`NOBOOKWORM=1` is **only safe** for platform-deb-only builds where `BLDENV=trixie`
+is set explicitly on the command line (bypassing the multi-pass logic).
+For the full image, leave `NOBOOKWORM=0` (default).
+
+## Build pass summary
+
+| Pass | BLDENV | Slave container | Produces |
+|------|--------|-----------------|----------|
+| 1 | bookworm | sonic-slave-bookworm | `target/debs/bookworm/`, `target/python-wheels/bookworm/`, `target/docker-*.gz` |
+| 2 | trixie | sonic-slave-trixie | `target/debs/trixie/`, `target/sonic-broadcom.bin` |
+
+The image root filesystem is trixie (`IMAGE_DISTRO := trixie` in `slave.mk:73`).
+The bookworm docker images are bundled unchanged into the trixie-based installer.
+
+## Platform deb deploy (no full rebuild needed)
+
+```bash
+scp target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb \
+    admin@192.168.88.12:~
+ssh admin@192.168.88.12 sudo systemctl stop pmon
+ssh admin@192.168.88.12 sudo dpkg -i sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
+ssh admin@192.168.88.12 sudo systemctl start pmon
+```

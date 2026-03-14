@@ -46,12 +46,10 @@ DEBUG = False
 args = []
 FORCE = 0
 
-# EEPROM cache — written once at platform-init time, before xcvrd/pmon start.
-# This prevents CP2112 I2C bus hangs caused by mux 0x74 contention between
-# EEPROM reads (channel 6) and PCA9535 presence polls (channels 2 and 3).
+# System EEPROM sysfs path (at24 driver, registered by mknod above).
+# The wedge100s-i2c-daemon reads this once at first boot and writes
+# /run/wedge100s/syseeprom; eeprom.py reads the daemon cache as primary source.
 EEPROM_SYSFS_PATH = '/sys/bus/i2c/devices/40-0050/eeprom'
-EEPROM_CACHE_PATH = '/var/run/platform_cache/syseeprom_cache'
-TLVINFO_MAGIC     = bytes([0x54, 0x6c, 0x76, 0x49, 0x6e, 0x66, 0x6f, 0x00])
 
 # Port-to-I2C-bus map (ONL sfpi.c sfp_bus_index[], 0-indexed, confirmed SONiC 6.1.0)
 SFP_BUS_MAP = [
@@ -99,11 +97,11 @@ mknod = [
     'echo pca9548 0x72 > /sys/bus/i2c/devices/i2c-1/new_device',
     'echo pca9548 0x73 > /sys/bus/i2c/devices/i2c-1/new_device',
     'echo pca9548 0x74 > /sys/bus/i2c/devices/i2c-1/new_device',
-    # mux 0x74 ch2 → i2c-36: PCA9535 GPIO (QSFP presence ports 0-15)
-    # mux 0x74 ch3 → i2c-37: PCA9535 GPIO (QSFP presence ports 16-31)
     # mux 0x74 ch6 → i2c-40: system EEPROM (24c64 at 0x50, ONIE TlvInfo).
-    'echo pca9535 0x22 > /sys/bus/i2c/devices/i2c-36/new_device',
-    'echo pca9535 0x23 > /sys/bus/i2c/devices/i2c-37/new_device',
+    # Note: PCA9535 at i2c-36/0x22 and i2c-37/0x23 are NOT registered as
+    # gpio_pca953x kernel devices.  wedge100s-i2c-daemon reads them directly
+    # via i2c-dev ioctl, eliminating the mux race from concurrent gpio sysfs
+    # and EEPROM accesses on the same PCA9548 0x74 mux tree.
     'echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device',
 ] + [
     # optoe1 QSFP EEPROM on each port's dedicated bus (SFP_BUS_MAP order).
@@ -263,55 +261,6 @@ def device_uninstall():
     return 0
 
 
-def _cache_eeprom():
-    """Cache EEPROM raw bytes to a file immediately after device registration.
-
-    This must be called before xcvrd/pmon start polling the PCA9535 presence
-    expanders on mux 0x74 channels 2 and 3.  Those polls race with EEPROM reads
-    on channel 6 of the same mux, causing the CP2112 I2C bus to hang (all reads
-    return 0x00 bytes).  By caching here — while only the platform-init service
-    is active — we guarantee that sonic_platform/eeprom.py returns valid TLV data
-    for the lifetime of the boot, regardless of later bus state.
-
-    Skips writing if the cache file already contains valid ONIE TlvInfo data.
-    """
-    if os.path.isfile(EEPROM_CACHE_PATH):
-        try:
-            with open(EEPROM_CACHE_PATH, 'rb') as f:
-                cached_magic = f.read(8)
-            if cached_magic == TLVINFO_MAGIC:
-                my_log("EEPROM cache already valid: {}".format(EEPROM_CACHE_PATH))
-                return
-        except Exception:
-            pass  # fall through to re-read hardware
-
-    # Give the at24 driver a moment to finish probing the newly registered device
-    time.sleep(0.2)
-
-    try:
-        with open(EEPROM_SYSFS_PATH, 'rb') as f:
-            data = f.read()
-    except Exception as e:
-        print("WARNING: Could not read EEPROM from {}: {}".format(EEPROM_SYSFS_PATH, e))
-        return
-
-    if data[:8] != TLVINFO_MAGIC:
-        print("WARNING: EEPROM does not contain ONIE TlvInfo magic "
-              "(got: {}).  Cache NOT written.".format(data[:8].hex()))
-        print("         Program the EEPROM with: sudo write-syseeprom "
-              "-t 0x21 -v 'Wedge-100s-32X' -t 0x22 -v '<part>' "
-              "-t 0x23 -v '<serial>' -t 0x24 -v '<mac>' -t 0x2b -v 'Accton'")
-        return
-
-    try:
-        os.makedirs(os.path.dirname(EEPROM_CACHE_PATH), exist_ok=True)
-        with open(EEPROM_CACHE_PATH, 'wb') as f:
-            f.write(data)
-        print("EEPROM cached to {} ({} bytes)".format(EEPROM_CACHE_PATH, len(data)))
-    except Exception as e:
-        print("WARNING: Could not write EEPROM cache {}: {}".format(EEPROM_CACHE_PATH, e))
-
-
 def _pin_bcm_irq():
     """Manage IRQ affinity to prevent BCM56960 interrupt storms from stalling SSH.
 
@@ -367,58 +316,30 @@ def _pin_bcm_irq():
                "SSH may be affected by BCM interrupt storms")
 
 
-def _export_presence_gpios():
-    """Export PCA9535 QSFP presence GPIOs for kernel sysfs access.
+def _warmup_qsfp_eeproms():
+    """Prime DAC cable modules with a dummy read before xcvrd starts.
 
-    After device_install() registers the PCA9535 chips, the kernel creates
-    gpiochip entries.  This function discovers their bases from labels and
-    exports all 32 presence GPIOs so that sfp.py can read them via
-    /sys/class/gpio/gpioN/value without needing root to export later.
+    Certain QSFP28 DAC cable modules (e.g. Joytech/Accton on bus 3, 7, 15)
+    return identifier byte 0x01 (GBIC) on their very first i2c read after a
+    cold/idle period, then correctly return 0x11 (QSFP28) on subsequent reads.
+    xcvrd's startup scan hits each port exactly once; without priming it
+    caches type=GBIC for these ports.
 
-    GPIO wiring uses interleaved even/odd order (XOR-1 corrects mapping):
-      port → gpio_offset = (port % 16) ^ 1
-      gpio_number = chip_base + gpio_offset
+    This function reads 1 byte from each optoe1 eeprom sysfs file.  For
+    present modules the read triggers the first i2c transaction, warming
+    up the module's i2c interface.  xcvrd's subsequent startup read then
+    gets the correct 0x11 identifier.
     """
-    GPIO_SYSFS = '/sys/class/gpio'
-    labels = ['36-0022', '37-0023']   # PCA9535 at i2c-36 and i2c-37
-    bases = [None, None]
-
-    try:
-        for entry in os.listdir(GPIO_SYSFS):
-            if not entry.startswith('gpiochip'):
-                continue
-            try:
-                with open(os.path.join(GPIO_SYSFS, entry, 'label')) as f:
-                    label = f.read().strip()
-                for idx, expected in enumerate(labels):
-                    if label == expected:
-                        with open(os.path.join(GPIO_SYSFS, entry, 'base')) as f:
-                            bases[idx] = int(f.read().strip())
-            except OSError:
-                continue
-    except OSError:
-        print("WARNING: Could not scan GPIO sysfs for presence GPIOs")
-        return
-
-    exported = 0
-    for port in range(NUM_SFP):
-        group = port // 16
-        base = bases[group]
-        if base is None:
-            continue
-        gpio = base + ((port % 16) ^ 1)
-        value_path = '{}/gpio{}/value'.format(GPIO_SYSFS, gpio)
-        if os.path.exists(value_path):
-            exported += 1
-            continue
+    warmed = 0
+    for bus in SFP_BUS_MAP:
+        path = '/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom'.format(bus)
         try:
-            with open('{}/export'.format(GPIO_SYSFS), 'w') as f:
-                f.write(str(gpio))
-            exported += 1
-        except OSError as e:
-            my_log("Failed to export GPIO {} (port {}): {}".format(gpio, port, e))
-
-    print("Exported {}/{} QSFP presence GPIOs".format(exported, NUM_SFP))
+            with open(path, 'rb', buffering=0) as f:
+                f.read(1)
+            warmed += 1
+        except OSError:
+            pass   # absent port — normal
+    print("QSFP EEPROM warm-up reads: {}/{} buses".format(warmed, len(SFP_BUS_MAP)))
 
 
 def do_sonic_platform_install():
@@ -468,8 +389,7 @@ def do_install():
             return status
     else:
         print(PROJECT_NAME.upper() + " I2C devices already registered.")
-    _export_presence_gpios()
-    _cache_eeprom()
+    _warmup_qsfp_eeproms()
     _pin_bcm_irq()
     do_sonic_platform_install()
     print("Platform init complete.")

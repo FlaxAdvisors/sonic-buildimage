@@ -9,8 +9,11 @@ The at24 device is registered by accton_wedge100s_util.py at boot via:
     echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device
 Sysfs node: /sys/bus/i2c/devices/40-0050/eeprom
 
-The EEPROM cache written at platform-init time (before xcvrd/pmon start)
-avoids CP2112 mux-contention issues at runtime.
+Primary source: /run/wedge100s/syseeprom written by wedge100s-i2c-daemon at
+first boot (OnBootSec=5s, before pmon starts).  This eliminates CP2112 mux
+contention: the system EEPROM (mux 0x74 ch6) and PCA9535 presence chips
+(mux 0x74 ch2/3) share the same PCA9548 0x74 mux; concurrent reads cause
+the 0x51 address corruption and zeroed-data incidents observed pre-daemon.
 """
 
 try:
@@ -18,20 +21,40 @@ try:
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
-# Persistent cache written by accton_wedge100s_util.py at platform-init time,
-# before xcvrd/pmon start.  Prevents CP2112 I2C bus hangs from mux 0x74
-# contention (EEPROM on ch6 vs. PCA9535 presence polls on ch2/ch3).
-EEPROM_CACHE_PATH = '/var/run/platform_cache/syseeprom_cache'
+_SYSEEPROM_DAEMON_CACHE = '/run/wedge100s/syseeprom'
+_SYSEEPROM_SYSFS        = '/sys/bus/i2c/devices/40-0050/eeprom'
+_ONIE_MAGIC             = b'TlvInfo\x00'
 
 
 class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
 
-    EEPROM_PATH = "/sys/bus/i2c/devices/40-0050/eeprom"
-
     def __init__(self):
-        super(SysEeprom, self).__init__(self.EEPROM_PATH, 0, EEPROM_CACHE_PATH, True)
-        self.cache_name = EEPROM_CACHE_PATH
+        # Initialize TlvInfoDecoder with sysfs as the raw path.
+        # use_cache=False — we manage our own cache via the daemon file.
+        super(SysEeprom, self).__init__(_SYSEEPROM_SYSFS, 0, '', False)
         self._eeprom_cache = None
+
+    def read_eeprom(self):
+        """
+        Return raw EEPROM bytes.
+
+        Primary: /run/wedge100s/syseeprom written by wedge100s-i2c-daemon.
+        Fallback: direct sysfs read (first ~5 s of boot, or daemon failed).
+        """
+        try:
+            with open(_SYSEEPROM_DAEMON_CACHE, 'rb') as f:
+                data = f.read(8192)
+            if len(data) >= 8 and data[:8] == _ONIE_MAGIC:
+                return bytearray(data)
+        except OSError:
+            pass
+
+        # Fallback: read directly from sysfs
+        try:
+            with open(_SYSEEPROM_SYSFS, 'rb') as f:
+                return bytearray(f.read(8192))
+        except OSError:
+            return None
 
     def get_eeprom(self):
         """

@@ -2,43 +2,40 @@
 """
 sonic_platform/sfp.py — QSFP28 implementation for Accton Wedge 100S-32X.
 
-All 32 ports are QSFP28 (100G).  Hardware access:
+All 32 ports are QSFP28 (100G).  Hardware access (normal operation):
 
 Presence:
-  PCA9535 GPIO expanders registered as kernel gpiochips:
-    i2c-36/0x22 (gpiochip label "36-0022"): ports 0-15  (mux 0x74 ch2)
-    i2c-37/0x23 (gpiochip label "37-0023"): ports 16-31 (mux 0x74 ch3)
-  Read via GPIO sysfs (/sys/class/gpio/gpioN/value) — the kernel
-  gpio-pca953x driver handles I2C locking, eliminating bus contention
-  from the old i2cget -f -y approach.
-  GPIO wiring is interleaved even/odd (XOR-1 corrects port→pin mapping).
-  Sysfs value 0 = module present (active low).
+  wedge100s-i2c-daemon writes /run/wedge100s/sfp_N_present ("0" or "1")
+  every 3 s by polling PCA9535 via i2c-dev ioctl.  sfp.py reads these
+  files; falls back to direct smbus2 if daemon files are stale (>8 s).
 
 EEPROM:
-  Each QSFP28 EEPROM is at I2C addr 0x50 on its own bus (see _SFP_BUS_MAP).
-  The bus is a mux channel from one of the 5 PCA9548 muxes on i2c-1.
-  Device is pre-registered at boot by accton_wedge100s_util.py (Phase R27).
-  Sysfs path: /sys/bus/i2c/devices/i2c-{bus}/{bus}-0050/eeprom
-
-DOM:
-  DOM data accessible at I2C addr 0x51 on the same bus (same mux channel).
-  For optoe1-based devices, upper pages are accessed via the sysfs file.
+  wedge100s-i2c-daemon writes /run/wedge100s/sfp_N_eeprom (256 bytes,
+  page 0) on insertion events.  sfp.py reads this file; falls back to
+  direct optoe1 sysfs read if cache absent (first ~5 s of boot).
 
 Source: sfpi.c in ONL (OpenNetworkLinux), confirmed on hare-lorax hardware.
-
-Hardware notes (hare-lorax, 2026-02-25):
-  - Port 0 (bus 3): QSFP28 present, identifier 0x11 confirmed.
-  - Ports 1-31: absent in lab setup.
-  - PCA9535 gpio chip bound at i2c-36/37 (gpiochip2/3) after Phase 1 init.
 """
 
 import os
+import time
+import threading
 
 try:
     from sonic_platform_base.sonic_xcvr.sfp_optoe_base import SfpOptoeBase
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
+# ---------------------------------------------------------------------------
+# CP2112 bus serialization lock
+#
+# Used only in the sysfs fallback path of read_eeprom().  In normal operation
+# (daemon cache hit) this lock is not acquired.  Kept as RLock for the
+# SfpOptoeBase re-entrant call pattern (read_eeprom → get_optoe_current_page
+# → read_eeprom when offset ≥ 128).
+# ---------------------------------------------------------------------------
+
+_eeprom_bus_lock = threading.RLock()
 
 # ---------------------------------------------------------------------------
 # Port-to-bus mapping (from sfp_bus_index[] in sfpi.c, 0-based port index)
@@ -54,85 +51,23 @@ _SFP_BUS_MAP = [
 ]
 
 # ---------------------------------------------------------------------------
-# PCA9535 GPIO presence — kernel sysfs interface
+# Daemon cache paths
 # ---------------------------------------------------------------------------
 
-# PCA9535 I2C labels used by the kernel gpio-pca953x driver.
-# These match the "{bus}-{addr:04x}" format in /sys/class/gpio/gpiochip*/label.
-_GPIO_LABELS = ['36-0022', '37-0023']   # group 0 (ports 0-15), group 1 (ports 16-31)
+_I2C_EEPROM_CACHE  = '/run/wedge100s/sfp_{}_eeprom'
+_I2C_PRESENT_CACHE = '/run/wedge100s/sfp_{}_present'
 
-_GPIO_SYSFS = '/sys/class/gpio'
+# Staleness threshold: fall back to live smbus2 if cache is older than this.
+# Daemon fires every 3 s; 8 s gives ~2.5 cycles of slack before triggering
+# the fallback (handles daemon slow-start and brief I2C errors).
+_PRESENCE_MAX_AGE_S = 8
 
-# Populated lazily: port -> sysfs value path
-_gpio_value_paths = {}  # {port: '/sys/class/gpio/gpioN/value'}
-_gpio_bases = None       # [base0, base1] discovered from gpiochip labels
-
-
-def _discover_gpio_bases():
-    """Find GPIO chip bases from PCA9535 kernel driver labels."""
-    global _gpio_bases
-    if _gpio_bases is not None:
-        return _gpio_bases
-    bases = [None, None]
-    try:
-        for entry in os.listdir(_GPIO_SYSFS):
-            if not entry.startswith('gpiochip'):
-                continue
-            label_path = os.path.join(_GPIO_SYSFS, entry, 'label')
-            try:
-                with open(label_path) as f:
-                    label = f.read().strip()
-            except OSError:
-                continue
-            for idx, expected in enumerate(_GPIO_LABELS):
-                if label == expected:
-                    base_path = os.path.join(_GPIO_SYSFS, entry, 'base')
-                    with open(base_path) as f:
-                        bases[idx] = int(f.read().strip())
-    except OSError:
-        pass
-    _gpio_bases = bases
-    return bases
-
-
-def _port_gpio_number(port):
-    """
-    Return the Linux GPIO number for a port's PRESENT# pin.
-
-    PCA9535 GPIO lines are wired in interleaved even/odd order (per ONL
-    sfpi.c onlp_sfpi_reg_val_to_port_sequence).  The XOR-1 on the
-    intra-chip offset corrects this: port 0→GPIO offset 1, port 1→0,
-    port 2→3, port 3→2, etc.
-    """
-    bases = _discover_gpio_bases()
-    group = port // 16
-    base = bases[group]
-    if base is None:
-        return None
-    return base + ((port % 16) ^ 1)
-
-
-def _get_presence_path(port):
-    """Return the sysfs value path for a port, exporting the GPIO if needed."""
-    path = _gpio_value_paths.get(port)
-    if path is not None:
-        return path
-    gpio = _port_gpio_number(port)
-    if gpio is None:
-        return None
-    value_path = '{}/gpio{}/value'.format(_GPIO_SYSFS, gpio)
-    if not os.path.exists(value_path):
-        try:
-            with open('{}/export'.format(_GPIO_SYSFS), 'w') as f:
-                f.write(str(gpio))
-        except OSError:
-            return None
-    _gpio_value_paths[port] = value_path
-    return value_path
-
+# PCA9535 buses and addresses (direct smbus2 fallback)
+_PCA9535_BUS  = [36, 37]
+_PCA9535_ADDR = [0x22, 0x23]
 
 # ---------------------------------------------------------------------------
-# Sysfs path for QSFP EEPROM (pre-registered at boot by platform init, Phase R27)
+# Sysfs path for QSFP EEPROM (pre-registered at boot by platform init)
 # ---------------------------------------------------------------------------
 
 _EEPROM_PATH = '/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom'
@@ -160,6 +95,40 @@ class Sfp(SfpOptoeBase):
     def get_eeprom_path(self):
         return _EEPROM_PATH.format(self._bus)
 
+    def read_eeprom(self, offset, num_bytes):
+        """
+        Return EEPROM bytes from daemon cache, falling back to direct sysfs.
+
+        Primary path: /run/wedge100s/sfp_N_eeprom written by wedge100s-i2c-daemon.
+        No I2C transaction in the normal case.
+
+        Fallback (daemon not yet run, or eeprom file absent on port insertion):
+          - If port is known absent (sfp_N_present == "0"): return None immediately.
+          - Otherwise: direct sysfs read under _eeprom_bus_lock.
+        """
+        cache = _I2C_EEPROM_CACHE.format(self._port)
+        try:
+            with open(cache, 'rb') as f:
+                f.seek(offset)
+                data = f.read(num_bytes)
+                if len(data) == num_bytes:
+                    return bytearray(data)
+        except OSError:
+            pass
+
+        # Cache miss — check presence before attempting sysfs fallback.
+        present_file = _I2C_PRESENT_CACHE.format(self._port)
+        try:
+            with open(present_file) as f:
+                if f.read().strip() == '0':
+                    return None  # absent: nothing to read
+        except OSError:
+            pass  # presence cache missing → first boot, try sysfs anyway
+
+        # Fallback: direct sysfs read (daemon not yet run, or eeprom not yet cached).
+        with _eeprom_bus_lock:
+            return SfpOptoeBase.read_eeprom(self, offset, num_bytes)
+
     # ------------------------------------------------------------------
     # DeviceBase / SfpBase API
     # ------------------------------------------------------------------
@@ -171,19 +140,35 @@ class Sfp(SfpOptoeBase):
         """
         True when a QSFP28 module is physically inserted in this port.
 
-        Reads the PCA9535 PRESENT# GPIO via kernel sysfs.  The kernel
-        gpio-pca953x driver handles I2C locking properly, eliminating
-        the bus contention caused by the old i2cget -f -y approach.
-        Active-low: sysfs value 0 = module present.
+        Primary path: reads /run/wedge100s/sfp_N_present written by
+        wedge100s-i2c-daemon.  File mtime is checked: if older than
+        _PRESENCE_MAX_AGE_S the daemon is considered stale and a live
+        smbus2 read of the PCA9535 is performed instead.
+
+        XOR-1 interleave: port → line = (port % 16) ^ 1, per ONL sfpi.c.
+        PCA9535 INPUT is active-low (bit=0 means present).
         """
-        path = _get_presence_path(self._port)
-        if path is None:
-            return False
+        cache = _I2C_PRESENT_CACHE.format(self._port)
         try:
-            with open(path) as f:
-                return f.read().strip() == '0'
+            st = os.stat(cache)
+            if (time.monotonic() - st.st_mtime) < _PRESENCE_MAX_AGE_S:
+                with open(cache) as f:
+                    return f.read().strip() == '1'
+            # Cache stale — fall through to live read
         except OSError:
+            pass  # file not yet written (first ~5 s of boot)
+
+        # Fallback: direct smbus2 read of PCA9535
+        from sonic_platform import platform_smbus
+        group = self._port // 16
+        line  = (self._port % 16) ^ 1      # XOR-1 interleave (ONL sfpi.c)
+        reg   = line // 8
+        bit   = line % 8
+        byte  = platform_smbus.read_byte(
+            _PCA9535_BUS[group], _PCA9535_ADDR[group], reg)
+        if byte is None:
             return False
+        return not bool((byte >> bit) & 1)  # active-low
 
     def get_status(self):
         return self.get_presence()

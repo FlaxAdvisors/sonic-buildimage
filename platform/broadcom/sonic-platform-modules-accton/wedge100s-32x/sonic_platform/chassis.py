@@ -60,9 +60,6 @@ class Chassis(ChassisBase):
         self._watchdog = Watchdog()
         # Previous presence state for get_change_event() polling
         self._prev_presence = {}
-        # Pre-warm the SMBus pool for presence buses so first poll is fast.
-        platform_smbus.read_byte(36, 0x22, 0)
-        platform_smbus.read_byte(37, 0x23, 0)
 
     # ------------------------------------------------------------------
     # Status LED  (SYS1 — system-status indicator on CPLD reg 0x3e)
@@ -107,30 +104,46 @@ class Chassis(ChassisBase):
 
     def _bulk_read_presence(self):
         """
-        Read all 32 port presence bits in 4 I2C reads via platform_smbus.
+        Read all 32 port presence bits from wedge100s-i2c-daemon cache files.
 
-        PCA9535 INPUT registers are active-low: 0 = module present.
-        The GPIO lines use XOR-1 interleave wiring; bit b in register r
-        on chip group g maps to port = g*16 + (r*8 + b) ^ 1.
+        Primary path: /run/wedge100s/sfp_N_present written by the daemon every 3 s.
+        Eliminates direct mux-tree I2C from the chassis polling loop, removing
+        the residual mux race between chassis.py presence reads (mux 0x74 ch2/3)
+        and daemon EEPROM reads (mux 0x70-0x73) on module insertion.
 
-        Returns dict {port (0-based): bool present} or None on I2C error.
-        Falls back to per-port GPIO sysfs if smbus2 is unavailable.
+        Fallback (daemon not yet run — first ~5 s of boot): direct smbus2 reads
+        of PCA9535 INPUT registers, identical to the old primary path.
+
+        Returns dict {port (0-based): bool present}.
         """
+        result = {}
+        # Try daemon cache files (normal operation after first daemon tick)
+        cache_miss = False
+        for port in range(NUM_SFPS):
+            cache = '/run/wedge100s/sfp_{}_present'.format(port)
+            try:
+                with open(cache) as f:
+                    result[port] = f.read().strip() == '1'
+            except OSError:
+                cache_miss = True
+                break
+
+        if not cache_miss:
+            return result
+
+        # Fallback: direct smbus2 (daemon not yet run — first ~5 s of boot)
         result = {}
         for reg_idx, (bus, addr, reg) in enumerate(_PRESENCE_REGS):
             byte = platform_smbus.read_byte(bus, addr, reg)
             if byte is None:
-                # smbus2 unavailable — fall back to sysfs for all ports
-                result = {}
-                for idx in range(1, NUM_SFPS + 1):
-                    result[idx - 1] = self._sfp_list[idx].get_presence()
-                return result
-            group = reg_idx // 2    # 0 = chip 36-0022, 1 = chip 37-0023
-            reg_num = reg_idx % 2   # 0 = INPUT0, 1 = INPUT1
+                return {i: self._sfp_list[i + 1].get_presence()
+                        for i in range(NUM_SFPS)}
+            group   = reg_idx // 2
+            reg_num = reg_idx % 2
             for bit in range(8):
                 line = reg_num * 8 + bit
                 port = group * 16 + (line ^ 1)
-                result[port] = not bool((byte >> bit) & 1)  # active-low
+                result[port] = not bool((byte >> bit) & 1)
         return result
 
     def get_change_event(self, timeout=0):
@@ -168,4 +181,4 @@ class Chassis(ChassisBase):
             if not timeout or time.monotonic() >= expiry:
                 return True, {'sfp': {}}
 
-            time.sleep(1.0)
+            time.sleep(3.0)   # daemon polls every 3 s; no point polling faster

@@ -38,6 +38,14 @@ mkdir -p /run/wedge100s
 systemctl enable wedge100s-bmc-poller.timer
 systemctl start  wedge100s-bmc-poller.timer || true
 
+# Phase EOS: enable QSFP presence + EEPROM cache daemon timer.
+# The timer fires every 3 s and invokes wedge100s-i2c-daemon (one-shot),
+# which reads PCA9535 presence via i2c-dev ioctl and writes cached files
+# to /run/wedge100s/.  sfp.py and chassis.py read these files instead of
+# issuing direct mux-tree I2C, eliminating the CP2112 mux race.
+systemctl enable wedge100s-i2c-poller.timer
+systemctl start  wedge100s-i2c-poller.timer || true
+
 # Install port_breakout_config_db.json to /etc/sonic/ if not already present.
 # The DPB CLI reads this file from /etc/sonic/ to get default config for new
 # sub-ports created during breakout; it does NOT fall back to the hwsku dir.

@@ -22,6 +22,28 @@ QSFP_CAPTURE = """\
 import json, sys
 from sonic_platform.platform import Platform
 
+def _vendor_string(path):
+    \"\"\"Read bytes 148-163 from EEPROM and return printable chars (>=4 consecutive).\"\"\"
+    try:
+        with open(path, 'rb') as f:
+            data = f.read(164)
+        if len(data) < 164:
+            return ''
+        vendor_bytes = data[148:164]
+        result, run = [], []
+        for b in vendor_bytes:
+            if 0x20 <= b <= 0x7e:
+                run.append(chr(b))
+            else:
+                if len(run) >= 4:
+                    result.append(''.join(run))
+                run = []
+        if len(run) >= 4:
+            result.append(''.join(run))
+        return ' '.join(result).strip()
+    except OSError:
+        return ''
+
 chassis = Platform().get_chassis()
 results = []
 for idx in range(1, 33):
@@ -29,9 +51,12 @@ for idx in range(1, 33):
     present = sfp.get_presence()
     eeprom_path = None
     error_desc = None
+    vendor_name = None
     try:
         eeprom_path = sfp.get_eeprom_path() if present else None
         error_desc = sfp.get_error_description()
+        if present and eeprom_path:
+            vendor_name = _vendor_string(eeprom_path)
     except Exception as e:
         error_desc = f'EXCEPTION: {e}'
     results.append({
@@ -41,6 +66,7 @@ for idx in range(1, 33):
         'eeprom_path': eeprom_path,
         'error_description': error_desc,
         'position': sfp.get_position_in_parent(),
+        'vendor_name': vendor_name,
     })
 print(json.dumps(results))
 """
@@ -182,24 +208,26 @@ def test_qsfp_eeprom_identifier_byte(ssh):
 
 
 def test_qsfp_eeprom_vendor_info(ssh):
-    """At least one present port has readable vendor name in EEPROM."""
+    """At least one present port has ≥4 printable chars in EEPROM vendor bytes 148–163."""
     data = _get_qsfps(ssh)
     present = [p for p in data if p["present"] and p["eeprom_path"]]
     if not present:
         pytest.skip("No QSFP modules present — cannot test vendor info")
 
-    p = present[0]
-    path = p["eeprom_path"]
-    # Vendor name at bytes 148–163 in QSFP28 EEPROM (page 0)
-    out, err, rc = ssh.run(
-        f"sudo dd if={path} bs=1 skip=148 count=16 2>/dev/null | strings"
-    )
-    print(f"\n{p['name']} EEPROM vendor name: {out.strip()!r}")
-    if rc != 0 or not out.strip():
-        pytest.xfail(f"Could not read vendor name from {p['name']} EEPROM")
-    # Vendor name should be printable ASCII
-    assert out.strip().isprintable() or any(c.isalpha() for c in out.strip()), (
-        f"Vendor name bytes don't look printable: {out.strip()!r}"
+    # DAC cables often have only 1–3 printable chars at offset 148; optical SFPs
+    # have full vendor strings.  Require at least one port to have ≥4 printable chars.
+    readable = [(p["name"], p["vendor_name"]) for p in present if p.get("vendor_name")]
+
+    print(f"\nVendor-readable ports ({len(readable)}/{len(present)}):")
+    for name, vendor in readable:
+        print(f"  {name}: {vendor!r}")
+    if not readable:
+        print(f"\nNo readable vendor from: {[p['name'] for p in present]}")
+
+    assert readable, (
+        f"No present port has ≥4 printable chars at EEPROM bytes 148–163 "
+        f"(checked {len(present)} ports). Possible mux contention — "
+        f"confirm Phase R27 optoe1 pre-registration is active."
     )
 
 

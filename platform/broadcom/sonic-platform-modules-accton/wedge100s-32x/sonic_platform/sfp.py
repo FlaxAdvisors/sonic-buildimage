@@ -67,10 +67,10 @@ _PCA9535_BUS  = [36, 37]
 _PCA9535_ADDR = [0x22, 0x23]
 
 # ---------------------------------------------------------------------------
-# Sysfs path for QSFP EEPROM (pre-registered at boot by platform init)
+# Phase 2: daemon cache is the authoritative EEPROM path.
 # ---------------------------------------------------------------------------
 
-_EEPROM_PATH = '/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom'
+_EEPROM_PATH = '/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom'  # Phase 1 sysfs (fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +93,16 @@ class Sfp(SfpOptoeBase):
     # ------------------------------------------------------------------
 
     def get_eeprom_path(self):
+        """Return the EEPROM path that xcvrd and callers should use.
+
+        Phase 2: daemon cache is primary. Sysfs does not exist (i2c_mux_pca954x
+        not loaded). Return the daemon cache path if it exists; fall back to
+        sysfs path so the caller gets a predictable non-None string.
+        """
+        cache = _I2C_EEPROM_CACHE.format(self._port)
+        import os
+        if os.path.exists(cache):
+            return cache
         return _EEPROM_PATH.format(self._bus)
 
     def read_eeprom(self, offset, num_bytes):

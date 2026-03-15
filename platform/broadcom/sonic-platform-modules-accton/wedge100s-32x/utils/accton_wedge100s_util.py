@@ -4,16 +4,18 @@
 #
 # Platform initialization utility for Accton Wedge 100S-32X.
 #
-# Architecture notes:
+# Architecture notes (Phase 2 — EOS-like hidraw daemon):
 #   - Host I2C master is the CP2112 USB HID bridge (i2c-1, driver: hid_cp2112).
 #     There is NO iSMT controller on this platform.
 #   - Thermal sensors and fans are managed by OpenBMC via /dev/ttyACM0 (57600 8N1).
 #     They are NOT accessible via host I2C.  Do NOT load lm75 or i2c_ismt.
 #   - PSU presence/status is read from CPLD register 0x10 at i2c-1/0x32.
-#   - QSFP28 presence is via PCA9535 GPIO expanders at i2c-36/0x22 and i2c-37/0x23.
-#   - System EEPROM (ONIE TLV, TlvInfo) is a 24c64 at 0x50 (registered via i2c-40/0x50).
-#     ONIE registers it as: at24 7-0050 (8192 byte 24c64).  In SONiC, mux 0x74 ch6 = i2c-40.
-#   - Bus numbers are confirmed stable on SONiC kernel 6.1.0; see i2c_bus_map.json.
+#   - QSFP28 presence, QSFP EEPROMs, and system EEPROM are owned by
+#     wedge100s-i2c-daemon via /dev/hidraw0 (CP2112 HID reports directly).
+#     i2c_mux_pca954x, optoe, and at24 are NOT loaded — the daemon is the sole
+#     owner of the CP2112 mux tree, matching the EOS PLXcvr architecture exactly.
+#   - Bus numbers i2c-2 through i2c-41 do NOT exist in Phase 2.
+#   - See tests/notes/EOS-LIKE-PLAN.md for full architecture rationale.
 
 """
 Usage: %(scriptName)s [options] command object
@@ -46,10 +48,9 @@ DEBUG = False
 args = []
 FORCE = 0
 
-# System EEPROM sysfs path (at24 driver, registered by mknod above).
-# The wedge100s-i2c-daemon reads this once at first boot and writes
-# /run/wedge100s/syseeprom; eeprom.py reads the daemon cache as primary source.
-EEPROM_SYSFS_PATH = '/sys/bus/i2c/devices/40-0050/eeprom'
+# Daemon cache paths (Phase 2: daemon owns all mux-tree I2C via hidraw).
+SYSEEPROM_DAEMON_CACHE = '/run/wedge100s/syseeprom'
+SFP_EEPROM_CACHE_FMT   = '/run/wedge100s/sfp_{}_eeprom'
 
 # Port-to-I2C-bus map (ONL sfpi.c sfp_bus_index[], 0-indexed, confirmed SONiC 6.1.0)
 SFP_BUS_MAP = [
@@ -69,46 +70,29 @@ _CPLD_BUS  = 1
 _CPLD_ADDR = 0x32
 _PSU_REG   = 0x10
 
-# Kernel modules (load order matters; hid_cp2112 must precede i2c_mux_pca954x).
-# i2c_ismt and lm75 are intentionally absent (no iSMT on this platform;
-# thermal sensors are on BMC I2C, not host-accessible).
+# Kernel modules — Phase 2 (EOS-like hidraw daemon owns the CP2112 mux tree).
+# i2c_mux_pca954x, at24, and optoe are intentionally absent:
+#   wedge100s-i2c-daemon reads QSFP EEPROMs and system EEPROM via /dev/hidraw0
+#   directly.  Loading i2c_mux_pca954x would create virtual buses 2-41 and cause
+#   kernel probe-writes to QSFP EEPROM address 0x50 on every platform init.
+# hid_cp2112 is kept: CPLD at i2c-1/0x32 is needed by psu.py and led_control.py.
+# i2c_ismt and lm75 are intentionally absent (no iSMT; thermal on BMC I2C).
 kos = [
     'modprobe i2c_dev',
     'modprobe i2c_i801',
     'modprobe hid_cp2112',
-    'modprobe i2c_mux_pca954x force_deselect_on_exit=1',
-    'modprobe at24',
-    'modprobe optoe',
     'modprobe wedge100s_cpld',
 ]
 
-# I2C device registration.  Order is critical for bus number stability:
-# PCA9548 muxes at 0x70–0x74 must be registered in address order so that
-# the kernel assigns buses i2c-2 through i2c-41 matching i2c_bus_map.json.
-# Child devices on mux 0x74 channels (i2c-36, i2c-37, i2c-40) come last.
-# All 32 optoe1 QSFP EEPROM devices are pre-registered here (Phase R27) so
-# that EEPROM sysfs paths exist before pmon/xcvrd start.  This fixes DAC
-# cable EEPROM reads that fail with lazy per-port registration.
+# I2C device registration — Phase 2 (EOS-like hidraw daemon).
+# Only the CPLD is registered here.  The PCA9548 mux tree (0x70-0x74),
+# system EEPROM (24c64), and all QSFP optoe1 EEPROMs are NOT registered:
+# wedge100s-i2c-daemon owns them via /dev/hidraw0.  Registering i2c_mux_pca954x
+# would cause kernel probe-writes to QSFP EEPROM 0x50 on every platform init,
+# which is the root cause of the transceiver EEPROM corruption.
 mknod = [
-    # CPLD is directly on i2c-1 (not behind any mux); register first.
+    # CPLD is directly on i2c-1 (no mux needed); wedge100s_cpld driver.
     'echo wedge100s_cpld 0x32 > /sys/bus/i2c/devices/i2c-1/new_device',
-    'echo pca9548 0x70 > /sys/bus/i2c/devices/i2c-1/new_device',
-    'echo pca9548 0x71 > /sys/bus/i2c/devices/i2c-1/new_device',
-    'echo pca9548 0x72 > /sys/bus/i2c/devices/i2c-1/new_device',
-    'echo pca9548 0x73 > /sys/bus/i2c/devices/i2c-1/new_device',
-    'echo pca9548 0x74 > /sys/bus/i2c/devices/i2c-1/new_device',
-    # mux 0x74 ch6 → i2c-40: system EEPROM (24c64 at 0x50, ONIE TlvInfo).
-    # Note: PCA9535 at i2c-36/0x22 and i2c-37/0x23 are NOT registered as
-    # gpio_pca953x kernel devices.  wedge100s-i2c-daemon reads them directly
-    # via i2c-dev ioctl, eliminating the mux race from concurrent gpio sysfs
-    # and EEPROM accesses on the same PCA9548 0x74 mux tree.
-    'echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device',
-] + [
-    # optoe1 QSFP EEPROM on each port's dedicated bus (SFP_BUS_MAP order).
-    # Registering all 32 here ensures /sys/bus/i2c/devices/i2c-N/N-0050/eeprom
-    # exists before xcvrd starts, eliminating the lazy-init race.
-    'echo optoe1 0x50 > /sys/bus/i2c/devices/i2c-{0}/new_device'.format(bus)
-    for bus in SFP_BUS_MAP
 ]
 
 
@@ -202,8 +186,8 @@ def driver_check():
 
 
 def device_exist():
-    """Return True if the first PCA9548 mux (0x70) is registered on i2c-1."""
-    ret, _ = log_os_system("ls /sys/bus/i2c/devices/1-0070", 0)
+    """Return True if the CPLD (0x32) is registered on i2c-1."""
+    ret, _ = log_os_system("ls /sys/bus/i2c/devices/1-0032", 0)
     return ret == 0
 
 
@@ -389,7 +373,6 @@ def do_install():
             return status
     else:
         print(PROJECT_NAME.upper() + " I2C devices already registered.")
-    _warmup_qsfp_eeproms()
     _pin_bcm_irq()
     do_sonic_platform_install()
     print("Platform init complete.")
@@ -504,17 +487,20 @@ def device_traversal():
 # ── sff (QSFP EEPROM dump) ────────────────────────────────────────────────────
 
 def show_eeprom(index):
-    if not system_ready():
-        print("System not ready. Run 'install' first.")
-        return
-
     port = int(index) - 1  # convert 1-based to 0-based
-    bus = SFP_BUS_MAP[port]
-    eeprom_path = "/sys/bus/i2c/devices/i2c-{0}/{0}-0050/eeprom".format(bus)
+    cache_path = SFP_EEPROM_CACHE_FMT.format(port)
 
-    if not os.path.exists(eeprom_path):
-        print("Port {} eeprom not found at {}.".format(index, eeprom_path))
-        print("Run 'install' to register I2C devices.")
+    if not os.path.exists(cache_path):
+        present_path = '/run/wedge100s/sfp_{}_present'.format(port)
+        try:
+            with open(present_path) as f:
+                present = f.read().strip() == '1'
+        except OSError:
+            present = None
+        if present is False:
+            print("Port {}: no module present.".format(index))
+        else:
+            print("Port {}: daemon cache not yet available (wedge100s-i2c-daemon not run?).".format(index))
         return
 
     ret, log = log_os_system("which hexdump", 0)
@@ -528,8 +514,8 @@ def show_eeprom(index):
             print("hexdump not found.")
             return 1
 
-    print("Port {} EEPROM (i2c-{}, {}):".format(index, bus, eeprom_path))
-    ret, log = log_os_system("cat {} | {} -C".format(eeprom_path, hex_cmd), 1)
+    print("Port {} EEPROM (daemon cache: {}):".format(index, cache_path))
+    ret, log = log_os_system("cat {} | {} -C".format(cache_path, hex_cmd), 1)
     if ret == 0:
         print(log)
     else:

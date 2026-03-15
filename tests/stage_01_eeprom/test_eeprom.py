@@ -31,8 +31,8 @@ PLATFORM_KEYWORD = "wedge"
 
 # ONIE TlvInfo header: 8-byte ASCII magic "TlvInfo\x00"
 TLVINFO_MAGIC = bytes([0x54, 0x6c, 0x76, 0x49, 0x6e, 0x66, 0x6f, 0x00])
-EEPROM_SYSFS  = "/sys/bus/i2c/devices/40-0050/eeprom"
-EEPROM_CACHE  = "/var/run/platform_cache/syseeprom_cache"
+# Phase 2: daemon writes syseeprom via hidraw; sysfs device does not exist.
+EEPROM_DAEMON_CACHE = "/run/wedge100s/syseeprom"
 
 
 # ------------------------------------------------------------------
@@ -41,13 +41,13 @@ EEPROM_CACHE  = "/var/run/platform_cache/syseeprom_cache"
 
 @pytest.fixture(scope="module")
 def eeprom_cache_bytes(ssh):
-    """Read the first 256 bytes of the platform EEPROM cache file."""
+    """Read the first 256 bytes of the daemon EEPROM cache file."""
     script = f"""
-data = open('{EEPROM_CACHE}', 'rb').read()
+data = open('{EEPROM_DAEMON_CACHE}', 'rb').read()
 print(data[:256].hex())
 """
     out, err, rc = ssh.run_python(script, timeout=20)
-    assert rc == 0, f"Could not read EEPROM cache: {err}"
+    assert rc == 0, f"Could not read EEPROM daemon cache: {err}"
     return bytes.fromhex(out.strip())
 
 
@@ -62,56 +62,32 @@ def eeprom_raw_cli(ssh):
 # Sysfs device registration
 # ------------------------------------------------------------------
 
-def test_eeprom_sysfs_device_registered(ssh):
-    """at24 device 40-0050 is registered in sysfs (24c64 chip).
+def test_eeprom_daemon_cache_exists(ssh):
+    """Daemon cache /run/wedge100s/syseeprom exists (Phase 2: written via hidraw).
 
-    Registered by wedge100s-platform-init.service via:
-        echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device
+    Written by wedge100s-i2c-daemon (OnBootSec=5s) via CP2112 hidraw direct read.
+    i2c_mux_pca954x and at24 are not loaded; the sysfs device 40-0050 does not exist.
+    If missing: sudo systemctl start wedge100s-i2c-poller.service
     """
-    out, err, rc = ssh.run("ls /sys/bus/i2c/devices/40-0050/ 2>/dev/null")
-    assert rc == 0 and "eeprom" in out, (
-        "EEPROM at24 device 40-0050 not in sysfs — platform-init may not have run.\n"
-        "Check: systemctl status wedge100s-platform-init"
+    out, err, rc = ssh.run(f"ls -la {EEPROM_DAEMON_CACHE} 2>/dev/null")
+    assert rc == 0, (
+        f"Daemon EEPROM cache missing: {EEPROM_DAEMON_CACHE}\n"
+        "Fix: sudo systemctl start wedge100s-i2c-poller.service"
     )
 
 
-def test_eeprom_sysfs_device_type(ssh):
-    """Registered device type is 24c64."""
-    out, err, rc = ssh.run("cat /sys/bus/i2c/devices/40-0050/name 2>/dev/null")
-    assert rc == 0, f"Could not read device name: {err}"
-    assert "24c64" in out.strip(), (
-        f"Expected 24c64, got: {out.strip()!r}"
+def test_eeprom_daemon_cache_size(ssh):
+    """Daemon cache is 8192 bytes (full 24c64 image)."""
+    out, err, rc = ssh.run(f"wc -c < {EEPROM_DAEMON_CACHE} 2>/dev/null")
+    assert rc == 0, f"Could not read daemon cache size: {err}"
+    assert int(out.strip()) == 8192, (
+        f"Expected 8192 bytes, got {out.strip()}"
     )
 
 
 # ------------------------------------------------------------------
 # Cache file — written at boot before xcvrd starts
 # ------------------------------------------------------------------
-
-def test_eeprom_cache_exists(ssh):
-    """EEPROM cache file exists at /var/run/platform_cache/syseeprom_cache.
-
-    Platform-init writes a raw at24 image here before pmon/xcvrd start so
-    SONiC tools can read EEPROM data without hitting the I2C bus at runtime
-    (CP2112 bus contention with xcvrd causes at24 sysfs reads to return zeros).
-
-    If missing: sudo systemctl restart wedge100s-platform-init
-    """
-    out, err, rc = ssh.run(f"ls -la {EEPROM_CACHE} 2>/dev/null")
-    assert rc == 0, (
-        f"EEPROM cache missing: {EEPROM_CACHE}\n"
-        "Fix: sudo systemctl restart wedge100s-platform-init"
-    )
-
-
-def test_eeprom_cache_size(ssh):
-    """Cache file is 8192 bytes (full 24c64 image)."""
-    out, err, rc = ssh.run(f"wc -c < {EEPROM_CACHE} 2>/dev/null")
-    assert rc == 0, f"Could not read cache size: {err}"
-    assert int(out.strip()) == 8192, (
-        f"Expected 8192 bytes, got {out.strip()}"
-    )
-
 
 def test_eeprom_cache_magic_bytes(ssh, eeprom_cache_bytes):
     """Cache file starts with ONIE TlvInfo magic bytes.

@@ -246,26 +246,37 @@ def _pca9535_check(ssh, bus, addr):
     return None, f"error: {combined}"
 
 
-def test_pca9535_i2c36_accessible(ssh):
-    """PCA9535 at i2c-36/0x22 (QSFP ports 0–15) responds on I2C bus.
+def test_pca9535_daemon_cache_ports_0_15(ssh):
+    """PCA9535 presence data for ports 0–15 is in daemon cache files.
 
-    'Device or resource busy' means the kernel gpio/smbus driver has claimed the
-    device — this is the expected state when the platform init service has run.
-    The Python API reads presence through that driver (see test_qsfp_api_port_count).
+    Phase 2: i2c-36 does not exist (i2c_mux_pca954x not loaded).
+    wedge100s-i2c-daemon reads PCA9535 at mux 0x74 ch2 via /dev/hidraw0
+    and writes /run/wedge100s/sfp_{0..15}_present.
     """
-    val, status = _pca9535_check(ssh, 36, 0x22)
-    print(f"\nPCA9535 i2c-36/0x22: {status}  (value={val})")
-    assert status in ("ok", "busy"), (
-        f"Unexpected result from PCA9535 i2c-36/0x22: {status}\n"
-        "Check that the mux tree is initialized and i2c-36 is registered."
+    missing = []
+    for port in range(16):
+        out, _, rc = ssh.run(f"cat /run/wedge100s/sfp_{port}_present 2>/dev/null")
+        if rc != 0 or out.strip() not in ("0", "1"):
+            missing.append(port)
+    assert not missing, (
+        f"Ports {missing} have missing/invalid presence cache files.\n"
+        "Fix: sudo systemctl start wedge100s-i2c-poller.service"
     )
 
 
-def test_pca9535_i2c37_accessible(ssh):
-    """PCA9535 at i2c-37/0x23 (QSFP ports 16–31) responds on I2C bus."""
-    val, status = _pca9535_check(ssh, 37, 0x23)
-    print(f"\nPCA9535 i2c-37/0x23: {status}  (value={val})")
-    assert status in ("ok", "busy"), (
-        f"Unexpected result from PCA9535 i2c-37/0x23: {status}\n"
-        "Check that the mux tree is initialized and i2c-37 is registered."
+def test_pca9535_daemon_cache_ports_16_31(ssh):
+    """PCA9535 presence data for ports 16–31 is in daemon cache files.
+
+    Phase 2: i2c-37 does not exist (i2c_mux_pca954x not loaded).
+    wedge100s-i2c-daemon reads PCA9535 at mux 0x74 ch3 via /dev/hidraw0
+    and writes /run/wedge100s/sfp_{16..31}_present.
+    """
+    missing = []
+    for port in range(16, 32):
+        out, _, rc = ssh.run(f"cat /run/wedge100s/sfp_{port}_present 2>/dev/null")
+        if rc != 0 or out.strip() not in ("0", "1"):
+            missing.append(port)
+    assert not missing, (
+        f"Ports {missing} have missing/invalid presence cache files.\n"
+        "Fix: sudo systemctl start wedge100s-i2c-poller.service"
     )

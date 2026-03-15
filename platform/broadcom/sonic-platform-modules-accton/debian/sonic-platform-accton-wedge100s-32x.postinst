@@ -364,6 +364,16 @@ if command -v docker >/dev/null 2>&1; then
              "Reboot (or stop pmon then 'docker rm pmon') to pick up ttyACM device mapping."
     fi
 
+    # Force-reinstall sonic_platform wheel on the HOST (python3 for decode-syseeprom
+    # and other SONiC CLI tools) and inside the running pmon container.
+    # Always force-reinstall so deb upgrades take effect immediately without
+    # needing a reboot — "already installed" check skips it otherwise.
+    DEVICE_WHEEL="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/sonic_platform-1.0-py3-none-any.whl"
+    if [ -f "$DEVICE_WHEEL" ]; then
+        pip3 install --quiet --force-reinstall "$DEVICE_WHEEL" 2>/dev/null || true
+        echo "wedge100s postinst: reinstalled sonic_platform wheel on host"
+    fi
+
     # Update sonic_platform wheel inside the running pmon container.
     # The wheel is bind-mounted from the host but docker_init.sh skips reinstall
     # if sonic_platform is already importable (it is, baked into the image).

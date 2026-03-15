@@ -48,7 +48,7 @@ I need claude to act as the expert here. Take direction for changes but be sure 
 - Use: no python is available
 
 ### Peer wedge100s running Arista EOS
-- Access: `sshpass -p '0penSesame' ssh -o StrictHostKeyChecking=no -J admin@192.168.88.12 admin@192.168.88.14 '<command>'`
+- Access: `sshpass -p '0penSesame' ssh -tt -o StrictHostKeyChecking=no -J admin@192.168.88.12 admin@192.168.88.14 '<command>'`
 - Platform: Accton Wedge 100S-32X running Arista EOS
 - PortChannel1: `10.0.1.0/31` (SONiC peer is `10.0.1.1/31`), members Et13/1 + Et14/1
 - Note: direct SSH from dev host blocked when LACP links are up; always jump via 192.168.88.12
@@ -147,6 +147,7 @@ ssh admin@192.168.88.12 sudo systemctl start pmon
 | Variable | Default | Notes |
 |---|---|---|
 | `BLDENV` | trixie | Slave container Debian version |
+| `NOBOOKWORM` | 0 | Needed for some phase of the build |
 | `SONIC_BUILD_JOBS` | 1 | Parallel package builds |
 | `SONIC_CONFIG_MAKE_JOBS` | nproc | Parallelism inside each package |
 | `SONIC_DPKG_CACHE_METHOD` | none | `rwcache` to cache .deb builds |

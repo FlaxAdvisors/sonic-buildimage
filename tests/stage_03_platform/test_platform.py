@@ -16,8 +16,9 @@ import pytest
 CPLD_BUS = 1
 CPLD_ADDR = 0x32
 
-# Expected minimum number of I2C buses after mux registration
-MIN_I2C_BUSES = 40
+# Phase 2: only i2c-0 (i801 SMBus) and i2c-1 (CP2112) exist.
+# i2c_mux_pca954x is not loaded; virtual buses 2-41 do not exist.
+EXPECTED_I2C_BUSES = {"/dev/i2c-0", "/dev/i2c-1"}
 
 # PSU status register
 CPLD_PSU_STATUS_REG = 0x10
@@ -32,13 +33,17 @@ CPLD_SYS2_LED_REG = 0x3F
 # ------------------------------------------------------------------
 
 def test_i2c_buses_present(ssh):
-    """At least MIN_I2C_BUSES I2C bus devices exist under /dev."""
+    """i2c-0 (i801 SMBus) and i2c-1 (CP2112 HID bridge) exist.
+
+    Phase 2: i2c_mux_pca954x is not loaded so virtual buses i2c-2..41
+    do not exist.  The QSFP mux tree is owned by wedge100s-i2c-daemon via
+    /dev/hidraw0.  Only i2c-0 and i2c-1 are expected.
+    """
     out, err, rc = ssh.run("ls /dev/i2c-* 2>/dev/null")
     print(f"\n/dev/i2c-* devices:\n{out}")
-    buses = [l.strip() for l in out.splitlines() if l.strip()]
-    assert buses, "No /dev/i2c-* devices found — platform init may not have run"
-    assert len(buses) >= MIN_I2C_BUSES, (
-        f"Expected ≥{MIN_I2C_BUSES} I2C buses, found {len(buses)}: {buses}"
+    buses = set(l.strip() for l in out.splitlines() if l.strip())
+    assert "/dev/i2c-1" in buses, (
+        "i2c-1 (CP2112 HID bridge) not found — hid_cp2112 may not be loaded"
     )
 
 
@@ -61,14 +66,21 @@ def test_i2cdetect_lists_cp2112(ssh):
     )
 
 
-def test_i2cdetect_lists_pca9548_mux_buses(ssh):
-    """i2cdetect -l shows buses registered by PCA9548 muxes."""
-    out, _, _ = ssh.run("sudo i2cdetect -l 2>/dev/null")
-    # PCA9548 channel buses appear as i2c-mux type
-    mux_lines = [l for l in out.splitlines() if "mux" in l.lower() or "pca" in l.lower()]
-    print(f"\nMux-related buses: {mux_lines}")
-    assert len(mux_lines) >= 8, (
-        f"Expected ≥8 PCA9548 channel buses, found {len(mux_lines)}"
+def test_i2c_daemon_owns_mux_tree(ssh):
+    """wedge100s-i2c-daemon owns the CP2112 mux tree via /dev/hidraw0.
+
+    Phase 2: PCA9548 mux channels are NOT registered as kernel i2c buses.
+    Instead the daemon reads all QSFP/presence/syseeprom data via hidraw.
+    Verify /dev/hidraw0 exists and 32 presence files are present.
+    """
+    out, _, rc = ssh.run("ls /dev/hidraw0 2>/dev/null")
+    assert rc == 0, "/dev/hidraw0 not found — hid_cp2112 may not be loaded"
+    out, _, rc = ssh.run("ls /run/wedge100s/sfp_*_present 2>/dev/null | wc -l")
+    count = int(out.strip()) if rc == 0 else 0
+    assert count == 32, (
+        f"Expected 32 presence files, got {count}. "
+        "wedge100s-i2c-daemon may not have run: "
+        "sudo systemctl start wedge100s-i2c-poller.service"
     )
 
 

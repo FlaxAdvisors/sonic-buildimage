@@ -1,6 +1,6 @@
 # Staged Phases — Wedge 100S-32X SONiC Port
 *Consolidated from phases.md, INTERFACE_PLAN.md, and next-phase-plan.md.*
-*Last updated: 2026-03-11. Refactoring phases R26–R31 complete.*
+*Last updated: 2026-03-14. EOS-like I2C daemon (Phase 1) complete.*
 
 ---
 
@@ -29,20 +29,22 @@
 | 17 | Port Channel / LAG | Done | 2026-03-02 |
 | 18 | LLDP Verification | Done | 2026-03-02 |
 | 19 | Streaming Telemetry | Pending (low) | — |
-| 20 | syseepromd fix | Pending (high) | — |
+| 20 | syseepromd fix | Done (EOS daemon) | 2026-03-14 |
 | 21 | Chassis set_status_led() | Pending (medium) | — |
 | 22 | PSU telemetry investigation | Pending (medium) | — |
 | 23 | BGP / L3 routing enablement | Pending (medium) | — |
 | 24 | Breakout testing completion | Pending (low) | — |
-| 25 | Active optics / media settings | Pending (low) | — |
+| 25 | Active optics / media settings | Blocked (physical) | — |
 | **R26** | **CPLD kernel driver (wedge100s_cpld.c)** | **Done** | 2026-03-11 |
 | **R27** | **Pre-register all 32 optoe1 QSFP at boot** | **Done** | pending hardware test |
 | **R28** | **Compiled BMC polling daemon (C)** | **Done** | pending hardware test |
 | **R29** | **Python API → sysfs/daemon files** | **Done** | 2026-03-11 |
 | **R30** | **GRUB kernel args + BCM IRQ affinity** | **Done** | 2026-03-11 |
 | **R31** | **IPMI/REST investigation** | **Done** | 2026-03-11 |
+| **EOS-P1** | **EOS-like I2C daemon (Phase 1 — sysfs cache)** | **Done** | 2026-03-14 |
+| **EOS-P2** | **EOS-like Phase 2 — hidraw-only, no mux kernel drivers** | **Done** | 2026-03-14 |
 
-**Pytest:** 82/82 passing across stages 7, 11–15, 17 (as of 2026-03-03).
+**Pytest:** 175/175 passing (2026-03-15). Phase 2 complete.
 
 ---
 
@@ -218,14 +220,28 @@ Live DPB works with flex BCM config but needs fuller testing.
 5. Evaluate BCM config Jinja2 template for multi-speed support
 
 ### Phase 25: Active Optics / Media Settings
-**Priority**: Low | **Effort**: Medium
+**Priority**: Low | **Effort**: Medium | **Blocked**: physical fiber/module issue
 
-No `media_settings.json` exists; serdes pre-emphasis is baked into BCM config.
+Hardware: Ethernet104 ↔ EOS Et27/1 (Finisar CWDM4), Ethernet108 ↔ EOS Et28/1 (ColorChip CWDM4).
+Both links down for 52+ days. Full investigation in `tests/notes/phase-25-active-optics.md`.
 
-**Tasks**:
-1. Acquire SR4 or LR4 QSFP28 optic
-2. Test DOM population (temperature, voltage, TX/RX power)
-3. If signal integrity issues → create `media_settings.json`
+**Root cause**: SONiC TX light is not reaching EOS. EOS→SONiC fiber works on lane 0 of Ethernet104
+(CDR locked), but SONiC→EOS has zero signal on all PMA lanes. BCM serdes TX IS generating
+electrical signal (PRBS confirmed); optical module TX output is suspect.
+
+**Blocking issues** (require physical access):
+1. Identify SONiC-side modules (type/vendor — EEPROM corrupted; need i2c daemon from EOS-LIKE-PLAN)
+2. Check TXDIS register (QSFP byte 86) on Ethernet104/108 modules
+3. Verify TX optical power (DOM bytes 50–57) of SONiC-side modules
+4. Trace fiber from SONiC Ethernet104/108 TX to confirm it reaches EOS Et27/1, Et28/1 RX
+
+**Software tasks** (can do in parallel):
+1. Create `media_settings.json` for ports 27–28 with CWDM4/SR4 preemphasis = 0x000000
+   (optical modules need no host-side equalization; current BCM config has pre-cursor=0x28)
+2. Once links come up: verify `show lldp table` shows Et27/1 and Et28/1 neighbors
+3. Test DOM population (temperature, voltage, TX/RX power) once EEPROM reads are reliable
+
+**Note**: No LLDP-specific code changes needed — SONiC LLDP runs automatically on link-up ports.
 
 ---
 
@@ -382,6 +398,8 @@ by REST. Notes filed; no further action needed.
 
 ## Physical Topology
 
+*LLDP ground truth from SONiC `show lldp table` (verified 2026-03-14):*
+
 | Port | Ethernet | Connection | Status |
 |---|---|---|---|
 | 1 | Ethernet0 | Breakout cable, no peers | Present, no link |
@@ -390,6 +408,8 @@ by REST. Notes filed; no further action needed.
 | 13 | Ethernet48 | rabbit-lorax Et15/1 (100G DAC) | UP (RS-FEC) |
 | 17 | Ethernet64 | QSFP→4x25G breakout | DPB active; transceiver issue |
 | 21 | Ethernet80 | QSFP→4x25G breakout | DPB active; Ethernet80/81 link up |
+| 27 | Ethernet104 | rabbit-lorax Et27/1 (100GBASE-CWDM4, Finisar) | DOWN — fiber/module issue (Phase 25) |
+| 28 | Ethernet108 | rabbit-lorax Et28/1 (100GBASE-CWDM4, ColorChip) | DOWN — fiber/module issue (Phase 25) |
 | 29 | Ethernet112 | rabbit-lorax Et16/1 (100G DAC) | UP (RS-FEC) |
 
 ---

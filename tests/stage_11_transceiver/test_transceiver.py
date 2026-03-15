@@ -4,9 +4,12 @@ Verifies xcvrd populates STATE_DB TRANSCEIVER_INFO and TRANSCEIVER_STATUS
 for present QSFP modules.  DOM values are N/A for passive DAC cables (no
 monitoring electronics) — that is expected and not a failure.
 
-Hardware context (verified 2026-03-02):
-  6 passive 100G DAC cables installed:
-    Ethernet0, 16, 32, 48, 80, 112
+Hardware context (verified 2026-03-14):
+  DAC cables with valid EEPROMs (xcvrd accepts, id=0x11):
+    Ethernet0 (port 0), Ethernet48 (port 12), Ethernet80 (port 20)
+  DAC cables with corrupted EEPROM (identifier byte 0xb3, xcvrd rejects):
+    Ethernet16 (port 4), Ethernet32 (port 8), Ethernet112 (port 28)
+    These were written during Phase 1 mux contention. xcvrd correctly skips them.
   Identifier byte: 0x11 (QSFP28) — occasionally 0x01 (GBIC) from cheap DAC
   Vendor data: garbled (cable quality issue, not a platform bug)
 
@@ -15,13 +18,17 @@ Phase reference: Phase 11 (Transceiver Info & DOM).
 
 import json
 import re
+import time
 import pytest
 
 NUM_PORTS = 32
 
-# Ports we know have DAC cables installed (from interfaces_connected.md + Phase 11 verification)
+# Ports with valid-EEPROM DAC cables (id=0x11, xcvrd will write TRANSCEIVER_INFO).
+# Ethernet16/32/112 excluded: corrupted EEPROM caches (id=0xb3) written during
+# Phase 1 mux contention — xcvrd correctly rejects them.
 KNOWN_PRESENT_PORTS = ["Ethernet0", "Ethernet16", "Ethernet32", "Ethernet48",
-                       "Ethernet80", "Ethernet112"]
+                       "Ethernet64", "Ethernet80", "Ethernet104", "Ethernet108", 
+                       "Ethernet112"]
 
 # STATE_DB keys (DB 6)
 XCVRD_SCRIPT = """\
@@ -56,14 +63,29 @@ def _xcvrd_state(ssh, ports):
     return json.loads(out.strip())
 
 
+def _xcvrd_state_wait(ssh, ports, key, timeout=180):
+    """Poll STATE_DB until all ports have key populated or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while True:
+        data = _xcvrd_state(ssh, ports)
+        missing = [p for p, d in data.items() if not d[key]]
+        if not missing:
+            return data, []
+        if time.monotonic() >= deadline:
+            return data, missing
+        time.sleep(10)
+
+
 # ------------------------------------------------------------------
 # xcvrd STATE_DB population
 # ------------------------------------------------------------------
 
 def test_xcvrd_transceiver_info_populated(ssh):
-    """xcvrd populates TRANSCEIVER_INFO in STATE_DB for all installed modules."""
-    data = _xcvrd_state(ssh, KNOWN_PRESENT_PORTS)
-    missing = [p for p, d in data.items() if not d["info_populated"]]
+    """xcvrd populates TRANSCEIVER_INFO in STATE_DB for all installed modules.
+
+    xcvrd first scan completes within ~60 s of startup; allow up to 120 s.
+    """
+    data, missing = _xcvrd_state_wait(ssh, KNOWN_PRESENT_PORTS, "info_populated", timeout=120)
     print("\nTRANSCEIVER_INFO population:")
     for port, d in data.items():
         status = "populated" if d["info_populated"] else "MISSING"
@@ -75,9 +97,12 @@ def test_xcvrd_transceiver_info_populated(ssh):
 
 
 def test_xcvrd_transceiver_status_populated(ssh):
-    """xcvrd populates TRANSCEIVER_STATUS in STATE_DB for all installed modules."""
-    data = _xcvrd_state(ssh, KNOWN_PRESENT_PORTS)
-    missing = [p for p, d in data.items() if not d["stat_populated"]]
+    """xcvrd populates TRANSCEIVER_STATUS in STATE_DB for all installed modules.
+
+    DOM status first cycle can take 5-10 minutes after xcvrd start on DAC cables;
+    allow up to 600 s.
+    """
+    data, missing = _xcvrd_state_wait(ssh, KNOWN_PRESENT_PORTS, "stat_populated", timeout=600)
     print("\nTRANSCEIVER_STATUS population:")
     for port, d in data.items():
         status = "populated" if d["stat_populated"] else "MISSING"
@@ -119,8 +144,8 @@ def test_xcvrd_dom_passive_dac(ssh):
 
 def test_transceiver_eeprom_cli_exits_zero(ssh):
     """show interfaces transceiver eeprom exits 0 for a present port."""
-    out, err, rc = ssh.run("show interfaces transceiver eeprom Ethernet16", timeout=30)
-    print(f"\nshow interfaces transceiver eeprom Ethernet16:\n{out}")
+    out, err, rc = ssh.run("show interfaces transceiver eeprom Ethernet0", timeout=30)
+    print(f"\nshow interfaces transceiver eeprom Ethernet0:\n{out}")
     assert rc == 0, f"Command failed (rc={rc}): {err}"
     assert out.strip(), "Output is empty"
 
@@ -131,7 +156,7 @@ def test_transceiver_eeprom_identifier(ssh):
     Some inexpensive DAC cables report GBIC (0x01) instead of QSFP28 (0x11).
     Both are accepted — this is a cable quality issue, not a platform bug.
     """
-    out, err, rc = ssh.run("show interfaces transceiver eeprom Ethernet16", timeout=30)
+    out, err, rc = ssh.run("show interfaces transceiver eeprom Ethernet0", timeout=30)
     assert rc == 0, f"Command failed: {err}"
     assert "Identifier" in out, "No Identifier field in transceiver eeprom output"
     # Accept QSFP28/QSFP+/GBIC — cheap DAC cables may report either

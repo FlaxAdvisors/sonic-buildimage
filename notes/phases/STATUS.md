@@ -37,6 +37,7 @@ from the project's staging history for traceability.
 | **PS-05** System EEPROM | Phase 7 | ONIE TLV EEPROM; reads /run/wedge100s/syseeprom from i2c daemon | Done | 2025-02-25 |
 | **PS-06** LED | Phase 9 | SYS1/SYS2 LEDs via CPLD sysfs; ledd monitoring STATE_DB | Done | 2025-02-25 |
 | **PS-07** Build & Install | Phase 10 + R26-R29 | debian/rules, postinst, whl packaging, .deb integration | Done | 2026-03-14 |
+| **PS-08** Chassis LED API | Phase 21 | chassis.set_status_led() + ledd via /run/wedge100s mirror; blue/blink encoding; i2cset race eliminated | Done | 2026-03-16 |
 | **NF-01** BCM Config | Phase 8 | th-wedge100s-32x-flex.config.bcm; sai.profile; port_config.ini | Done | 2025-02-25 |
 | **NF-02** Transceiver Info & DOM | Phase 11 | xcvrd STATE_DB population; EEPROM read path; DOM for DAC cables | Done | 2026-03-02 |
 | **NF-03** Counters | Phase 12 | Flex counter PORT_STAT; show interfaces counters | Done | 2026-03-02 |
@@ -46,7 +47,6 @@ from the project's staging history for traceability.
 | **NF-07** Autoneg & FEC | Phase 15 | RS-FEC (CL91) works; FC-FEC 100G unsupported by SAI; AN no-op | Done | 2026-03-02 |
 | **NF-08** Port Channel | Phase 17 | PortChannel1 LACP active; L3 ping bidirectional; failover verified | Done | 2026-03-02 |
 | **NF-09** LLDP | Phase 18 | LLDP container; 4 front-panel + 1 mgmt neighbor | Done | 2026-03-02 |
-| **PS-08** Chassis LED API | Phase 21 | chassis.set_status_led() + ledd via /run/wedge100s mirror; blue/blink encoding; i2cset race eliminated | Done | 2026-03-16 |
 | **PW-02** PSU Telemetry | Phase 22 | VIN/IIN/IOUT/POUT linear11 decode; get_temperature() | Pending (medium) | — |
 | **PW-03** BGP / L3 Routing | Phase 23 | Unmask bgp.service; ASN config; FRR adjacency | Pending (medium) | — |
 | **PW-04** Breakout Completion | Phase 24 | 25G sub-port link-up; FC-FEC on 25G; Port 17 transceiver issue | Pending (low) | — |

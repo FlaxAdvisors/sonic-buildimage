@@ -1,4 +1,4 @@
-# PW-01 — Chassis LED: Plan
+# PS-08 — Chassis LED API: Plan
 
 ## Problem Statement
 

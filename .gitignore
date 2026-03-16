@@ -116,6 +116,8 @@ sonic-slave*/**/buildinfo
 coverage.xml
 test-results.xml
 htmlcov/
+tests/syseeprom-values.sh
+tests/reports/**
 
 # Dev tools
 .vscode/
@@ -127,3 +129,4 @@ sources.list.*
 
 # Generated mirror configs
 apt-retries-count
+database-chassis.service

@@ -1,4 +1,4 @@
-# PW-01 — Chassis LED: Implementation
+# PS-08 — Chassis LED API: Implementation
 
 **STATUS: Complete**
 

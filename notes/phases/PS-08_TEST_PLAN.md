@@ -1,4 +1,4 @@
-# PW-01 — Chassis LED: Test Plan
+# PS-08 — Chassis LED API: Test Plan
 
 ## Overview
 

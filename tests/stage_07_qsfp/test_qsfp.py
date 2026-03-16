@@ -1,13 +1,15 @@
 """Stage 07 — QSFP28 transceiver presence and EEPROM (32 ports).
 
-Presence is read from two PCA9535 GPIO expanders via the CP2112 mux tree:
-  i2c-36/0x22 — ports 0–15
-  i2c-37/0x23 — ports 16–31
+Phase 2 architecture:
+  Presence and EEPROM data come from /run/wedge100s/ daemon cache files
+  written by wedge100s-i2c-daemon.  The daemon reads via /dev/hidraw0
+  (CP2112 USB-HID bridge); i2c_mux_pca954x, at24, and optoe are NOT loaded.
 
-Each present port has an optoe1 EEPROM driver at i2c-{bus}/0x50.
+  sfp_N_present — 0/1 for QSFP port N (0-indexed)
+  sfp_N_eeprom  — 256-byte page 0 EEPROM content (present ports only)
+  eeprom_path() — Python API returns sysfs path for present ports
 
-Port-to-bus mapping (0-based port, from sfpi.c sfp_bus_index[]):
-  port 0→3, 1→2, 2→5, 3→4, ... 31→32
+Port naming: Ethernet0..124 (step 4), corresponding to QSFP ports 0..31.
 
 Phase reference: Phase 6 (QSFP/SFP).
 """
@@ -179,7 +181,7 @@ def test_qsfp_eeprom_path_exists(ssh):
     if not present:
         pytest.skip("No QSFP modules present — cannot test EEPROM path")
 
-    for p in present[:4]:  # Check first 4 present ports
+    for p in present:
         path = p["eeprom_path"]
         out, _, rc = ssh.run(f"test -f {path} && echo EXISTS || echo MISSING")
         assert "EXISTS" in out, (
@@ -226,8 +228,8 @@ def test_qsfp_eeprom_vendor_info(ssh):
 
     assert readable, (
         f"No present port has ≥4 printable chars at EEPROM bytes 148–163 "
-        f"(checked {len(present)} ports). Possible mux contention — "
-        f"confirm Phase R27 optoe1 pre-registration is active."
+        f"(checked {len(present)} ports). "
+        f"Possible cause: DAC cable quality (garbled vendor field is a known issue)."
     )
 
 

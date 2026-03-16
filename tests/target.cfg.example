@@ -10,3 +10,11 @@ password = YourPasswordHere
 
 # Optional: connect timeout in seconds (default 30)
 # connect_timeout = 30
+
+[links]
+# Ports on this device connected to a peer (used by stage_13, stage_16).
+# Comma or space separated.  Defaults used if this section is absent.
+connected_ports = Ethernet16,Ethernet32,Ethernet48,Ethernet112
+
+# IP address of the peer device reachable over the port channel.
+peer_ip = 10.0.1.0

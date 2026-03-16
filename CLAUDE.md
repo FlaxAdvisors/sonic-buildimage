@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Porting the Accton Wedge 100S-32X (Facebook Wedge 100, Broadcom Tomahawk) to SONiC.
 Active branch: `wedge100s`. 
 Phases to implement: tests/STAGED_PHASES.md
-Quick guide to i2c and drivers: device/accton/x86_64-accton_wedge100s_32x-r0/i2c_bus_map.json
+Quick guide to i2c and drivers: notes/i2c_topology.json
 
 I need claude to act as the expert here. Take direction for changes but be sure to comparing the proposed implementation changes to other platform accton broadcom platforms and especially the OpenNetworkLinux implementation for wedge100s.
 

@@ -17,6 +17,8 @@
 # instead of i2cset subprocess.  Sysfs path: /sys/bus/i2c/devices/1-0032/
 #
 
+import os
+
 try:
     from sonic_led.led_control_base import LedControlBase
 except ImportError as e:
@@ -25,13 +27,22 @@ except ImportError as e:
 # CPLD sysfs attributes from wedge100s_cpld driver (Phase R26)
 _CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
 
+# /run mirror — written alongside every CPLD update for observability
+_RUN_DIR = '/run/wedge100s'
+
 # Register values
 _LED_OFF   = 0x00
 _LED_GREEN = 0x02
 
 
-def _cpld_write(attr, val):
-    """Write one byte to a wedge100s_cpld sysfs LED attribute."""
+def _led_write(attr, val):
+    """Write LED value to both /run/wedge100s mirror and CPLD sysfs."""
+    try:
+        os.makedirs(_RUN_DIR, exist_ok=True)
+        with open('{}/{}'.format(_RUN_DIR, attr), 'w') as f:
+            f.write('{}\n'.format(val))
+    except Exception:
+        pass
     try:
         with open('{}/{}'.format(_CPLD_SYSFS, attr), 'w') as f:
             f.write(str(val))
@@ -76,11 +87,11 @@ class LedControl(LedControlBase):
 
     def __init__(self):
         self._port_states = _state_db_port_states()
-        _cpld_write('led_sys1', _LED_GREEN)
+        _led_write('led_sys1', _LED_GREEN)
         any_up = any(self._port_states.values())
-        _cpld_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)
+        _led_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)
 
     def port_link_state_change(self, port, state):
         self._port_states[port] = (state == 'up')
         any_up = any(self._port_states.values())
-        _cpld_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)
+        _led_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)

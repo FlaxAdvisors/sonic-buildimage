@@ -82,6 +82,18 @@ PORT_LANES = {
 class TestSpeedChange:
     """Phase 14a: Verify speed change via `config interface speed`."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_speed(self, ssh):
+        """Snapshot SPEED_TEST_PORT speed before each test; restore after."""
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 hget 'PORT|{SPEED_TEST_PORT}' speed", timeout=10
+        )
+        original = out.strip() or "100000"
+        yield
+        ssh.run(
+            f"sudo config interface speed {SPEED_TEST_PORT} {original}", timeout=15
+        )
+
     def _get_speed(self, ssh, port, db="config"):
         """Read port speed from CONFIG_DB (db=config) or APP_DB (db=app)."""
         if db == "config":

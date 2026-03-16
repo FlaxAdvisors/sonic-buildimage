@@ -10,6 +10,7 @@ Subsystem population schedule:
   Phase 7: System EEPROM
 """
 
+import os
 import time
 
 try:
@@ -66,21 +67,45 @@ class Chassis(ChassisBase):
     # healthd calls set_status_led(GREEN|RED|AMBER|OFF) to reflect the
     # overall health state.  The CPLD driver exposes the attr led_sys1.
     # led_control.py owns SYS2 (port-activity) independently via ledd.
+    #
+    # Write-through: every set writes to /run/wedge100s/led_sys1 (observable
+    # state) AND to the CPLD sysfs attribute (immediate hardware effect).
+    # The /run file lets the CLI utility and other tools read current state
+    # without touching the i2c bus.
     # ------------------------------------------------------------------
-    _CPLD_SYSFS    = '/sys/bus/i2c/devices/1-0032'
+    _CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
+    _RUN_DIR    = '/run/wedge100s'
     _LED_ENCODE = {
-        'green': 0x02,
-        'red':   0x01,
-        'amber': 0x01,   # hardware has no amber; map to red
-        'off':   0x00,
+        'green':         0x02,
+        'red':           0x01,
+        'amber':         0x01,   # hardware has no amber; map to red
+        'blue':          0x04,
+        'off':           0x00,
+        'green_blink':   0x0a,
+        'red_blink':     0x09,
+        'blue_blink':    0x0c,
     }
-    _LED_DECODE = {v: k for k, v in _LED_ENCODE.items()}
-    _LED_DECODE[0x01] = 'red'   # canonical decode for 0x01
+    _LED_DECODE = {
+        0x00: 'off',
+        0x01: 'red',
+        0x02: 'green',
+        0x04: 'blue',
+        0x08: 'off',
+        0x09: 'red_blink',
+        0x0a: 'green_blink',
+        0x0c: 'blue_blink',
+    }
 
     def set_status_led(self, color):
         val = self._LED_ENCODE.get(color)
         if val is None:
             return False
+        try:
+            os.makedirs(self._RUN_DIR, exist_ok=True)
+            with open('{}/led_sys1'.format(self._RUN_DIR), 'w') as f:
+                f.write('{}\n'.format(val))
+        except Exception:
+            pass
         try:
             with open('{}/led_sys1'.format(self._CPLD_SYSFS), 'w') as f:
                 f.write(str(val))

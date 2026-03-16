@@ -21,7 +21,9 @@ Phase reference: Phase 17 (Port Channel / LAG) in INTERFACE_PLAN.md.
 Verified on hardware 2026-03-02.
 """
 
+import configparser
 import json
+import os
 import re
 import time
 import pytest
@@ -29,10 +31,18 @@ import pytest
 PORTCHANNEL_NAME = "PortChannel1"
 LAG_MEMBERS = ["Ethernet16", "Ethernet32"]
 LAG_IP = "10.0.1.1/31"
-PEER_IP = "10.0.1.0"
 
 # Standalone connected ports — should remain unaffected by LAG config
 STANDALONE_PORTS = ["Ethernet48", "Ethernet112"]
+
+# Peer IP is read from target.cfg [links] peer_ip; fall back to lab default.
+def _load_peer_ip():
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "target.cfg")
+    config = configparser.ConfigParser()
+    config.read(cfg_path)
+    return config.get("links", "peer_ip", fallback="10.0.1.0")
+
+PEER_IP = _load_peer_ip()
 
 
 # ------------------------------------------------------------------
@@ -323,6 +333,22 @@ class TestLAGFailover:
     This test shuts down Ethernet16, verifies the LAG stays up on
     Ethernet32 alone, then restores Ethernet16 and verifies recovery.
     """
+
+    @pytest.fixture(autouse=True)
+    def _restore_lag_members(self, ssh):
+        """Ensure all LAG member ports are admin-up after each test.
+
+        If the test fails after shutting a member down, this fixture
+        brings it back up so the switch is not left in a degraded state.
+        """
+        yield
+        for port in LAG_MEMBERS:
+            out, _, _ = ssh.run(
+                f"redis-cli -n 4 hget 'PORT|{port}' admin_status", timeout=10
+            )
+            if out.strip() != "up":
+                ssh.run(f"sudo config interface startup {port}", timeout=15)
+                time.sleep(2)
 
     def test_failover_and_recovery(self, ssh):
         """Shut one member, verify connectivity, restore, verify both selected."""

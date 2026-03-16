@@ -4,14 +4,12 @@ Verifies xcvrd populates STATE_DB TRANSCEIVER_INFO and TRANSCEIVER_STATUS
 for present QSFP modules.  DOM values are N/A for passive DAC cables (no
 monitoring electronics) — that is expected and not a failure.
 
-Hardware context (verified 2026-03-14):
-  DAC cables with valid EEPROMs (xcvrd accepts, id=0x11):
-    Ethernet0 (port 0), Ethernet48 (port 12), Ethernet80 (port 20)
-  DAC cables with corrupted EEPROM (identifier byte 0xb3, xcvrd rejects):
-    Ethernet16 (port 4), Ethernet32 (port 8), Ethernet112 (port 28)
-    These were written during Phase 1 mux contention. xcvrd correctly skips them.
-  Identifier byte: 0x11 (QSFP28) — occasionally 0x01 (GBIC) from cheap DAC
-  Vendor data: garbled (cable quality issue, not a platform bug)
+Port discovery is dynamic: the test reads which ports are present from
+the daemon cache (/run/wedge100s/sfp_N_present) at test time and checks
+only those ports.  The stage skips if no ports are populated.
+
+Identifier byte: 0x11 (QSFP28) — occasionally 0x01 (GBIC) from cheap DAC.
+Vendor data may be garbled on low-quality DAC cables; this is not a platform bug.
 
 Phase reference: Phase 11 (Transceiver Info & DOM).
 """
@@ -23,12 +21,21 @@ import pytest
 
 NUM_PORTS = 32
 
-# Ports with valid-EEPROM DAC cables (id=0x11, xcvrd will write TRANSCEIVER_INFO).
-# Ethernet16/32/112 excluded: corrupted EEPROM caches (id=0xb3) written during
-# Phase 1 mux contention — xcvrd correctly rejects them.
-KNOWN_PRESENT_PORTS = ["Ethernet0", "Ethernet16", "Ethernet32", "Ethernet48",
-                       "Ethernet64", "Ethernet80", "Ethernet104", "Ethernet108", 
-                       "Ethernet112"]
+
+def _discover_present_ports(ssh):
+    """Return list of Ethernet port names whose daemon presence cache is '1'.
+
+    Maps port index 0..31 to Ethernet0..124 (step 4) — the standard SONiC
+    port naming for this 32-port platform.
+    """
+    present = []
+    for idx in range(NUM_PORTS):
+        out, _, rc = ssh.run(
+            f"cat /run/wedge100s/sfp_{idx}_present 2>/dev/null", timeout=5
+        )
+        if out.strip() == "1":
+            present.append(f"Ethernet{idx * 4}")
+    return present
 
 # STATE_DB keys (DB 6)
 XCVRD_SCRIPT = """\
@@ -84,8 +91,13 @@ def test_xcvrd_transceiver_info_populated(ssh):
     """xcvrd populates TRANSCEIVER_INFO in STATE_DB for all installed modules.
 
     xcvrd first scan completes within ~60 s of startup; allow up to 120 s.
+    Skips if no QSFP modules are present.
     """
-    data, missing = _xcvrd_state_wait(ssh, KNOWN_PRESENT_PORTS, "info_populated", timeout=120)
+    ports = _discover_present_ports(ssh)
+    if not ports:
+        pytest.skip("No QSFP modules present — skipping TRANSCEIVER_INFO check")
+    print(f"\nDiscovered {len(ports)} present ports: {ports}")
+    data, missing = _xcvrd_state_wait(ssh, ports, "info_populated", timeout=120)
     print("\nTRANSCEIVER_INFO population:")
     for port, d in data.items():
         status = "populated" if d["info_populated"] else "MISSING"
@@ -100,9 +112,12 @@ def test_xcvrd_transceiver_status_populated(ssh):
     """xcvrd populates TRANSCEIVER_STATUS in STATE_DB for all installed modules.
 
     DOM status first cycle can take 5-10 minutes after xcvrd start on DAC cables;
-    allow up to 600 s.
+    allow up to 600 s.  Skips if no QSFP modules are present.
     """
-    data, missing = _xcvrd_state_wait(ssh, KNOWN_PRESENT_PORTS, "stat_populated", timeout=600)
+    ports = _discover_present_ports(ssh)
+    if not ports:
+        pytest.skip("No QSFP modules present — skipping TRANSCEIVER_STATUS check")
+    data, missing = _xcvrd_state_wait(ssh, ports, "stat_populated", timeout=600)
     print("\nTRANSCEIVER_STATUS population:")
     for port, d in data.items():
         status = "populated" if d["stat_populated"] else "MISSING"
@@ -118,8 +133,12 @@ def test_xcvrd_dom_passive_dac(ssh):
 
     Passive DAC cables cannot report temperature, voltage, or optical power.
     This test verifies xcvrd handles the absence gracefully (N/A values, no crash).
+    Skips if no QSFP modules are present.
     """
-    data = _xcvrd_state(ssh, KNOWN_PRESENT_PORTS)
+    ports = _discover_present_ports(ssh)
+    if not ports:
+        pytest.skip("No QSFP modules present — skipping DOM check")
+    data = _xcvrd_state(ssh, ports)
     # If TRANSCEIVER_DOM_SENSOR is absent or empty, that is expected for passive DACs.
     # If it is populated, any values should parse without error (may all be N/A).
     print("\nDOM sensor data (passive DAC — N/A expected):")
@@ -132,10 +151,11 @@ def test_xcvrd_dom_passive_dac(ssh):
                 f"{port}: DOM data has unexpected error content: {dom_raw!r}"
             )
     # Not failing on absent DOM — passive DACs don't have DOM electronics
-    pytest.skip(
-        "DOM verification skipped: passive DAC cables have no DOM electronics. "
-        "Test with active optics (SR4, LR4) to verify DOM sensor values."
-    ) if all(not d["dom_populated"] for d in data.values()) else None
+    if all(not d["dom_populated"] for d in data.values()):
+        pytest.skip(
+            "DOM verification skipped: passive DAC cables have no DOM electronics. "
+            "Test with active optics (SR4, LR4) to verify DOM sensor values."
+        )
 
 
 # ------------------------------------------------------------------
@@ -144,8 +164,12 @@ def test_xcvrd_dom_passive_dac(ssh):
 
 def test_transceiver_eeprom_cli_exits_zero(ssh):
     """show interfaces transceiver eeprom exits 0 for a present port."""
-    out, err, rc = ssh.run("show interfaces transceiver eeprom Ethernet0", timeout=30)
-    print(f"\nshow interfaces transceiver eeprom Ethernet0:\n{out}")
+    ports = _discover_present_ports(ssh)
+    if not ports:
+        pytest.skip("No QSFP modules present — skipping EEPROM CLI check")
+    port = ports[0]
+    out, err, rc = ssh.run(f"show interfaces transceiver eeprom {port}", timeout=30)
+    print(f"\nshow interfaces transceiver eeprom {port}:\n{out}")
     assert rc == 0, f"Command failed (rc={rc}): {err}"
     assert out.strip(), "Output is empty"
 
@@ -155,8 +179,13 @@ def test_transceiver_eeprom_identifier(ssh):
 
     Some inexpensive DAC cables report GBIC (0x01) instead of QSFP28 (0x11).
     Both are accepted — this is a cable quality issue, not a platform bug.
+    Skips if no QSFP modules are present.
     """
-    out, err, rc = ssh.run("show interfaces transceiver eeprom Ethernet0", timeout=30)
+    ports = _discover_present_ports(ssh)
+    if not ports:
+        pytest.skip("No QSFP modules present — skipping identifier check")
+    port = ports[0]
+    out, err, rc = ssh.run(f"show interfaces transceiver eeprom {port}", timeout=30)
     assert rc == 0, f"Command failed: {err}"
     assert "Identifier" in out, "No Identifier field in transceiver eeprom output"
     # Accept QSFP28/QSFP+/GBIC — cheap DAC cables may report either
@@ -177,10 +206,13 @@ def test_transceiver_presence_all_ports(ssh):
     )
     # Present ports should show "Present", absent should show "Not present"
     present_count = sum(1 for l in eth_rows if "Present" in l and "Not present" not in l)
-    print(f"\nPresent ports: {present_count} / {NUM_PORTS}")
-    assert present_count >= len(KNOWN_PRESENT_PORTS), (
-        f"Expected at least {len(KNOWN_PRESENT_PORTS)} present ports, "
-        f"found only {present_count}"
+    daemon_present = _discover_present_ports(ssh)
+    print(f"\nPresent ports: {present_count} / {NUM_PORTS} "
+          f"(daemon cache: {len(daemon_present)} present)")
+    # CLI present count must be at least as many as the daemon reports
+    assert present_count >= len(daemon_present), (
+        f"CLI reports only {present_count} present ports but daemon cache "
+        f"shows {len(daemon_present)} — xcvrd may be out of sync"
     )
 
 

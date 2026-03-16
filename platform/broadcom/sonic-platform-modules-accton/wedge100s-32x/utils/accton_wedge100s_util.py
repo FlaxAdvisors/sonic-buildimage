@@ -4,7 +4,7 @@
 #
 # Platform initialization utility for Accton Wedge 100S-32X.
 #
-# Architecture notes (Phase 2 — EOS-like hidraw daemon):
+# Architecture notes (Phase 2 — hidraw daemon):
 #   - Host I2C master is the CP2112 USB HID bridge (i2c-1, driver: hid_cp2112).
 #     There is NO iSMT controller on this platform.
 #   - Thermal sensors and fans are managed by OpenBMC via /dev/ttyACM0 (57600 8N1).
@@ -13,9 +13,9 @@
 #   - QSFP28 presence, QSFP EEPROMs, and system EEPROM are owned by
 #     wedge100s-i2c-daemon via /dev/hidraw0 (CP2112 HID reports directly).
 #     i2c_mux_pca954x, optoe, and at24 are NOT loaded — the daemon is the sole
-#     owner of the CP2112 mux tree, matching the EOS PLXcvr architecture exactly.
+#     owner of the CP2112 mux tree.
 #   - Bus numbers i2c-2 through i2c-41 do NOT exist in Phase 2.
-#   - See tests/notes/EOS-LIKE-PLAN.md for full architecture rationale.
+#   - See notes/ARCHITECTURE.md for full architecture rationale.
 
 """
 Usage: %(scriptName)s [options] command object
@@ -70,7 +70,7 @@ _CPLD_BUS  = 1
 _CPLD_ADDR = 0x32
 _PSU_REG   = 0x10
 
-# Kernel modules — Phase 2 (EOS-like hidraw daemon owns the CP2112 mux tree).
+# Kernel modules — Phase 2 (wedge100s-i2c-daemon owns the CP2112 mux tree).
 # i2c_mux_pca954x, at24, and optoe are intentionally absent:
 #   wedge100s-i2c-daemon reads QSFP EEPROMs and system EEPROM via /dev/hidraw0
 #   directly.  Loading i2c_mux_pca954x would create virtual buses 2-41 and cause
@@ -84,7 +84,7 @@ kos = [
     'modprobe wedge100s_cpld',
 ]
 
-# I2C device registration — Phase 2 (EOS-like hidraw daemon).
+# I2C device registration — Phase 2 (wedge100s-i2c-daemon).
 # Only the CPLD is registered here.  The PCA9548 mux tree (0x70-0x74),
 # system EEPROM (24c64), and all QSFP optoe1 EEPROMs are NOT registered:
 # wedge100s-i2c-daemon owns them via /dev/hidraw0.  Registering i2c_mux_pca954x
@@ -543,8 +543,9 @@ def set_device(args):
             return
         # Fan speed is set via BMC TTY using set_fan_speed.sh (implemented in bmc.py / fan.py).
         # This CLI shim invokes it directly without the pmon sonic_platform layer.
-        status, output = log_os_system(
-            "i2cset -f -y 1 0x32 0x3e 0x02", 0)  # keep SYS1 green while adjusting
+        log_os_system(
+            "bash -c 'echo 2 | tee /run/wedge100s/led_sys1 "
+            "> /sys/bus/i2c/devices/1-0032/led_sys1'", 0)  # keep SYS1 green while adjusting
         status, output = log_os_system(
             "python3 -c \"import sys; sys.path.insert(0,'/usr/lib/python3/dist-packages');"
             "from sonic_platform import bmc; "
@@ -562,8 +563,10 @@ def set_device(args):
         except ValueError:
             show_set_help()
             return
-        log_os_system("i2cset -f -y 1 0x32 0x3e 0x{:02x}".format(color), 1)
-        log_os_system("i2cset -f -y 1 0x32 0x3f 0x{:02x}".format(color), 1)
+        for attr, reg in (('led_sys1', '0x3e'), ('led_sys2', '0x3f')):
+            log_os_system(
+                "bash -c 'echo {val} | tee /run/wedge100s/{attr} "
+                "> /sys/bus/i2c/devices/1-0032/{attr}'".format(val=color, attr=attr), 1)
         print("LED color set to 0x{:02x}".format(color))
     elif args[0] == 'sfp':
         # QSFP LP_MODE / RESET pins are on the mux board and not accessible

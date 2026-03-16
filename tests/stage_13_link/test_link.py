@@ -4,33 +4,57 @@ Verifies that 100G DAC-connected ports come up and that the full
 SONiC port state pipeline (CONFIG_DB → APP_DB → ASIC_DB → STATE_DB)
 works correctly.
 
-Hardware topology (from interfaces_connected.md):
+Hardware topology:
   hare-lorax (Wedge 100S, SONiC) ↔ rabbit-lorax (Wedge 100S, Arista EOS)
-
-  Hare Ethernet  | Hare Port | Rabbit Port  | Required FEC
-  ---------------|-----------|--------------|-------------
-  Ethernet16     | Port 5    | Et13/1       | rs (CL91)
-  Ethernet32     | Port 9    | Et14/1       | rs (CL91)
-  Ethernet48     | Port 13   | Et15/1       | rs (CL91)
-  Ethernet112    | Port 29   | Et16/1       | rs (CL91)
 
 Key finding (verified 2026-03-02):
   100GBASE-CR4 DAC links to Arista require RS-FEC (CL91).
   Default BCM config (phy_an_c73=0x0, no explicit FEC) does NOT enable RS-FEC.
   Fix: config interface fec <port> rs  (persisted to config_db.json via config save)
 
+Connected ports and peer IP are read from target.cfg [links] section:
+
+  [links]
+  # Space or comma separated list of ports connected to the peer device
+  connected_ports = Ethernet16,Ethernet32,Ethernet48,Ethernet112
+  # IP address of peer device reachable over the port channel / connected ports
+  peer_ip = 10.0.1.0
+
+Defaults (used if [links] section is absent) match the lab topology.
+
 Phase reference: Phase 13 (Link Status & Basic Connectivity).
 """
 
+import configparser
 import json
+import os
 import re
 import pytest
 
-# Ports connected to rabbit-lorax via 100G DAC (from interfaces_connected.md)
-CONNECTED_PORTS = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
 
-# Ports known to be admin-up only, not necessarily link-up
-ALL_ADMIN_UP = CONNECTED_PORTS + ["Ethernet0"]  # Ethernet0 has breakout cable, no peer
+def _load_links_config():
+    """Load connected_ports and peer_ip from target.cfg [links] section.
+
+    Falls back to lab defaults if the section or keys are absent.
+    """
+    cfg_path = os.path.join(os.path.dirname(__file__), "..", "target.cfg")
+    config = configparser.ConfigParser()
+    config.read(cfg_path)
+
+    default_ports = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
+    default_peer   = "10.0.1.0"
+
+    if not config.has_section("links"):
+        return default_ports, default_peer
+
+    raw_ports = config.get("links", "connected_ports", fallback="")
+    ports = [p.strip() for p in raw_ports.replace(",", " ").split() if p.strip()]
+    peer  = config.get("links", "peer_ip", fallback=default_peer)
+    return (ports or default_ports), peer
+
+
+# Load once at module level — consistent across all tests in this file
+CONNECTED_PORTS, PEER_IP = _load_links_config()
 
 
 # ------------------------------------------------------------------

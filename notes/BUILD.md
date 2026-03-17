@@ -50,7 +50,7 @@ out — only the `ACCTON_WEDGE100S_32X` entries are active.
 Use this for every day code iteration. Builds in ~5–10 minutes on a warm cache.
 
 ```bash
-BLDENV=trixie make target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
+make SONIC_BUILD_JOBS=40 target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
 ```
 
 Output: `target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb`

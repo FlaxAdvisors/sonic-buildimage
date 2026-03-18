@@ -35,6 +35,28 @@ def _available_stages():
     )
 
 
+PRETEST_STAGE  = "stage_00_pretest"
+POSTTEST_STAGE = "stage_nn_posttest"
+
+
+def _inject_prepost(stage_names, inject=True):
+    """Return stage list with stage_00_pretest prepended and stage_nn_posttest appended.
+
+    If inject=False or stages already contain both bookends, returns as-is.
+    Preserves order of everything in between.
+    stage_nn_posttest sorts after all digit-prefixed stages (n > 9 in ASCII)
+    so no custom ordering logic is needed — alphabetical sort is correct.
+    """
+    if not inject:
+        return list(stage_names)
+    result = list(stage_names)
+    if PRETEST_STAGE not in result:
+        result.insert(0, PRETEST_STAGE)
+    if POSTTEST_STAGE not in result:
+        result.append(POSTTEST_STAGE)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # --report mode: print human-readable summary tables, no pytest
 # ---------------------------------------------------------------------------
@@ -106,7 +128,11 @@ def _run_report(stage_names, cfg_path):
 # Default mode: pytest pass/fail
 # ---------------------------------------------------------------------------
 
-def _run_tests(stage_names, cfg_path, extra_pytest_args):
+def _run_tests(stage_names, cfg_path, extra_pytest_args, inject_prepost=True):
+    stage_names = _inject_prepost(stage_names, inject=inject_prepost)
+    # filter out stages that don't exist as directories
+    available = set(_available_stages())
+    stage_names = [s for s in stage_names if s in available]
     test_dirs = [os.path.join(TESTS_DIR, name) for name in stage_names]
     print("=" * 64)
     print("  Wedge 100S-32X SONiC Platform Test Suite")
@@ -141,6 +167,10 @@ def main():
         for s in stages:
             print(f"  {s}")
         return
+
+    no_prepost = "--no-prepost" in args
+    if no_prepost:
+        args.remove("--no-prepost")
 
     report_mode = "--report" in args
     if report_mode:
@@ -178,7 +208,7 @@ def main():
     if report_mode:
         _run_report(stage_names, cfg_path)
     else:
-        _run_tests(stage_names, cfg_path, extra_pytest_args)
+        _run_tests(stage_names, cfg_path, extra_pytest_args, inject_prepost=not no_prepost)
 
 
 if __name__ == "__main__":

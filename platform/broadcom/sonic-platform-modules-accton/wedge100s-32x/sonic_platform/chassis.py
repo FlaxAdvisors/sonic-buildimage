@@ -62,6 +62,9 @@ class Chassis(ChassisBase):
         self._eeprom = SysEeprom()
         # Watchdog stub (x86 iTCO_wdt disabled by BIOS; BMC owns HW WDT)
         self._watchdog = Watchdog()
+        # Firmware components: CPLD + BIOS
+        from sonic_platform.component import COMPONENT_LIST
+        self._component_list = list(COMPONENT_LIST)
         # Previous presence state for get_change_event() polling
         self._prev_presence = {}
 
@@ -237,4 +240,15 @@ class Chassis(ChassisBase):
         """All 32 ports are QSFP28."""
         if 1 <= index <= NUM_SFPS:
             return SfpBase.SFP_PORT_TYPE_BIT_QSFP28
+        return None
+
+    def get_num_components(self):
+        return len(self._component_list)
+
+    def get_all_components(self):
+        return self._component_list
+
+    def get_component(self, index):
+        if 0 <= index < len(self._component_list):
+            return self._component_list[index]
         return None

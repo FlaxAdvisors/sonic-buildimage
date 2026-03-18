@@ -15,11 +15,30 @@ Phase reference: Phase 12 (Interface Counters & Statistics).
 
 import json
 import re
+import time
 import pytest
 
 NUM_PORTS = 32
 # Ports known to be admin-up and link-up (connected to rabbit-lorax)
 LINK_UP_PORTS = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def stage12_fec_setup(ssh):
+    """Configure RS-FEC on connected ports so counters stage has live traffic."""
+    for port in LINK_UP_PORTS:
+        ssh.run(f"sudo config interface fec {port} rs", timeout=15)
+    # Wait for links to come up
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        out, _, rc = ssh.run("show interfaces status 2>&1", timeout=15)
+        up_ports = [l for l in out.splitlines() if any(p in l for p in LINK_UP_PORTS) and " up " in l]
+        if len(up_ports) >= 2:
+            break
+        time.sleep(5)
+    yield
+    for port in LINK_UP_PORTS:
+        ssh.run(f"sudo config interface fec {port} none", timeout=15)
 
 
 # ------------------------------------------------------------------

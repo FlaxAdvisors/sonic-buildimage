@@ -52,6 +52,21 @@ def stage16_setup_teardown(ssh):
     for port in LAG_MEMBERS:
         ssh.run(f"sudo config interface fec {port} rs", timeout=15)
 
+    # Wait for physical links to come up after FEC negotiation (up to 30s)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        out, _, rc = ssh.run("show interfaces status 2>&1", timeout=15)
+        up_count = sum(1 for p in LAG_MEMBERS if any(p in l and " up " in l for l in out.splitlines()))
+        if up_count >= len(LAG_MEMBERS):
+            break
+        time.sleep(5)
+
+    # Remove any routed-interface CONFIG_DB entries on LAG members so that
+    # 'config portchannel member add' does not reject them as "has ip address".
+    # (clean_boot.json declares Ethernet16/Ethernet32 as INTERFACE entries.)
+    for port in LAG_MEMBERS:
+        ssh.run(f"redis-cli -n 4 del 'INTERFACE|{port}'", timeout=10)
+
     # Enable teamd feature
     ssh.run("sudo config feature state teamd enabled", timeout=15)
     time.sleep(3)
@@ -61,7 +76,7 @@ def stage16_setup_teardown(ssh):
     for port in LAG_MEMBERS:
         ssh.run(f"sudo config portchannel member add {PORTCHANNEL_NAME} {port}", timeout=30)
     ssh.run(f"sudo config interface ip add {PORTCHANNEL_NAME} {LAG_IP}", timeout=15)
-    time.sleep(15)  # LACP negotiation
+    time.sleep(45)  # LACP negotiation (increased from 15s to allow LAG to form in clean-boot state)
 
     yield
 
@@ -72,6 +87,10 @@ def stage16_setup_teardown(ssh):
     ssh.run(f"sudo config portchannel del {PORTCHANNEL_NAME}", timeout=30)
     for port in LAG_MEMBERS:
         ssh.run(f"sudo config interface fec {port} none", timeout=15)
+    # Restore the routed-interface CONFIG_DB entries that were removed during setup.
+    # SONiC represents an empty {} INTERFACE entry as a hash with a single NULL field.
+    for port in LAG_MEMBERS:
+        ssh.run(f"redis-cli -n 4 hset 'INTERFACE|{port}' NULL NULL", timeout=10)
 
 
 # ------------------------------------------------------------------

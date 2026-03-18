@@ -181,9 +181,8 @@ class Psu(PsuBase):
         return 'PSU-{}'.format(self._index)
 
     def get_model(self):
-        # PMBus MFR_MODEL (0x9a) requires an SMBus block-read transaction
-        # which is not implemented in bmc.py (i2cget only reads word/byte).
-        return 'N/A'
+        """Return PSU model. Static string — PMBus block-read not implemented."""
+        return "Delta DPS-1100AB-6 A"
 
     def get_serial(self):
         return 'N/A'

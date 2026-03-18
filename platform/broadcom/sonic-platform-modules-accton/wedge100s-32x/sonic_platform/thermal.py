@@ -174,6 +174,14 @@ class Thermal(ThermalBase):
         self._high_crit = float(temperature)
         return True
 
+    def get_low_threshold(self):
+        """Return low warning threshold (°C). Operational minimum is 0°C."""
+        return 0.0
+
+    def get_low_critical_threshold(self):
+        """Return low critical threshold (°C)."""
+        return -10.0
+
     def get_minimum_recorded(self):
         return self._min_recorded
 

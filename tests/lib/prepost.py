@@ -7,6 +7,7 @@ Snapshot path: /etc/sonic/pre_test_config.json  (persistent across reboots)
 Clean template: /etc/sonic/clean_boot.json       (copied from tests/fixtures/)
 """
 
+import datetime
 import os
 import time
 
@@ -30,14 +31,13 @@ def save_and_reload_clean(ssh, timeout=120):
 
     Raises RuntimeError on any failure.
     """
-    # 1. Upload template
-    with open(CLEAN_TEMPLATE_LOCAL) as f:
-        content = f.read()
-    out, err, rc = ssh.run(
-        f"cat > {CLEAN_TEMPLATE_REMOTE} << 'EOFCLEAN'\n{content}\nEOFCLEAN", timeout=30
-    )
+    # 1. Upload template via SFTP to a writable tmp path, then move to final location
+    tmp_path = f"/tmp/clean_boot_{os.getpid()}.json"
+    local_path = os.path.realpath(CLEAN_TEMPLATE_LOCAL)
+    ssh.upload_file(local_path, tmp_path)
+    out, err, rc = ssh.run(f"sudo mv {tmp_path} {CLEAN_TEMPLATE_REMOTE}", timeout=10)
     if rc != 0:
-        raise RuntimeError(f"Failed to upload clean_boot.json: {err}")
+        raise RuntimeError(f"Failed to install clean_boot.json: {err}")
 
     # 2. Save current config as snapshot
     out, err, rc = ssh.run(f"sudo config save {SNAPSHOT_PATH} -y", timeout=60)
@@ -55,10 +55,13 @@ def save_and_reload_clean(ssh, timeout=120):
     _wait_for_pmon(ssh, timeout=timeout)
 
     # 5. Mark suite active
-    ssh.run("sudo mkdir -p /run/wedge100s", timeout=5)
-    import datetime
+    out, err, rc = ssh.run("sudo mkdir -p /run/wedge100s", timeout=5)
+    if rc != 0:
+        raise RuntimeError(f"Failed to create /run/wedge100s: {err}")
     ts = datetime.datetime.utcnow().isoformat()
-    ssh.run(f"echo '{ts}' | sudo tee {SUITE_ACTIVE_PATH} > /dev/null", timeout=5)
+    out, err, rc = ssh.run(f"echo '{ts}' | sudo tee {SUITE_ACTIVE_PATH} > /dev/null", timeout=5)
+    if rc != 0:
+        raise RuntimeError(f"Failed to write suite active marker: {err}")
 
 
 def restore_user_config(ssh, timeout=120):
@@ -82,10 +85,11 @@ def restore_user_config(ssh, timeout=120):
         print(f"[posttest] config reload restore failed (rc={rc}): {err}")
         ok = False
 
-    out, err, rc = ssh.run("sudo config save -y", timeout=60)
-    if rc != 0:
-        print(f"[posttest] config save after restore failed (rc={rc}): {err}")
-        ok = False
+    if ok:
+        out, err, rc = ssh.run("sudo config save -y", timeout=60)
+        if rc != 0:
+            print(f"[posttest] config save after restore failed (rc={rc}): {err}")
+            ok = False
 
     _wait_for_pmon(ssh, timeout=timeout)
     ssh.run(f"sudo rm -f {SUITE_ACTIVE_PATH}", timeout=5)

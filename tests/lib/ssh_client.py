@@ -135,6 +135,25 @@ class SSHClient:
             except Exception:
                 pass
 
+    def upload_file(self, local_path, remote_path):
+        """Upload a local file to the target via SFTP.
+
+        Args:
+            local_path: Path to the local file to upload.
+            remote_path: Destination path on the remote target.
+
+        Raises:
+            RuntimeError: If not connected.
+            IOError: On SFTP transfer failure.
+        """
+        if self._client is None:
+            raise RuntimeError("Not connected — call connect() first")
+        sftp = self._client.open_sftp()
+        try:
+            sftp.put(local_path, remote_path)
+        finally:
+            sftp.close()
+
     def close(self):
         if self._client:
             self._client.close()

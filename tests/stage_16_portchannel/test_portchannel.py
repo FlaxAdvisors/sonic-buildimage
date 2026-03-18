@@ -45,6 +45,35 @@ def _load_peer_ip():
 PEER_IP = _load_peer_ip()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def stage16_setup_teardown(ssh):
+    """Create PortChannel1, add members, assign IP; remove all after."""
+    # Configure RS-FEC on LAG members (required for link-up)
+    for port in LAG_MEMBERS:
+        ssh.run(f"sudo config interface fec {port} rs", timeout=15)
+
+    # Enable teamd feature
+    ssh.run("sudo config feature state teamd enabled", timeout=15)
+    time.sleep(3)
+
+    # Create PortChannel and members
+    ssh.run(f"sudo config portchannel add {PORTCHANNEL_NAME}", timeout=30)
+    for port in LAG_MEMBERS:
+        ssh.run(f"sudo config portchannel member add {PORTCHANNEL_NAME} {port}", timeout=30)
+    ssh.run(f"sudo config interface ip add {PORTCHANNEL_NAME} {LAG_IP}", timeout=15)
+    time.sleep(15)  # LACP negotiation
+
+    yield
+
+    # Teardown: remove PortChannel
+    ssh.run(f"sudo config interface ip remove {PORTCHANNEL_NAME} {LAG_IP}", timeout=15)
+    for port in LAG_MEMBERS:
+        ssh.run(f"sudo config portchannel member del {PORTCHANNEL_NAME} {port}", timeout=30)
+    ssh.run(f"sudo config portchannel del {PORTCHANNEL_NAME}", timeout=30)
+    for port in LAG_MEMBERS:
+        ssh.run(f"sudo config interface fec {port} none", timeout=15)
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------

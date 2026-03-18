@@ -30,6 +30,20 @@ import pytest
 # Port used for speed-change tests — disconnected, safe to modify
 SPEED_TEST_PORT = "Ethernet0"
 
+BREAKOUT_PORT = SPEED_TEST_PORT  # Same port used for breakout testing
+
+
+@pytest.fixture(scope="session", autouse=True)
+def stage14_setup_teardown(ssh):
+    """Ensure port is in 1x100G before testing; restore after."""
+    # Ensure starting in 1x100G
+    ssh.run(f"sudo config interface breakout {BREAKOUT_PORT} '1x100G[40G]' -y -f", timeout=60)
+    time.sleep(5)
+    yield
+    # Restore to 1x100G after breakout tests
+    ssh.run(f"sudo config interface breakout {BREAKOUT_PORT} '1x100G[40G]' -y -f", timeout=60)
+    time.sleep(5)
+
 NUM_PORTS = 32
 
 # All parent ports (step of 4, matching port_config.ini)

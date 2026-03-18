@@ -35,6 +35,17 @@ TEST_PORT = "Ethernet0"
 # Connected ports with RS-FEC already configured
 CONNECTED_PORTS = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
 
+
+@pytest.fixture(scope="session", autouse=True)
+def stage15_setup_teardown(ssh):
+    """Configure RS-FEC on connected ports so links are up; restore after."""
+    for port in CONNECTED_PORTS:
+        ssh.run(f"sudo config interface fec {port} rs", timeout=15)
+    time.sleep(5)
+    yield
+    for port in CONNECTED_PORTS:
+        ssh.run(f"sudo config interface fec {port} none", timeout=15)
+
 # Speeds supported by this Tomahawk platform (from STATE_DB supported_speeds)
 SUPPORTED_SPEEDS = ["40000", "100000"]
 

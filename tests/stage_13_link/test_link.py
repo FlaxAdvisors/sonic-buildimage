@@ -57,6 +57,26 @@ def _load_links_config():
 CONNECTED_PORTS, PEER_IP = _load_links_config()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def configure_rsfec(ssh):
+    """Configure RS-FEC on connected ports; remove after stage completes."""
+    for port in CONNECTED_PORTS:
+        ssh.run(f"sudo config interface fec {port} rs", timeout=15)
+    # Wait for links to come up (up to 30 s)
+    import time
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        out, _, rc = ssh.run("show interfaces status 2>&1", timeout=15)
+        up_ports = [l for l in out.splitlines() if any(p in l for p in CONNECTED_PORTS) and " up " in l]
+        if len(up_ports) >= 2:  # at least 2 of 4 up (Ethernet104/108 blocked)
+            break
+        time.sleep(3)
+    yield
+    # Teardown: remove FEC
+    for port in CONNECTED_PORTS:
+        ssh.run(f"sudo config interface fec {port} none", timeout=15)
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------

@@ -38,7 +38,7 @@ def _cpld_version():
 
 def _bios_version():
     result = subprocess.run(
-        ["dmidecode", "-s", "bios-version"],
+        ["sudo", "dmidecode", "-s", "bios-version"],
         capture_output=True, text=True, timeout=10
     )
     if result.returncode == 0:

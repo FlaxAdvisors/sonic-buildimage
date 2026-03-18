@@ -94,7 +94,8 @@ def test_environment_thermals(ssh):
     # BMC sensors are not exported via lm-sensors. Expect at least 3 thermal lines.
     out, err, rc = ssh.run("show environment", timeout=30)
     assert rc == 0, f"show environment failed: {err}"
-    temp_lines = [l for l in out.splitlines() if "°C" in l or "Degrees" in l or "TMP" in l]
+    # 'show environment' on this platform uses "+50.0 C" format (no degree symbol)
+    temp_lines = [l for l in out.splitlines() if " C  " in l or "°C" in l or "Degrees" in l or "TMP" in l]
     assert len(temp_lines) >= 3, (
         f"Expected >= 3 thermal sensor lines (coretemp), found {len(temp_lines)}:\n{out}"
     )

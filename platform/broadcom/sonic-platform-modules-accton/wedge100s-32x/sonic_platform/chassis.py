@@ -15,6 +15,7 @@ import time
 
 try:
     from sonic_platform_base.chassis_base import ChassisBase
+    from sonic_platform_base.sfp_base import SfpBase
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
@@ -39,6 +40,8 @@ _PRESENCE_REGS = [
 
 class Chassis(ChassisBase):
     """Platform-specific Chassis class for Accton Wedge 100S-32X."""
+
+    REBOOT_CAUSE_FILE = "/var/log/sonic/reboot-cause/previous-reboot-cause.txt"
 
     def __init__(self):
         ChassisBase.__init__(self)
@@ -207,3 +210,31 @@ class Chassis(ChassisBase):
                 return True, {'sfp': {}}
 
             time.sleep(3.0)   # daemon polls every 3 s; no point polling faster
+
+    def get_base_mac(self):
+        """Return base MAC address from EEPROM TLV 0x24."""
+        try:
+            info = self._eeprom.get_eeprom()
+            return info.get('0x24') or info.get('Base MAC Address') or 'NA'
+        except Exception:
+            return 'NA'
+
+    def get_reboot_cause(self):
+        """Return (cause_constant, description) from reboot-cause file."""
+        try:
+            with open(self.REBOOT_CAUSE_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        return (self.REBOOT_CAUSE_NON_HARDWARE, line)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return (self.REBOOT_CAUSE_POWER_LOSS, "")
+
+    def get_port_or_cage_type(self, index):
+        """All 32 ports are QSFP28."""
+        if 1 <= index <= NUM_SFPS:
+            return SfpBase.SFP_PORT_TYPE_BIT_QSFP28
+        return None

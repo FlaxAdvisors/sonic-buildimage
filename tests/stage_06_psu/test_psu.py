@@ -88,12 +88,12 @@ def test_psu_cli_both_listed(ssh):
 # ------------------------------------------------------------------
 
 def test_cpld_psu_status_sysfs(ssh):
-    """Read PSU presence and power-good from wedge100s_cpld sysfs attributes.
+    """Read PSU presence and power-good from the wedge100s daemon cache.
 
-    psu.py uses these attrs (not raw i2cget) because the wedge100s_cpld
-    driver holds the device and inverts the active-low present bits.
+    psu.py reads from /run/wedge100s/ (populated every 3 s by
+    wedge100s-i2c-daemon from the wedge100s_cpld kernel sysfs).
     """
-    sysfs = '/sys/bus/i2c/devices/1-0032'
+    sysfs = '/run/wedge100s'
     attrs = {}
     for attr in ('psu1_present', 'psu1_pgood', 'psu2_present', 'psu2_pgood'):
         out, err, rc = ssh.run(f"cat {sysfs}/{attr} 2>/dev/null")

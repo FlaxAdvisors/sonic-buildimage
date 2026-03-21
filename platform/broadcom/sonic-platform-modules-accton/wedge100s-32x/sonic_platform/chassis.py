@@ -120,12 +120,14 @@ class Chassis(ChassisBase):
             return False
 
     def get_status_led(self):
-        try:
-            with open('{}/led_sys1'.format(self._CPLD_SYSFS)) as f:
-                val = int(f.read().strip(), 0)
-            return self._LED_DECODE.get(val, self.STATUS_LED_COLOR_OFF)
-        except Exception:
-            return self.STATUS_LED_COLOR_OFF
+        for base in (self._RUN_DIR, self._CPLD_SYSFS):
+            try:
+                with open('{}/led_sys1'.format(base)) as f:
+                    val = int(f.read().strip(), 0)
+                return self._LED_DECODE.get(val, self.STATUS_LED_COLOR_OFF)
+            except Exception:
+                continue
+        return self.STATUS_LED_COLOR_OFF
 
     def get_name(self):
         return "Wedge 100S-32X"
@@ -213,6 +215,27 @@ class Chassis(ChassisBase):
                 return True, {'sfp': {}}
 
             time.sleep(3.0)   # daemon polls every 3 s; no point polling faster
+
+    def get_serial(self):
+        """Return serial number from EEPROM TLV 0x23."""
+        try:
+            return self._eeprom.get_eeprom().get('0x23', 'NA')
+        except Exception:
+            return 'NA'
+
+    def get_model(self):
+        """Return part number from EEPROM TLV 0x22."""
+        try:
+            return self._eeprom.get_eeprom().get('0x22', 'NA')
+        except Exception:
+            return 'NA'
+
+    def get_revision(self):
+        """Return device version from EEPROM TLV 0x26."""
+        try:
+            return self._eeprom.get_eeprom().get('0x26', 'NA')
+        except Exception:
+            return 'NA'
 
     def get_base_mac(self):
         """Return base MAC address from EEPROM TLV 0x24."""

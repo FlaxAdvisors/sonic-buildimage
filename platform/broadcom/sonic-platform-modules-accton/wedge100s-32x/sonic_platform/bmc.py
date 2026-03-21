@@ -27,9 +27,9 @@ Design notes
   root shell prompt "root@HOSTNAME:~# " regardless of hostname.  The
   C code used "@bmc:" which only works when the BMC hostname is "bmc";
   on this target the hostname is "hare-lorax-bmc".
-* threading.Lock serialises access within one process.  When multiple
-  pmon daemons are enabled, cross-process serialisation can be added
-  via fcntl.flock on a lock file if contention is observed.
+* threading.Lock serialises access within one process; fcntl.flock on
+  _FLOCK_PATH serialises across processes (e.g. pmon bmc-poller racing
+  with a test or report subprocess calling send_command concurrently).
 * The null byte appended to every write mirrors C's
   write(fd, buf, strlen(buf)+1).  It is harmless to the BMC shell.
 """
@@ -50,6 +50,7 @@ import time
 # send_command() is retained for fan.set_speed() → 'set_fan_speed.sh <pct>'.
 
 _TTY_DEVICE    = '/dev/ttyACM0'
+_FLOCK_PATH    = '/run/wedge100s/bmc.lock'  # cross-process mutex
 # OpenBMC root shell prompt: "root@HOSTNAME:~# "
 # Using ":~# " matches any root-at-home-dir prompt regardless of hostname.
 # The C code uses "@bmc:" which only works when the BMC hostname is literally
@@ -207,26 +208,28 @@ def send_command(cmd):
 
     Mirrors bmc_send_command() in platform_lib.c.
     """
-    with _lock:
-        # Append \r\n to terminate the command line; append \x00 to mirror
-        # C's write(fd, buf, strlen(buf)+1) which includes the null byte.
-        cmd_bytes = cmd.encode('ascii') + b'\r\n\x00'
-        for _attempt in range(1, _TTY_RETRY + 1):
-            fd = _tty_open()
-            if fd < 0:
-                continue
-            try:
-                if not _tty_login(fd):
+    with open(_FLOCK_PATH, 'w') as _lf:
+        fcntl.flock(_lf, fcntl.LOCK_EX)
+        with _lock:
+            # Append \r\n to terminate the command line; append \x00 to mirror
+            # C's write(fd, buf, strlen(buf)+1) which includes the null byte.
+            cmd_bytes = cmd.encode('ascii') + b'\r\n\x00'
+            for _attempt in range(1, _TTY_RETRY + 1):
+                fd = _tty_open()
+                if fd < 0:
                     continue
-                _drain(fd)
-                os.write(fd, cmd_bytes)
-                buf = _read_until(fd, _TTY_PROMPT, _CMD_TIMEOUT)
-                if _TTY_PROMPT in buf:
-                    return buf.decode('latin-1', errors='replace')
-            except OSError:
-                pass
-            finally:
-                _tty_close(fd)
+                try:
+                    if not _tty_login(fd):
+                        continue
+                    _drain(fd)
+                    os.write(fd, cmd_bytes)
+                    buf = _read_until(fd, _TTY_PROMPT, _CMD_TIMEOUT)
+                    if _TTY_PROMPT in buf:
+                        return buf.decode('latin-1', errors='replace')
+                except OSError:
+                    pass
+                finally:
+                    _tty_close(fd)
 
     return None
 

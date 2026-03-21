@@ -156,7 +156,10 @@ fi
 #
 # We convert via pure text transformation — no need to run the CLI, so there is
 # no dependency on the SONiC database being up at postinst time.
-python3 - <<'PYEOF'
+#
+# "|| true" prevents set -e from aborting the rest of postinst if this block
+# fails (e.g. import error or permission problem on an unusual image).
+python3 - <<'PYEOF' || true
 import os, re, sys
 
 COMPLETION_DIR = "/etc/bash_completion.d"
@@ -239,6 +242,47 @@ for fname in sorted(os.listdir(COMPLETION_DIR)):
     func = cmd.lower().replace('-', '_') + '_completion'
     open(fpath, 'w').write(CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd))
     print('wedge100s postinst: repaired completion for ' + fname + ' (cmd=' + cmd + ')')
+PYEOF
+
+# Generate Click 8 bash completion for standard SONiC Click CLIs that have no
+# completion file in /etc/bash_completion.d/.  Uses _CMD_COMPLETE=bash_source,
+# which outputs the shell function without requiring the database to be up —
+# safe to run at postinst time.  Idempotent: skipped when the file exists.
+#
+# Background: SONiC image builders generate completion files for most Click CLIs
+# but historically omit 'show'.  On images that already shipped Click 8 the
+# conversion pass above finds nothing to convert, leaving 'show <TAB>' broken.
+python3 - <<'PYEOF' || true
+import os, subprocess, sys
+
+COMPLETION_DIR = "/etc/bash_completion.d"
+
+# Standard SONiC Click CLIs that must have a completion file.
+# Extend this list if other commands are found missing on new image builds.
+SONIC_CLICK_CMDS = ['show']
+
+for cmd in SONIC_CLICK_CMDS:
+    fpath = os.path.join(COMPLETION_DIR, cmd)
+    if os.path.exists(fpath):
+        continue  # already present — skip
+    envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
+    try:
+        result = subprocess.run(
+            [cmd],
+            env={**os.environ, envvar: 'bash_source'},
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print('wedge100s postinst: WARNING: cannot generate completion for '
+              + cmd + ': ' + str(e), file=sys.stderr)
+        continue
+    if result.returncode != 0 or '_completion' not in result.stdout:
+        print('wedge100s postinst: WARNING: bash_source output for ' + cmd
+              + ' was empty or unexpected — skipped', file=sys.stderr)
+        continue
+    with open(fpath, 'w') as f:
+        f.write(result.stdout)
+    print('wedge100s postinst: generated Click 8 completion for ' + cmd)
 PYEOF
 
 # Silence memory_checker's routine syslog output during normal (within-threshold) checks.

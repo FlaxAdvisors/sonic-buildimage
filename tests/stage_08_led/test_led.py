@@ -26,17 +26,19 @@ LED_BLUE  = 0x04
 
 LED_NAMES = {LED_OFF: "off", LED_RED: "red", LED_GREEN: "green", LED_BLUE: "blue"}
 
-CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
-_REG_TO_ATTR = {SYS1_REG: 'led_sys1', SYS2_REG: 'led_sys2'}
+# Canonical daemon-cache path (written by wedge100s-i2c-daemon every 3 s)
+RUN_DIR    = '/run/wedge100s'
+CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'   # fallback / driver-binding tests
+_REG_TO_FILE = {SYS1_REG: 'led_sys1', SYS2_REG: 'led_sys2'}
 
 
 def _read_cpld_reg(ssh, reg):
-    """Read CPLD LED state via wedge100s_cpld sysfs attribute; returns int or raises."""
-    attr = _REG_TO_ATTR[reg]
-    out, err, rc = ssh.run(f"cat {CPLD_SYSFS}/{attr}")
+    """Read LED state from daemon cache (/run/wedge100s/); returns int or raises."""
+    fname = _REG_TO_FILE[reg]
+    out, err, rc = ssh.run(f"cat {RUN_DIR}/{fname}")
     assert rc == 0, (
-        f"sysfs read of {CPLD_SYSFS}/{attr} failed: {err}\n"
-        "Is the wedge100s_cpld driver bound to 1-0032?"
+        f"daemon-cache read of {RUN_DIR}/{fname} failed: {err}\n"
+        "Is wedge100s-i2c-daemon running? Check: systemctl status wedge100s-i2c-poller.timer"
     )
     try:
         return int(out.strip(), 0)
@@ -123,11 +125,11 @@ from led_control import LedControl
 
 lc = LedControl()
 
-# Read back LED states via wedge100s_cpld sysfs attributes
-_sysfs = '/sys/bus/i2c/devices/1-0032'
-with open(f'{_sysfs}/led_sys1') as f:
+# Read back LED states from daemon cache (canonical path)
+_run = '/run/wedge100s'
+with open(f'{_run}/led_sys1') as f:
     sys1 = int(f.read().strip(), 0)
-with open(f'{_sysfs}/led_sys2') as f:
+with open(f'{_run}/led_sys2') as f:
     sys2 = int(f.read().strip(), 0)
 print(f'SYS1=0x{sys1:02x} SYS2=0x{sys2:02x}')
 """
@@ -158,17 +160,19 @@ sys.path.insert(0, '/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/plugi
 from led_control import LedControl
 
 lc = LedControl()
+_run   = '/run/wedge100s'
 _sysfs = '/sys/bus/i2c/devices/1-0032'
 
 # Bring a test port up — ensures at least one port is up regardless of real state
 lc.port_link_state_change('Ethernet0', 'up')
-with open(f'{_sysfs}/led_sys2') as f:
+# Read from daemon cache (canonical path)
+with open(f'{_run}/led_sys2') as f:
     sys2_up = int(f.read().strip(), 0)
 
 # Mark ALL known ports down so that "last port down" fires SYS2=off
 for port in list(lc._port_states.keys()):
     lc.port_link_state_change(port, 'down')
-with open(f'{_sysfs}/led_sys2') as f:
+with open(f'{_run}/led_sys2') as f:
     sys2_down = int(f.read().strip(), 0)
 
 print(f'after_up=0x{sys2_up:02x} after_down=0x{sys2_down:02x}')
@@ -183,8 +187,12 @@ for key in tbl.getKeys():
     for field, value in fvs:
         if field == 'netdev_oper_status' and value == 'up':
             any_up = True
+restore_val = '2' if any_up else '0'
+# Write-through: hardware + daemon cache
 with open(f'{_sysfs}/led_sys2', 'w') as f:
-    f.write('0x02' if any_up else '0x00')
+    f.write(restore_val)
+with open(f'{_run}/led_sys2', 'w') as f:
+    f.write(restore_val)
 """
 
 

@@ -50,8 +50,8 @@ I need claude to act as the expert here. Take direction for changes but be sure 
 ### Peer wedge100s running Arista EOS
 - Access: `sshpass -p '0penSesame' ssh -tt -o StrictHostKeyChecking=no -J admin@192.168.88.12 admin@192.168.88.14 '<command>'`
 - Platform: Accton Wedge 100S-32X running Arista EOS
-- PortChannel1: `10.0.1.0/31` (SONiC peer is `10.0.1.1/31`), members Et13/1 + Et14/1
-- Note: direct SSH from dev host blocked when LACP links are up; always jump via 192.168.88.12
+- PortChannel1: members Et13/1 + Et14/1, configured as `switchport access vlan 999` (no IP) to prevent MAC table poisoning
+- Direct SSH from dev host works when EOS Po1 has no IP; see tests/notes/lacp-mgmt-reachability-root-cause.md
 
 ### BMC Reachability Warning
 **BEFORE attempting SSH to hardware targets check if they are ping-reachable but SSH-unreachable.

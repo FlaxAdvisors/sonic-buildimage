@@ -87,6 +87,10 @@ static const int PCA9535_ADDR[2] = { 0x22, 0x23 };
 /* PCA9535 mux channels (mux 0x74: ch2 → bus 36, ch3 → bus 37) */
 static const int PCA9535_MUX_CHAN[2] = { 2, 3 };
 
+/* PCA9535 LP_MODE chips (mux 0x74 ch0/ch1) */
+static const int LP_PCA9535_ADDR[2] = { 0x20, 0x21 };
+static const int LP_PCA9535_CHAN[2] = { 0,    1    };
+
 /* Port-to-bus map (sfp_bus_index[] from ONL sfpi.c, 0-indexed, confirmed SONiC 6.1.0) */
 static const int SFP_BUS_MAP[NUM_PORTS] = {
      3,  2,  5,  4,  7,  6,  9,  8,
@@ -358,6 +362,45 @@ static int i2c_read_byte_data(int bus, int addr, int reg)
     return (int)(data.byte & 0xFF);
 }
 
+/*
+ * Write a single byte to I2C device at (bus, addr, reg) via SMBus ioctl.
+ * Returns 0 on success, -1 on error.
+ */
+static int i2c_write_byte_data(int bus, int addr, int reg, uint8_t val)
+{
+    char devpath[32];
+    int fd;
+    union i2c_smbus_data data;
+    struct i2c_smbus_ioctl_data args;
+
+    snprintf(devpath, sizeof(devpath), "/dev/i2c-%d", bus);
+    fd = open(devpath, O_RDWR);
+    if (fd < 0) return -1;
+
+    if (ioctl(fd, I2C_SLAVE_FORCE, addr) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    data.byte = val;
+    args.read_write = I2C_SMBUS_WRITE;
+    args.command    = (unsigned char)reg;
+    args.size       = I2C_SMBUS_BYTE_DATA;
+    args.data       = &data;
+
+    if (ioctl(fd, I2C_SMBUS, &args) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+/* ── CPLD sysfs path (wedge100s_cpld driver) ────────────────────────────── */
+
+#define CPLD_SYSFS "/sys/bus/i2c/devices/1-0032"
+
 /* ── file helpers ───────────────────────────────────────────────────────── */
 
 static int write_str_file(const char *path, const char *str)
@@ -376,6 +419,351 @@ static int write_binary_file(const char *path, const unsigned char *buf, int len
     int written = (int)fwrite(buf, 1, (size_t)len, f);
     fclose(f);
     return (written == len) ? 0 : -1;
+}
+
+/* ── EEPROM refresh helper ───────────────────────────────────────────────── */
+
+/*
+ * Refresh the lower page (bytes 0–127, live DOM data) of the EEPROM cache
+ * for port via CP2112 hidraw.
+ *
+ * Lower page contains live DOM monitoring registers (temperature, voltage,
+ * Tx/Rx power, bias current) that change continuously and must be re-read
+ * on every daemon tick so xcvrd sees fresh values.
+ *
+ * Upper page 00h (bytes 128–255) contains static vendor/type info.  If the
+ * cache file already exists its upper-page bytes are preserved; otherwise the
+ * upper page is also read from hardware (first insertion or cache absent).
+ *
+ * Returns 1 if the cache was written, 0 on any I2C error or invalid id byte.
+ */
+static int refresh_eeprom_lower_page(int port, const char *eeprom_path)
+{
+    int bus      = SFP_BUS_MAP[port];
+    int mux_addr = bus_to_mux_addr(bus);
+    int mux_chan  = bus_to_mux_channel(bus);
+    int ok = 0;
+
+    if (mux_addr < 0 || mux_chan < 0) return 0;
+    if (mux_select(mux_addr, mux_chan) < 0) return 0;
+
+    unsigned char ebuf[EEPROM_SIZE] = {0};
+    uint8_t lower_addr = 0x00;
+    int r = cp2112_write_read(0x50, &lower_addr, 1, ebuf, 128);
+    if (r == 128 && EEPROM_ID_VALID(ebuf[0])) {
+        /* Upper page: read from existing cache (saves one I2C round-trip),
+         * or from hardware if the cache is absent (first insertion). */
+        FILE *cf = fopen(eeprom_path, "rb");
+        if (cf) {
+            if (fseek(cf, 128, SEEK_SET) == 0)
+                (void)fread(ebuf + 128, 1, 128, cf);
+            fclose(cf);
+        } else {
+            uint8_t upper_addr = 0x80;
+            cp2112_write_read(0x50, &upper_addr, 1, ebuf + 128, 128);
+        }
+        write_binary_file(eeprom_path, ebuf, EEPROM_SIZE);
+        ok = 1;
+    }
+    mux_deselect(mux_addr);
+    return ok;
+}
+
+/*
+ * Apply LP_MODE state for one port via CP2112 hidraw.
+ *
+ * lpmode=0: deassert (allow high power) — drive PCA9535 pin LOW as output.
+ * lpmode=1: assert (force low power)   — release pin to INPUT (pull-up → HIGH).
+ *
+ * XOR-1 interleave: line = (port % 16) ^ 1
+ * Config regs: 0x06 (port0 bits 0-7), 0x07 (port1 bits 8-15)
+ * Output regs: 0x02 (port0 bits 0-7), 0x03 (port1 bits 8-15)
+ *
+ * Returns 0 on success, -1 on error (including readback mismatch).
+ */
+static int set_lpmode_hidraw(int port, int lpmode)
+{
+    int group = port / 16;
+    int line  = (port % 16) ^ 1;  /* XOR-1 interleave (ONL sfpi.c) */
+    int reg   = line / 8;
+    int bit   = line % 8;
+    int chip  = LP_PCA9535_ADDR[group];
+    int chan  = LP_PCA9535_CHAN[group];
+
+    uint8_t cfg_reg = (uint8_t)(0x06 + reg);
+    uint8_t out_reg = (uint8_t)(0x02 + reg);
+    uint8_t cfg_val = 0, out_val = 0;
+
+    if (mux_select(0x74, chan) < 0) return -1;
+
+    if (cp2112_write_read((uint8_t)chip, &cfg_reg, 1, &cfg_val, 1) < 0) {
+        mux_deselect(0x74); return -1;
+    }
+
+    if (lpmode) {
+        /* Assert: release pin to INPUT so pull-up drives HIGH */
+        uint8_t write_buf[2] = { cfg_reg, (uint8_t)(cfg_val | (1u << bit)) };
+        if (cp2112_write((uint8_t)chip, write_buf, 2) < 0) {
+            mux_deselect(0x74); return -1;
+        }
+        /* Verify config register was written correctly */
+        uint8_t verify_cfg = 0;
+        if (cp2112_write_read((uint8_t)chip, &cfg_reg, 1, &verify_cfg, 1) < 0) {
+            mux_deselect(0x74); return -1;
+        }
+        if (!(verify_cfg & (1u << bit))) {
+            /* Bit not set as INPUT — write did not take effect */
+            mux_deselect(0x74); return -1;
+        }
+    } else {
+        /* Deassert: drive output LOW first, then configure as OUTPUT */
+        if (cp2112_write_read((uint8_t)chip, &out_reg, 1, &out_val, 1) < 0) {
+            mux_deselect(0x74); return -1;
+        }
+        uint8_t out_buf[2] = { out_reg, (uint8_t)(out_val & ~(1u << bit)) };
+        if (cp2112_write((uint8_t)chip, out_buf, 2) < 0) {
+            mux_deselect(0x74); return -1;
+        }
+        uint8_t cfg_buf[2] = { cfg_reg, (uint8_t)(cfg_val & ~(1u << bit)) };
+        if (cp2112_write((uint8_t)chip, cfg_buf, 2) < 0) {
+            mux_deselect(0x74); return -1;
+        }
+        /* Verify config register was written correctly */
+        uint8_t verify_cfg = 0;
+        if (cp2112_write_read((uint8_t)chip, &cfg_reg, 1, &verify_cfg, 1) < 0) {
+            mux_deselect(0x74); return -1;
+        }
+        if (verify_cfg & (1u << bit)) {
+            /* Bit still set as INPUT — write did not take effect */
+            mux_deselect(0x74); return -1;
+        }
+    }
+
+    mux_deselect(0x74);
+    return 0;
+}
+
+/*
+ * Process LP_MODE state on each daemon invocation (hidraw path).
+ *
+ * Two actions in order:
+ *
+ * 1. Request files: for each sfp_N_lpmode_req, apply the requested lpmode
+ *    state to hardware, update the sfp_N_lpmode state file, and delete the
+ *    request file.  Req file content: "0" = deassert, "1" = assert.
+ *
+ * 2. Initial deassert: for each present port with no sfp_N_lpmode file,
+ *    drive LP_MODE LOW (allow high power) and write sfp_N_lpmode="0".
+ *    This fires once per port on first boot or hot-plug, overriding the
+ *    hardware default of all-asserted (all-inputs, pull-up HIGH).
+ *
+ * Presence state is read from the sfp_N_present files written earlier in
+ * this same invocation by poll_presence_hidraw().
+ */
+static void poll_lpmode_hidraw(void)
+{
+    int port;
+    char req_path[80], state_path[80], present_path[64];
+
+    /* 1. Process pending request files */
+    for (port = 0; port < NUM_PORTS; port++) {
+        snprintf(req_path,   sizeof(req_path),   RUN_DIR "/sfp_%d_lpmode_req", port);
+        snprintf(state_path, sizeof(state_path), RUN_DIR "/sfp_%d_lpmode",     port);
+
+        FILE *f = fopen(req_path, "r");
+        if (!f) continue;
+
+        char val[4] = {0};
+        if (fgets(val, (int)sizeof(val), f))
+            val[strcspn(val, "\r\n")] = '\0';
+        fclose(f);
+
+        int lpmode = (val[0] == '1') ? 1 : 0;
+        if (set_lpmode_hidraw(port, lpmode) == 0) {
+            write_str_file(state_path, lpmode ? "1" : "0");
+            unlink(req_path);
+        } else {
+            fprintf(stderr,
+                    "wedge100s-i2c-daemon: set_lpmode port %d -> %d failed\n",
+                    port, lpmode);
+        }
+    }
+
+    /* 2. Initial deassert for present ports with no state file */
+    for (port = 0; port < NUM_PORTS; port++) {
+        snprintf(present_path, sizeof(present_path), RUN_DIR "/sfp_%d_present", port);
+        snprintf(state_path,   sizeof(state_path),   RUN_DIR "/sfp_%d_lpmode",  port);
+
+        /* Skip absent ports */
+        char pval[4] = {0};
+        FILE *pf = fopen(present_path, "r");
+        if (!pf) continue;
+        if (fgets(pval, (int)sizeof(pval), pf))
+            pval[strcspn(pval, "\r\n")] = '\0';
+        fclose(pf);
+        if (pval[0] != '1') continue;
+
+        /* Skip ports already initialized (state file exists) */
+        struct stat st;
+        if (stat(state_path, &st) == 0) continue;
+
+        /* Deassert LP_MODE (allow high power), record state */
+        if (set_lpmode_hidraw(port, 0) == 0) {
+            write_str_file(state_path, "0");
+            /*
+             * Immediately refresh the lower page now that LP_MODE is deasserted.
+             * poll_presence_hidraw() ran earlier this tick and wrote a LP-mode
+             * snapshot (DOM bytes = 0 → -inf dBm).  Re-reading here in the same
+             * invocation overwrites it with post-deassert values so xcvrd never
+             * sees the stale snapshot.  On failure the stale cache is deleted so
+             * xcvrd gets a cache-miss (None) rather than wrong data; the next
+             * tick's poll_presence_hidraw() will retry the lower-page read.
+             */
+            char eeprom_path[80];
+            snprintf(eeprom_path, sizeof(eeprom_path), RUN_DIR "/sfp_%d_eeprom", port);
+            if (!refresh_eeprom_lower_page(port, eeprom_path))
+                unlink(eeprom_path);
+        } else {
+            fprintf(stderr,
+                    "wedge100s-i2c-daemon: initial deassert port %d failed\n",
+                    port);
+        }
+    }
+}
+
+/*
+ * LP_MODE processing via i2c-dev ioctl (Phase 1 fallback).
+ *
+ * LP_MODE PCA9535 chips are on buses 34 (group 0) and 35 (group 1),
+ * accessible when i2c_mux_pca954x has built the mux tree.
+ * Uses i2c_read_byte_data() / i2c_write_byte_data() helpers.
+ */
+/* File-scope constant: LP_MODE bus numbers for Phase 1 sysfs fallback. */
+static const int LP_BUS[2] = { 34, 35 };
+
+static int set_lpmode_sysfs(int port, int lpmode)
+{
+    int group = port / 16;
+    int line  = (port % 16) ^ 1;
+    int reg   = line / 8;
+    int bit   = line % 8;
+    int bus   = LP_BUS[group];
+    int chip  = LP_PCA9535_ADDR[group];
+
+    int cfg_reg = 0x06 + reg;
+    int out_reg = 0x02 + reg;
+
+    if (lpmode) {
+        int cfg_val = i2c_read_byte_data(bus, chip, cfg_reg);
+        if (cfg_val < 0) return -1;
+        return i2c_write_byte_data(bus, chip, cfg_reg,
+                                   (uint8_t)(cfg_val | (1 << bit)));
+    } else {
+        int out_val = i2c_read_byte_data(bus, chip, out_reg);
+        if (out_val < 0) return -1;
+        if (i2c_write_byte_data(bus, chip, out_reg,
+                                (uint8_t)(out_val & ~(1 << bit))) < 0)
+            return -1;
+        int cfg_val = i2c_read_byte_data(bus, chip, cfg_reg);
+        if (cfg_val < 0) return -1;
+        return i2c_write_byte_data(bus, chip, cfg_reg,
+                                   (uint8_t)(cfg_val & ~(1 << bit)));
+    }
+}
+
+static void poll_lpmode_sysfs(void)
+{
+    int port;
+    char req_path[80], state_path[80], present_path[64];
+
+    for (port = 0; port < NUM_PORTS; port++) {
+        snprintf(req_path,   sizeof(req_path),   RUN_DIR "/sfp_%d_lpmode_req", port);
+        snprintf(state_path, sizeof(state_path), RUN_DIR "/sfp_%d_lpmode",     port);
+
+        FILE *f = fopen(req_path, "r");
+        if (!f) continue;
+
+        char val[4] = {0};
+        if (fgets(val, (int)sizeof(val), f))
+            val[strcspn(val, "\r\n")] = '\0';
+        fclose(f);
+
+        int lpmode = (val[0] == '1') ? 1 : 0;
+        if (set_lpmode_sysfs(port, lpmode) == 0) {
+            write_str_file(state_path, lpmode ? "1" : "0");
+            unlink(req_path);
+        } else {
+            fprintf(stderr,
+                    "wedge100s-i2c-daemon: set_lpmode (sysfs) port %d -> %d failed\n",
+                    port, lpmode);
+        }
+    }
+
+    for (port = 0; port < NUM_PORTS; port++) {
+        snprintf(present_path, sizeof(present_path), RUN_DIR "/sfp_%d_present", port);
+        snprintf(state_path,   sizeof(state_path),   RUN_DIR "/sfp_%d_lpmode",  port);
+
+        char pval[4] = {0};
+        FILE *pf = fopen(present_path, "r");
+        if (!pf) continue;
+        if (fgets(pval, (int)sizeof(pval), pf))
+            pval[strcspn(pval, "\r\n")] = '\0';
+        fclose(pf);
+        if (pval[0] != '1') continue;
+
+        struct stat st;
+        if (stat(state_path, &st) == 0) continue;
+
+        if (set_lpmode_sysfs(port, 0) == 0)
+            write_str_file(state_path, "0");
+        else
+            fprintf(stderr,
+                    "wedge100s-i2c-daemon: initial deassert (sysfs) port %d failed\n",
+                    port);
+    }
+}
+
+/* ── poll_cpld — mirror CPLD sysfs attrs to /run/wedge100s/ ─────────────── */
+
+/*
+ * Copy each wedge100s_cpld sysfs attribute to RUN_DIR so that Python
+ * consumers (psu.py, chassis.py) read from the canonical daemon-cache
+ * directory rather than directly from the kernel i2c sysfs tree.
+ *
+ * For read-only attributes (cpld_version, psuN_present, psuN_pgood) this
+ * is the only writer.  For read-write attributes (led_sys1, led_sys2) the
+ * platform code also writes to RUN_DIR on every set_status_led() call;
+ * this function provides the initial seed and keeps them in sync on each
+ * 3-second poll tick.
+ */
+static void poll_cpld(void)
+{
+    static const char *attrs[] = {
+        "cpld_version",
+        "psu1_present", "psu1_pgood",
+        "psu2_present", "psu2_pgood",
+        "led_sys1",     "led_sys2",
+        NULL
+    };
+
+    for (int i = 0; attrs[i]; i++) {
+        char src[128], dst[128], val[64];
+        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", attrs[i]);
+        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", attrs[i]);
+
+        FILE *f = fopen(src, "r");
+        if (!f) continue;
+
+        if (fgets(val, (int)sizeof(val), f)) {
+            /* strip trailing whitespace (newline from sysfs) */
+            int n = (int)strlen(val);
+            while (n > 0 && (val[n-1] == '\n' || val[n-1] == '\r' ||
+                             val[n-1] == ' '))
+                val[--n] = '\0';
+            write_str_file(dst, val);
+        }
+        fclose(f);
+    }
 }
 
 /* ── syseeprom — hidraw path (Phase 2) ──────────────────────────────────── */
@@ -533,7 +921,7 @@ static void poll_presence_hidraw(void)
         mux_deselect(0x74);
     }
 
-    /* Process each port: update presence file and conditionally read EEPROM */
+    /* Process each port: update presence file and refresh EEPROM lower page */
     for (int port = 0; port < NUM_PORTS; port++) {
         char present_path[64];
         char eeprom_path[64];
@@ -549,26 +937,17 @@ static void poll_presence_hidraw(void)
             continue;
         }
 
-        /* Determine if EEPROM read is needed */
-        struct stat est;
-        int eeprom_exists = (stat(eeprom_path, &est) == 0);
-
-        char prev_val[8] = {0};
-        FILE *pf = fopen(present_path, "r");
-        if (pf) {
-            if (fgets(prev_val, (int)sizeof(prev_val), pf))
-                prev_val[strcspn(prev_val, "\r\n")] = '\0';
-            fclose(pf);
-        }
-        int prev_present = (strcmp(prev_val, "1") == 0);
-
-        if (prev_present && eeprom_exists) {
-            /*
-             * Stable only if the cached identifier is valid.
-             * An invalid byte (0x00, 0x80-0xff) means the prior read caught
-             * a corrupt or uninitialized EEPROM — discard the cache and
-             * re-read every cycle until presence clears or a valid type lands.
-             */
+        /*
+         * Stable port: if the cache exists and has a valid SFF identifier byte,
+         * skip the EEPROM I2C round-trip entirely.  DOM data (lower page) is
+         * refreshed on-demand by sfp.py via smbus2 when xcvrd asks for it,
+         * so there is no need to hammer the CP2112 every tick.
+         *
+         * New insertion or invalid/absent cache: read lower + upper pages from
+         * hardware now (this is the one time we need to do it — upper page is
+         * static vendor info; lower page is the initial snapshot).
+         */
+        {
             int id_byte = -1;
             FILE *ef = fopen(eeprom_path, "rb");
             if (ef) { id_byte = fgetc(ef); fclose(ef); }
@@ -576,33 +955,9 @@ static void poll_presence_hidraw(void)
                 write_str_file(present_path, "1");
                 continue;
             }
-            unlink(eeprom_path);
         }
 
-        /*
-         * Insertion event or retry after a failed EEPROM read.
-         * Read 256 bytes from the QSFP EEPROM via hidraw:
-         *   - Lower page (bytes 0-127):  write-read addr 0x00, read 128
-         *   - Upper page 0 (bytes 128-255): write-read addr 0x80, read 128
-         */
-        int bus      = SFP_BUS_MAP[port];
-        int mux_addr = bus_to_mux_addr(bus);
-        int mux_chan  = bus_to_mux_channel(bus);
-
-        if (mux_addr >= 0 && mux_chan >= 0 && mux_select(mux_addr, mux_chan) == 0) {
-            unsigned char ebuf[EEPROM_SIZE] = {0};
-            uint8_t lower_addr = 0x00;
-            int r = cp2112_write_read(0x50, &lower_addr, 1, ebuf, 128);
-            if (r == 128) {
-                uint8_t upper_addr = 0x80;
-                r = cp2112_write_read(0x50, &upper_addr, 1, ebuf + 128, 128);
-                if (r == 128 && EEPROM_ID_VALID(ebuf[0]))
-                    write_binary_file(eeprom_path, ebuf, EEPROM_SIZE);
-                /* r < 128 or invalid id: do not cache; retry next tick */
-            }
-            /* r < 128 on lower page: module warming up; retry next tick */
-            mux_deselect(mux_addr);
-        }
+        refresh_eeprom_lower_page(port, eeprom_path);
 
         write_str_file(present_path, "1");
     }
@@ -732,12 +1087,29 @@ int main(int argc, char *argv[])
         cp2112_cancel();  /* drain any stale CP2112 state from prior users */
         poll_syseeprom_hidraw();
         poll_presence_hidraw();
+        poll_lpmode_hidraw();
         close(g_hidraw_fd);
         g_hidraw_fd = -1;
     } else {
         poll_syseeprom();
         poll_presence();
+        poll_lpmode_sysfs();
     }
+
+    /*
+     * CPLD attributes (psu presence/pgood, led state, version) are read from
+     * the wedge100s_cpld kernel driver sysfs — not via hidraw — and cached to
+     * RUN_DIR so Python consumers have a single canonical read path.
+     *
+     * Must run AFTER the hidraw block: each poll_cpld() sysfs read causes
+     * hid_cp2112 to conduct an I2C transaction, leaving two stale HID input
+     * reports (0x16 TRANSFER_STATUS_RESPONSE + 0x13 DATA_READ_RESPONSE) in
+     * the hidraw buffer per attribute (7 attrs × 2 = 14 reports total).
+     * cp2112_cancel() only drains 8 — leaving stale 0x16 COMPLETE reports
+     * that cp2112_wait_complete() would consume as false completions for
+     * subsequent mux writes, causing PCA9535 presence reads to fail.
+     */
+    poll_cpld();
 
     return 0;
 }

@@ -19,7 +19,11 @@ CPLD hardware: i2c-1/0x32, accessed via CP2112 USB-HID bridge (i2c_dev).
 import re
 import pytest
 
+# Kernel driver sysfs path — used only for driver-binding tests
 CPLD_SYSFS = "/sys/bus/i2c/devices/1-0032"
+
+# Canonical daemon-cache path — used by all services (psu.py, chassis.py, ledd)
+RUN_DIR = "/run/wedge100s"
 
 SYSFS_ATTRS = [
     "cpld_version",
@@ -78,13 +82,39 @@ def test_all_sysfs_attrs_readable(ssh):
 
 
 # ------------------------------------------------------------------
+# Daemon cache (/run/wedge100s/)
+# ------------------------------------------------------------------
+
+def test_cpld_run_dir_populated(ssh):
+    """All CPLD attrs are present in /run/wedge100s/ (daemon cache).
+
+    wedge100s-i2c-daemon copies each wedge100s_cpld sysfs attribute to
+    /run/wedge100s/ on every 3-second poll tick.  This test verifies that
+    the cache is populated so that psu.py and chassis.py can read from
+    the canonical daemon-cache path.
+    """
+    missing = []
+    for attr in SYSFS_ATTRS:
+        path = f"{RUN_DIR}/{attr}"
+        out, err, rc = ssh.run(f"cat {path} 2>&1", timeout=10)
+        if rc != 0 or "No such file" in out or "Permission denied" in out:
+            missing.append(f"{attr}: {out.strip() or err.strip()}")
+        else:
+            print(f"  {RUN_DIR}/{attr}: {out.strip()!r}")
+    assert not missing, (
+        f"CPLD attrs missing from {RUN_DIR}:\n" + "\n".join(missing) + "\n"
+        "Is wedge100s-i2c-daemon running? Check: systemctl status wedge100s-i2c-poller.timer"
+    )
+
+
+# ------------------------------------------------------------------
 # cpld_version format
 # ------------------------------------------------------------------
 
 def test_cpld_version_format(ssh):
-    """cpld_version reads as 'major.minor' with both fields numeric."""
-    out, _, rc = ssh.run(f"cat {CPLD_SYSFS}/cpld_version", timeout=10)
-    assert rc == 0, "Could not read cpld_version"
+    """cpld_version daemon cache reads as 'major.minor' with both fields numeric."""
+    out, _, rc = ssh.run(f"cat {RUN_DIR}/cpld_version", timeout=10)
+    assert rc == 0, f"Could not read {RUN_DIR}/cpld_version"
     version = out.strip()
     print(f"\ncpld_version: {version!r}")
     m = re.match(r"^(\d+)\.(\d+)$", version)
@@ -103,9 +133,9 @@ def test_cpld_version_format(ssh):
 # ------------------------------------------------------------------
 
 def _read_int_attr(ssh, attr):
-    """Read a CPLD sysfs integer attribute; return int or raise."""
-    out, _, rc = ssh.run(f"cat {CPLD_SYSFS}/{attr}", timeout=10)
-    assert rc == 0, f"Could not read {attr}"
+    """Read a CPLD integer attribute from the daemon cache; return int or raise."""
+    out, _, rc = ssh.run(f"cat {RUN_DIR}/{attr}", timeout=10)
+    assert rc == 0, f"Could not read {RUN_DIR}/{attr} — has wedge100s-i2c-daemon run?"
     return int(out.strip(), 0)
 
 
@@ -181,15 +211,16 @@ def test_led_sys2_valid(ssh):
 def test_led_sys2_write_restore(ssh):
     """led_sys2 is writable; write restores original value correctly.
 
-    This test reads the current led_sys2 value, writes a different value,
-    reads back to verify the write, then restores the original value.
-    Does NOT leave led_sys2 in a modified state.
+    Writes to the kernel sysfs attr (hardware effect) and verifies the
+    readback via the daemon cache (/run/wedge100s/led_sys2).  The restore
+    writes back to both paths so that the cache matches hardware state.
     """
-    path = f"{CPLD_SYSFS}/led_sys2"
+    sysfs_path  = f"{CPLD_SYSFS}/led_sys2"
+    run_path    = f"{RUN_DIR}/led_sys2"
 
-    # Read original
-    out, _, rc = ssh.run(f"cat {path}", timeout=10)
-    assert rc == 0, "Could not read led_sys2"
+    # Read original from daemon cache (canonical read path)
+    out, _, rc = ssh.run(f"cat {run_path}", timeout=10)
+    assert rc == 0, f"Could not read {run_path}"
     original = int(out.strip(), 0)
     print(f"\nled_sys2 original: {original}")
 
@@ -197,14 +228,16 @@ def test_led_sys2_write_restore(ssh):
     test_val = 2 if original != 2 else 1  # green or red
 
     try:
-        # Write test value
+        # Write test value to hardware (sysfs) and cache
         _, _, rc = ssh.run(
-            f"echo {test_val} | sudo tee {path} > /dev/null", timeout=10
+            f"echo {test_val} | sudo tee {sysfs_path} > /dev/null && "
+            f"echo {test_val} | sudo tee {run_path} > /dev/null",
+            timeout=10,
         )
         assert rc == 0, f"Write to led_sys2 failed (rc={rc})"
 
-        # Read back
-        out, _, rc = ssh.run(f"cat {path}", timeout=10)
+        # Read back from daemon cache (canonical path)
+        out, _, rc = ssh.run(f"cat {run_path}", timeout=10)
         assert rc == 0
         readback = int(out.strip(), 0)
         print(f"  Wrote {test_val}, read back {readback}")
@@ -212,6 +245,10 @@ def test_led_sys2_write_restore(ssh):
             f"led_sys2 write/read mismatch: wrote {test_val}, got {readback}"
         )
     finally:
-        # Restore original
-        ssh.run(f"echo {original} | sudo tee {path} > /dev/null", timeout=10)
+        # Restore original to both paths
+        ssh.run(
+            f"echo {original} | sudo tee {sysfs_path} > /dev/null && "
+            f"echo {original} | sudo tee {run_path} > /dev/null",
+            timeout=10,
+        )
         print(f"  Restored led_sys2 to {original}")

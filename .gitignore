@@ -130,3 +130,4 @@ sources.list.*
 # Generated mirror configs
 apt-retries-count
 database-chassis.service
+.worktrees/

@@ -93,14 +93,18 @@ def _pmbus_decode_linear11(raw):
 
 def _read_cpld_attr(name):
     """
-    Read a sysfs attribute from the wedge100s_cpld driver.
+    Read a CPLD integer attribute from the daemon cache (/run/wedge100s/).
+    Falls back to kernel sysfs if the cache file is not yet present
+    (early boot before the first wedge100s-i2c-daemon tick).
     Returns the integer value, or None on error.
     """
-    try:
-        with open('{}/{}'.format(_CPLD_SYSFS, name)) as f:
-            return int(f.read().strip(), 0)
-    except Exception:
-        return None
+    for base in (_RUN_DIR, _CPLD_SYSFS):
+        try:
+            with open('{}/{}'.format(base, name)) as f:
+                return int(f.read().strip(), 0)
+        except Exception:
+            continue
+    return None
 
 
 def _read_daemon_int(path):

@@ -10,7 +10,7 @@
   ],
   "_comment": "Verified I2C topology for Accton Wedge 100S-32X on SONiC kernel 6.1.0-29-2-amd64",
   "_generated": "2026-02-25",
-  "_updated": "2026-03-11",
+  "_updated": "2026-03-20",
   "_method": "Live discovery on hare-lorax (SONiC master.0-dirty-20251203.082955)",
   "_onl_notes": {
     "kernel_modules": "ONL uses no-platform-modules.yml — zero custom kernel modules for this platform",
@@ -138,6 +138,55 @@
       "offset_1_ports": "24-31",
       "live_value_offset_0": "0xff",
       "live_value_offset_1": "0xff"
+    }
+  },
+
+  "qsfp_lp_mode": {
+    "_note": "Discovered via I2C scan 2026-03-20. PCB pull-ups hold all LP_MODE lines HIGH (active-HIGH). All 32 QSFP ports boot in LP_MODE (TX lasers off) until these pins are driven LOW by software.",
+    "_bit_mapping": "XOR-1 interleave identical to presence: line=(port%16)^1; reg=line//8; bit=line%8",
+    "_deassert": "Configure PCA9535 bit as output driven LOW → LP_MODE deasserted → module can enter high-power mode",
+    "_assert": "Set PCA9535 bit as input → PCB pull-up drives HIGH → LP_MODE asserted → module in low-power",
+    "low_ports": {
+      "bus": 34,
+      "addr": "0x20",
+      "driver": "pca9535",
+      "ports": "0-15",
+      "mux_path": "i2c-1 → mux 0x74 → channel 0",
+      "config_reg_port0": "0x06",
+      "config_reg_port1": "0x07",
+      "output_reg_port0": "0x02",
+      "output_reg_port1": "0x03",
+      "boot_state": "all inputs (0xFF) — all LP_MODE asserted via pull-ups"
+    },
+    "high_ports": {
+      "bus": 35,
+      "addr": "0x21",
+      "driver": "pca9535",
+      "ports": "16-31",
+      "mux_path": "i2c-1 → mux 0x74 → channel 1",
+      "config_reg_port0": "0x06",
+      "config_reg_port1": "0x07",
+      "output_reg_port0": "0x02",
+      "output_reg_port1": "0x03",
+      "boot_state": "all inputs (0xFF) — all LP_MODE asserted via pull-ups"
+    }
+  },
+
+  "qsfp_int_l": {
+    "_note": "Interrupt lines from QSFP modules (active-LOW). Discovered 2026-03-20. Not yet used by platform code.",
+    "low_ports": {
+      "bus": 38,
+      "addr": "0x24",
+      "driver": "pca9535",
+      "ports": "0-15",
+      "mux_path": "i2c-1 → mux 0x74 → channel 4"
+    },
+    "high_ports": {
+      "bus": 39,
+      "addr": "0x25",
+      "driver": "pca9535",
+      "ports": "16-31",
+      "mux_path": "i2c-1 → mux 0x74 → channel 5"
     }
   },
 

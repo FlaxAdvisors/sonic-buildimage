@@ -1,6 +1,6 @@
 # Staged Implementation Phases — Wedge 100S-32X SONiC Port
 
-Status as of 2026-03-17. All phases 00–20 + nn are COMPLETE.
+Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PARTIAL.
 
 ## Legend
 
@@ -177,6 +177,41 @@ Status as of 2026-03-17. All phases 00–20 + nn are COMPLETE.
 - FEC correctable error rate < 1e-6/s under flood
 - `portstat` after `sonic-clear counters` shows <= 50 residual packets per port
 
+## Phase 21: LP_MODE Daemon Control
+**Status: COMPLETE**
+- Daemon exclusively owns LP_MODE PCA9535 pins (0x20, 0x21 on mux 0x74 ch0/ch1)
+- All present ports deasserted (LP_MODE=0, TX enabled) on first daemon invocation
+- sfp.py get_lpmode() reads /run/wedge100s/sfp_N_lpmode (file-only, no I2C)
+- sfp.py set_lpmode() writes /run/wedge100s/sfp_N_lpmode_req (file-only, no I2C)
+- Daemon processes req files within one poll tick (~3 s), deletes req file after apply
+- Readback verification after each PCA9535 write (state file updated only on hardware-confirmed write)
+
+## Phase 22: Optical Port Bring-Up and CLI Fixes
+**Status: PARTIAL (1/4 ports UP, 3/4 physically blocked)**
+
+### CLI Fixes
+- `show interfaces transceiver pm EthernetX` now renders SFF-8636 (non-CMIS) modules as a 4-lane table (Rx Power / Tx Bias / Tx Power) using `TRANSCEIVER_DOM_SENSOR` from STATE_DB. Previously showed `N/A` for all optical ports.
+- `show interfaces transceiver status EthernetX` and `show interfaces transceiver info EthernetX` work correctly for all 4 optical ports without code changes (xcvrd populates TRANSCEIVER_STATUS for SFF-8636 modules when present).
+
+### DOM Architecture Fix (CP2112 Bus Saturation)
+- `wedge100s-i2c-daemon`: Per-tick lower-page EEPROM reads removed. Stable ports (valid SFF ID byte in `/run/wedge100s/sfp_N_eeprom` cache) skip I2C entirely; EEPROM read only happens on insertion.
+- `sfp.py`: Demand-driven TTL refresh added (`_DOM_CACHE_TTL = 10 s`). When xcvrd requests offset < 128 and TTL has expired, performs a live smbus2 lower-page (128 bytes) read and merges with cached upper page. Prevents CP2112 HID bus saturation that caused SSH unresponsiveness.
+
+### Optical Port Status (hardware-verified 2026-03-20)
+| Port | Module | Status | Root Cause |
+|------|--------|--------|------------|
+| Ethernet100 | Arista SR4 | **DOWN** | Physical Rx LOS — MPO fiber from Arista Et26/1 not reaching Ethernet100 Rx cage |
+| Ethernet104 | Arista LR4 | **DOWN** | BCM NPU_SI_SETTINGS_DEFAULT; TXAMP=8 below LR4 module host-input LOS threshold |
+| Ethernet108 | Arista SR4 | **UP** | RS-FEC; confirmed via LLDP (rabbit-lorax Et28/1) |
+| Ethernet116 | ColorChip CWDM4 | **DOWN** | Arista Et30/1 laser not transmitting (-30 dBm) |
+
+### Known Blockers (not platform bugs)
+- Ethernet100: Physical fiber routing — requires hardware inspection of MPO-12 cage 25
+- Ethernet104: Requires platform-specific BCM SI settings file (portmap/sai_profile with per-port TXAMP/TXEQ for Wedge100S QSFP28 ports) so `NPU_SI_SETTINGS_SYNC_STATUS` moves from DEFAULT to calibrated
+- Ethernet116: Arista Et30/1 laser shutdown or LP_MODE on peer side — requires EOS investigation
+
+---
+
 ## Phase nn: Post-Test Restore
 **Status: COMPLETE**
 - Restore from snapshot cleans PortChannel1, FEC, IP config
@@ -186,8 +221,9 @@ Status as of 2026-03-17. All phases 00–20 + nn are COMPLETE.
 
 ---
 
-## Overall Status: ALL PHASES COMPLETE
+## Overall Status: PHASES 00–21 COMPLETE; Phase 22 PARTIAL
 
-Pass rate: 230/231 = 99.6%
-Remaining: 1 pre-existing ledd polling race (stage_08)
-Hardware-verified: 2026-03-17
+Pass rate: 230/231 = 99.6% (automated test suite, phases 00–21)
+Remaining (automated): 1 pre-existing ledd polling race (stage_08)
+Remaining (physical): Ethernet100 fiber, Ethernet104 BCM SI settings, Ethernet116 peer laser
+Hardware-verified: 2026-03-20

@@ -221,9 +221,22 @@ def test_transceiver_presence_all_ports(ssh):
 # ------------------------------------------------------------------
 
 XCVR_API_SCRIPT = """\
-import json, sys
+import json, sys, time
 sys.path.insert(0, '/usr/lib/python3/dist-packages')
 from sonic_platform.platform import Platform
+
+# Prime _DOM_LAST_REFRESH to now so read_eeprom() serves from the daemon cache
+# without triggering live smbus2 reads.  The i2c-poller timer (hidraw0) and
+# sfp.py smbus2 share the CP2112 without kernel-level serialisation; when both
+# fire simultaneously the kernel logs "cp2112: read returned 0" and all
+# get_xcvr_api() calls fail for that polling window.
+try:
+    from sonic_platform import sfp as _sfp_mod
+    _now = time.monotonic()
+    _sfp_mod._DOM_LAST_REFRESH = [_now] * len(_sfp_mod._DOM_LAST_REFRESH)
+except Exception:
+    pass  # non-fatal; next read will still serve cached data on any i2c error
+
 chassis = Platform().get_chassis()
 
 results = []

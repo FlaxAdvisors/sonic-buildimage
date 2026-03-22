@@ -16,5 +16,14 @@ password = YourPasswordHere
 # Comma or space separated.  Defaults used if this section is absent.
 connected_ports = Ethernet16,Ethernet32,Ethernet48,Ethernet112
 
-# IP address of the peer device reachable over the port channel.
+# IP addresses for stage_20 traffic tests.
+# peer_ip: peer side of PortChannel1 (10.0.1.1/31 on SONiC side, 10.0.1.0/31 on peer side).
+# standalone_peer_ip: peer side of Ethernet48 standalone link (10.0.0.1/31 on SONiC side).
 peer_ip = 10.0.1.0
+standalone_peer_ip = 10.0.0.0
+
+[hosts]
+# SSH credentials for test hosts connected to breakout ports.
+# Used by stage_22_host_traffic (PENDING).
+ssh_user = flax
+key_file = ~/.ssh/id_rsa

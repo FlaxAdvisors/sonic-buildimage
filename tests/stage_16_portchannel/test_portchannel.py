@@ -1,96 +1,29 @@
-"""Stage 16 — Port Channel / LAG (LACP).
+"""Stage 16 — Port Channel / LAG (LACP) — operational state assertions.
 
-Verifies Link Aggregation Group functionality between hare-lorax (SONiC,
-Wedge 100S-32X) and rabbit-lorax (Arista EOS, Wedge 100S).
-
-Prerequisites (configured before tests run):
-  - teamd feature enabled on Hare
-  - PortChannel1 created on Hare with Ethernet16 + Ethernet32 as members
-  - Port-Channel1 created on Rabbit with Et13/1 + Et14/1 in LACP active mode
-  - IP addressing: Hare 10.0.1.1/31, Rabbit 10.0.1.0/31
+Tests assert that PortChannel1 is already configured and operational,
+as established by tools/deploy.py. PortChannel1 is L2-only (VLAN 999
+access, no IP address).
 
 Hardware topology:
-  Hare Ethernet  | Hare Port | Rabbit Port  | LAG Role
-  ---------------|-----------|--------------|----------
-  Ethernet16     | Port 5    | Et13/1       | PortChannel1 member
-  Ethernet32     | Port 9    | Et14/1       | PortChannel1 member
-  Ethernet48     | Port 13   | Et15/1       | Standalone (control)
-  Ethernet112    | Port 29   | Et16/1       | Standalone (control)
-
-Phase reference: Phase 17 (Port Channel / LAG) in INTERFACE_PLAN.md.
-Verified on hardware 2026-03-02.
+  Hare Ethernet  | Rabbit Port  | Role
+  ---------------|--------------|-----
+  Ethernet16     | Et13/1       | PortChannel1 member
+  Ethernet32     | Et14/1       | PortChannel1 member
+  Ethernet48     | Et15/1       | standalone
+  Ethernet112    | Et16/1       | standalone
 """
 
-import configparser
-import json
-import os
 import re
 import time
 import pytest
 
 PORTCHANNEL_NAME = "PortChannel1"
 LAG_MEMBERS = ["Ethernet16", "Ethernet32"]
-LAG_IP = "10.0.1.1/31"
-
-# Standalone connected ports — should remain unaffected by LAG config
 STANDALONE_PORTS = ["Ethernet48", "Ethernet112"]
 
-# Peer IP is read from target.cfg [links] peer_ip; fall back to lab default.
-def _load_peer_ip():
-    cfg_path = os.path.join(os.path.dirname(__file__), "..", "target.cfg")
-    config = configparser.ConfigParser()
-    config.read(cfg_path)
-    return config.get("links", "peer_ip", fallback="10.0.1.0")
-
-PEER_IP = _load_peer_ip()
-
-
-@pytest.fixture(scope="session", autouse=True)
-def stage16_setup_teardown(ssh):
-    """Create PortChannel1, add members, assign IP; remove all after."""
-    # Configure RS-FEC on LAG members (required for link-up)
-    for port in LAG_MEMBERS:
-        ssh.run(f"sudo config interface fec {port} rs", timeout=15)
-
-    # Wait for physical links to come up after FEC negotiation (up to 30s)
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        out, _, rc = ssh.run("show interfaces status 2>&1", timeout=15)
-        up_count = sum(1 for p in LAG_MEMBERS if any(p in l and " up " in l for l in out.splitlines()))
-        if up_count >= len(LAG_MEMBERS):
-            break
-        time.sleep(5)
-
-    # Remove any routed-interface CONFIG_DB entries on LAG members so that
-    # 'config portchannel member add' does not reject them as "has ip address".
-    # (clean_boot.json declares Ethernet16/Ethernet32 as INTERFACE entries.)
-    for port in LAG_MEMBERS:
-        ssh.run(f"redis-cli -n 4 del 'INTERFACE|{port}'", timeout=10)
-
-    # Enable teamd feature
-    ssh.run("sudo config feature state teamd enabled", timeout=15)
-    time.sleep(3)
-
-    # Create PortChannel and members
-    ssh.run(f"sudo config portchannel add {PORTCHANNEL_NAME}", timeout=30)
-    for port in LAG_MEMBERS:
-        ssh.run(f"sudo config portchannel member add {PORTCHANNEL_NAME} {port}", timeout=30)
-    ssh.run(f"sudo config interface ip add {PORTCHANNEL_NAME} {LAG_IP}", timeout=15)
-    time.sleep(45)  # LACP negotiation (increased from 15s to allow LAG to form in clean-boot state)
-
-    yield
-
-    # Teardown: remove PortChannel
-    ssh.run(f"sudo config interface ip remove {PORTCHANNEL_NAME} {LAG_IP}", timeout=15)
-    for port in LAG_MEMBERS:
-        ssh.run(f"sudo config portchannel member del {PORTCHANNEL_NAME} {port}", timeout=30)
-    ssh.run(f"sudo config portchannel del {PORTCHANNEL_NAME}", timeout=30)
-    for port in LAG_MEMBERS:
-        ssh.run(f"sudo config interface fec {port} none", timeout=15)
-    # Restore the routed-interface CONFIG_DB entries that were removed during setup.
-    # SONiC represents an empty {} INTERFACE entry as a hash with a single NULL field.
-    for port in LAG_MEMBERS:
-        ssh.run(f"redis-cli -n 4 hset 'INTERFACE|{port}' NULL NULL", timeout=10)
+TEAMDCTL_POLL_INTERVAL = 2
+TEAMDCTL_FAILOVER_TIMEOUT = 10   # seconds for one member to deselect
+TEAMDCTL_RECOVER_TIMEOUT = 30    # seconds for both members to reselect
 
 
 # ------------------------------------------------------------------
@@ -98,22 +31,14 @@ def stage16_setup_teardown(ssh):
 # ------------------------------------------------------------------
 
 def _portchannel_summary(ssh):
-    """Parse 'show interfaces portchannel' into structured data.
-
-    Returns dict: { "PortChannel1": {"protocol": "LACP(A)(Up)",
-                     "members": {"Ethernet16": "S", "Ethernet32": "S"}} }
-    """
+    """Parse 'show interfaces portchannel' into structured data."""
     out, err, rc = ssh.run("show interfaces portchannel", timeout=30)
     assert rc == 0, f"show interfaces portchannel failed (rc={rc}): {err}"
     result = {}
     for line in out.splitlines():
-        m = re.match(
-            r"\s*\d+\s+(\S+)\s+(LACP\(\S+\)\(\S+\))\s+(.*)", line
-        )
+        m = re.match(r"\s*\d+\s+(\S+)\s+(LACP\(\S+\)\(\S+\))\s+(.*)", line)
         if m:
-            name = m.group(1)
-            protocol = m.group(2)
-            ports_str = m.group(3).strip()
+            name, protocol, ports_str = m.group(1), m.group(2), m.group(3).strip()
             members = {}
             for pm in re.finditer(r"(\S+)\(([SsDd\*])\)", ports_str):
                 members[pm.group(1)] = pm.group(2)
@@ -121,34 +46,87 @@ def _portchannel_summary(ssh):
     return result
 
 
+def _teamdctl_members(ssh) -> dict:
+    """Return {port_name: state_str} from teamdctl PortChannel1 state.
+
+    state_str is 'current' when the member is selected and LACP-converged.
+
+    teamdctl output format (2-space indent for port names under 'ports:'):
+      ports:
+        Ethernet16
+          ...
+          runner:
+            ...
+            state: current
+    """
+    out, _, rc = ssh.run(f"teamdctl {PORTCHANNEL_NAME} state", timeout=15)
+    if rc != 0:
+        return {}
+    result = {}
+    current_port = None
+    in_ports_section = False
+    in_runner_section = False
+    for line in out.splitlines():
+        # Detect 'ports:' section header
+        if re.match(r"^ports:$", line):
+            in_ports_section = True
+            continue
+        # Detect end of ports section (top-level 'runner:')
+        if re.match(r"^runner:$", line):
+            in_ports_section = False
+            continue
+        if not in_ports_section:
+            continue
+        # Port name: 2-space indent, no leading spaces in name
+        m = re.match(r"^  (\S+)$", line)
+        if m:
+            current_port = m.group(1)
+            in_runner_section = False
+            continue
+        # 'runner:' sub-section under a port (4-space indent)
+        if current_port and re.match(r"^    runner:$", line):
+            in_runner_section = True
+            continue
+        # 'state:' key inside runner sub-section (6-space indent)
+        if current_port and in_runner_section:
+            ms = re.match(r"^      state:\s+(\S+)$", line)
+            if ms:
+                result[current_port] = ms.group(1)
+    return result
+
+
+def _wait_for_member_state(ssh, port, expected_state, timeout):
+    """Poll teamdctl until port reaches expected_state or timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        members = _teamdctl_members(ssh)
+        if members.get(port) == expected_state:
+            return True
+        time.sleep(TEAMDCTL_POLL_INTERVAL)
+    return False
+
+
 # ------------------------------------------------------------------
 # teamd feature state
 # ------------------------------------------------------------------
 
 class TestTeamdFeature:
-    """Verify teamd container is running."""
 
     def test_teamd_feature_enabled(self, ssh):
         """teamd feature is enabled in CONFIG_DB."""
-        out, err, rc = ssh.run(
+        out, _, _ = ssh.run(
             "redis-cli -n 4 hget 'FEATURE|teamd' state", timeout=10
         )
         val = out.strip()
         print(f"  teamd feature state: {val!r}")
-        assert val == "enabled", (
-            f"teamd feature state={val!r}; expected 'enabled'.\n"
-            "Fix: sudo config feature state teamd enabled"
-        )
+        assert val == "enabled", f"teamd feature state={val!r}; expected 'enabled'"
 
     def test_teamd_container_running(self, ssh):
         """teamd Docker container is running."""
-        out, err, rc = ssh.run(
+        out, _, _ = ssh.run(
             "docker ps --format '{{.Names}}' --filter name=teamd", timeout=10
         )
-        assert "teamd" in out, (
-            "teamd container is not running.\n"
-            "Fix: sudo config feature state teamd enabled"
-        )
+        assert "teamd" in out, "teamd container is not running"
 
 
 # ------------------------------------------------------------------
@@ -156,53 +134,40 @@ class TestTeamdFeature:
 # ------------------------------------------------------------------
 
 class TestPortChannelConfig:
-    """Verify PortChannel1 exists in CONFIG_DB with correct members."""
 
     def test_portchannel_exists_in_config_db(self, ssh):
         """PORTCHANNEL|PortChannel1 exists in CONFIG_DB."""
-        out, _, rc = ssh.run(
+        out, _, _ = ssh.run(
             f"redis-cli -n 4 exists 'PORTCHANNEL|{PORTCHANNEL_NAME}'", timeout=10
         )
-        assert out.strip() == "1", (
-            f"{PORTCHANNEL_NAME} not found in CONFIG_DB.\n"
-            f"Fix: sudo config portchannel add {PORTCHANNEL_NAME}"
-        )
+        assert out.strip() == "1", f"{PORTCHANNEL_NAME} not in CONFIG_DB"
 
     def test_portchannel_admin_up(self, ssh):
         """PortChannel1 admin_status is 'up' in CONFIG_DB."""
-        out, _, rc = ssh.run(
+        out, _, _ = ssh.run(
             f"redis-cli -n 4 hget 'PORTCHANNEL|{PORTCHANNEL_NAME}' admin_status",
             timeout=10,
         )
-        val = out.strip()
-        print(f"  {PORTCHANNEL_NAME} admin_status: {val!r}")
-        assert val == "up"
+        assert out.strip() == "up", f"admin_status={out.strip()!r}"
+
+    def test_portchannel_has_no_ip(self, ssh):
+        """PortChannel1 has no IP address (L2 VLAN 999 only)."""
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 keys 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}|*'",
+            timeout=10,
+        )
+        assert not out.strip(), (
+            f"PortChannel1 has IP configured; expected L2-only: {out.strip()}"
+        )
 
     def test_portchannel_members_in_config_db(self, ssh):
         """Both member ports are in PORTCHANNEL_MEMBER table."""
         for port in LAG_MEMBERS:
-            out, _, rc = ssh.run(
-                f"redis-cli -n 4 exists "
-                f"'PORTCHANNEL_MEMBER|{PORTCHANNEL_NAME}|{port}'",
+            out, _, _ = ssh.run(
+                f"redis-cli -n 4 exists 'PORTCHANNEL_MEMBER|{PORTCHANNEL_NAME}|{port}'",
                 timeout=10,
             )
-            assert out.strip() == "1", (
-                f"{port} not a member of {PORTCHANNEL_NAME} in CONFIG_DB.\n"
-                f"Fix: sudo config portchannel member add {PORTCHANNEL_NAME} {port}"
-            )
-            print(f"  {PORTCHANNEL_NAME} member {port}: present")
-
-    def test_portchannel_ip_configured(self, ssh):
-        """PortChannel1 has IP address configured."""
-        out, _, rc = ssh.run(
-            f"redis-cli -n 4 keys 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}|*'",
-            timeout=10,
-        )
-        assert LAG_IP in out, (
-            f"{PORTCHANNEL_NAME} IP {LAG_IP} not in CONFIG_DB.\n"
-            f"Fix: sudo config interface ip add {PORTCHANNEL_NAME} {LAG_IP}"
-        )
-        print(f"  {PORTCHANNEL_NAME} IP: {LAG_IP}")
+            assert out.strip() == "1", f"{port} not a member of {PORTCHANNEL_NAME}"
 
 
 # ------------------------------------------------------------------
@@ -210,19 +175,14 @@ class TestPortChannelConfig:
 # ------------------------------------------------------------------
 
 class TestLACPState:
-    """Verify LACP is negotiated and both members are selected."""
 
     def test_portchannel_lacp_active_up(self, ssh):
         """PortChannel1 shows LACP(A)(Up) in portchannel summary."""
         summary = _portchannel_summary(ssh)
-        assert PORTCHANNEL_NAME in summary, (
-            f"{PORTCHANNEL_NAME} not in 'show interfaces portchannel' output"
-        )
+        assert PORTCHANNEL_NAME in summary
         protocol = summary[PORTCHANNEL_NAME]["protocol"]
         print(f"  {PORTCHANNEL_NAME} protocol: {protocol}")
-        assert "Up" in protocol, (
-            f"{PORTCHANNEL_NAME} protocol={protocol!r}; expected '(Up)'"
-        )
+        assert "Up" in protocol, f"protocol={protocol!r}; expected '(Up)'"
 
     def test_both_members_selected(self, ssh):
         """Both member ports show (S) = Selected in portchannel summary."""
@@ -230,30 +190,17 @@ class TestLACPState:
         assert PORTCHANNEL_NAME in summary
         members = summary[PORTCHANNEL_NAME]["members"]
         for port in LAG_MEMBERS:
-            assert port in members, (
-                f"{port} not listed in {PORTCHANNEL_NAME} members: {members}"
-            )
-            state = members[port]
-            print(f"  {port}: state={state!r}")
-            assert state == "S", (
-                f"{port} state={state!r}; expected 'S' (Selected)"
-            )
+            assert port in members, f"{port} not listed in {PORTCHANNEL_NAME} members"
+            assert members[port] == "S", f"{port} state={members[port]!r}; expected 'S'"
 
     def test_teamdctl_state_current(self, ssh):
         """teamdctl reports both ports as 'state: current' (LACP converged)."""
-        out, err, rc = ssh.run(
-            f"teamdctl {PORTCHANNEL_NAME} state", timeout=15
-        )
-        assert rc == 0, f"teamdctl state failed (rc={rc}): {err}"
-        for port in LAG_MEMBERS:
-            assert port in out, f"{port} not in teamdctl output"
+        out, err, rc = ssh.run(f"teamdctl {PORTCHANNEL_NAME} state", timeout=15)
+        assert rc == 0, f"teamdctl state failed: {err}"
         assert "state: current" in out, (
-            f"Expected 'state: current' in teamdctl output (LACP converged).\n"
-            f"Output:\n{out[:500]}"
+            f"Expected 'state: current' in teamdctl output\nOutput:\n{out[:500]}"
         )
-        # Verify runner is active
         assert "active: yes" in out, "teamd runner is not active"
-        print(f"  teamdctl: runner active, member states current")
 
 
 # ------------------------------------------------------------------
@@ -261,44 +208,25 @@ class TestLACPState:
 # ------------------------------------------------------------------
 
 class TestDBPropagation:
-    """Verify LAG state propagates through the SONiC DB pipeline."""
 
     def test_lag_table_in_app_db(self, ssh):
         """LAG_TABLE:PortChannel1 exists in APP_DB with oper_status=up."""
-        out, _, rc = ssh.run(
+        out, _, _ = ssh.run(
             f"redis-cli -n 0 hget 'LAG_TABLE:{PORTCHANNEL_NAME}' oper_status",
             timeout=10,
         )
-        val = out.strip()
-        print(f"  APP_DB LAG_TABLE oper_status: {val!r}")
-        assert val == "up", (
-            f"LAG_TABLE:{PORTCHANNEL_NAME} oper_status={val!r} in APP_DB"
-        )
+        assert out.strip() == "up", f"APP_DB LAG oper_status={out.strip()!r}"
 
     def test_lag_member_table_in_app_db(self, ssh):
         """LAG_MEMBER_TABLE entries exist in APP_DB for both members."""
         for port in LAG_MEMBERS:
-            out, _, rc = ssh.run(
-                f"redis-cli -n 0 hget "
-                f"'LAG_MEMBER_TABLE:{PORTCHANNEL_NAME}:{port}' status",
+            out, _, _ = ssh.run(
+                f"redis-cli -n 0 hget 'LAG_MEMBER_TABLE:{PORTCHANNEL_NAME}:{port}' status",
                 timeout=10,
             )
-            val = out.strip()
-            print(f"  APP_DB LAG_MEMBER {port} status: {val!r}")
-            assert val == "enabled", (
-                f"LAG_MEMBER_TABLE:{PORTCHANNEL_NAME}:{port} status={val!r}"
+            assert out.strip() == "enabled", (
+                f"LAG_MEMBER {port} status={out.strip()!r} in APP_DB"
             )
-
-    def test_lag_in_state_db(self, ssh):
-        """LAG_TABLE|PortChannel1 exists in STATE_DB."""
-        out, _, rc = ssh.run(
-            f"redis-cli -n 6 hgetall 'LAG_TABLE|{PORTCHANNEL_NAME}'",
-            timeout=10,
-        )
-        assert out.strip(), (
-            f"LAG_TABLE|{PORTCHANNEL_NAME} is empty or missing in STATE_DB"
-        )
-        print(f"  STATE_DB LAG_TABLE: present")
 
 
 # ------------------------------------------------------------------
@@ -306,7 +234,6 @@ class TestDBPropagation:
 # ------------------------------------------------------------------
 
 class TestASICDB:
-    """Verify SAI LAG and LAG_MEMBER objects in ASIC_DB."""
 
     def test_sai_lag_object_exists(self, ssh):
         """SAI_OBJECT_TYPE_LAG exists in ASIC_DB for PortChannel1."""
@@ -322,73 +249,59 @@ class TestASICDB:
             f"redis-cli -n 1 exists 'ASIC_STATE:SAI_OBJECT_TYPE_LAG:{oid}'",
             timeout=10,
         )
-        assert out.strip() == "1", (
-            f"SAI_OBJECT_TYPE_LAG:{oid} not in ASIC_DB"
-        )
-        print(f"  ASIC_DB LAG OID: {oid}")
+        assert out.strip() == "1", f"SAI_OBJECT_TYPE_LAG:{oid} not in ASIC_DB"
 
     def test_sai_lag_member_objects_exist(self, ssh):
-        """SAI_OBJECT_TYPE_LAG_MEMBER entries exist in ASIC_DB."""
+        """At least 2 SAI_OBJECT_TYPE_LAG_MEMBER entries in ASIC_DB."""
         out, _, _ = ssh.run(
             "redis-cli -n 1 keys 'ASIC_STATE:SAI_OBJECT_TYPE_LAG_MEMBER:*'",
             timeout=10,
         )
         members = [l for l in out.strip().splitlines() if l.strip()]
-        assert len(members) >= 2, (
-            f"Expected at least 2 LAG_MEMBER objects in ASIC_DB, found {len(members)}"
-        )
-        print(f"  ASIC_DB LAG_MEMBER count: {len(members)}")
+        assert len(members) >= 2, f"Expected >=2 LAG_MEMBER objects, found {len(members)}"
 
 
 # ------------------------------------------------------------------
-# L3 connectivity over LAG
+# L2 connectivity — LLDP over LAG
 # ------------------------------------------------------------------
 
 class TestLAGConnectivity:
-    """Verify IP connectivity over the port channel."""
+    """Verify L2 connectivity over the port channel via LLDP.
 
-    def test_portchannel_ip_in_show(self, ssh):
-        """PortChannel1 shows IP address in 'show ip interfaces'."""
-        out, _, rc = ssh.run("show ip interfaces", timeout=15)
-        assert rc == 0
-        assert PORTCHANNEL_NAME in out, (
-            f"{PORTCHANNEL_NAME} not in 'show ip interfaces' output"
-        )
-        assert "10.0.1.1" in out, (
-            f"IP 10.0.1.1 not shown for {PORTCHANNEL_NAME}"
-        )
-        print(f"  {PORTCHANNEL_NAME} IP visible in show ip interfaces")
+    PortChannel1 is VLAN 999 access with no IP. LLDP is used as the
+    L2 connectivity signal instead of ping.
+    """
 
-    def test_ping_peer_over_lag(self, ssh):
-        """Ping peer (10.0.1.0) over the port channel succeeds."""
-        out, err, rc = ssh.run(f"ping -c5 -W2 {PEER_IP}", timeout=20)
-        print(f"  Ping output:\n{out}")
-        assert rc == 0, f"Ping to {PEER_IP} failed (rc={rc}): {err}"
-        # Extract packet loss
-        m = re.search(r"(\d+)% packet loss", out)
-        assert m, f"Could not parse packet loss from ping output"
-        loss = int(m.group(1))
-        assert loss == 0, f"Ping to {PEER_IP}: {loss}% packet loss"
+    def test_lldp_neighbor_on_lag_member(self, ssh):
+        """LLDP neighbor (rabbit-lorax) is visible on Ethernet16 or Ethernet32."""
+        out, _, rc = ssh.run("show lldp neighbors", timeout=30)
+        assert rc == 0, f"show lldp neighbors failed: {out}"
+        lag_lldp = [
+            line for line in out.splitlines()
+            if any(p in line for p in LAG_MEMBERS)
+        ]
+        assert lag_lldp, (
+            "No LLDP neighbors found on Ethernet16 or Ethernet32.\n"
+            "PortChannel1 is active but LLDP frames are not reaching the peer.\n"
+            "Possible causes: LLDP container down, peer LLDP disabled."
+        )
+        print(f"  LLDP on LAG members: {len(lag_lldp)} entries found")
 
 
 # ------------------------------------------------------------------
-# LAG failover
+# LAG failover — teamdctl polling (no IP, no ping)
 # ------------------------------------------------------------------
 
 class TestLAGFailover:
     """Verify LAG survives a single member link failure.
 
-    This test shuts down Ethernet16, verifies the LAG stays up on
-    Ethernet32 alone, then restores Ethernet16 and verifies recovery.
+    Uses teamdctl state polling as the convergence signal.
+    No ping because PortChannel1 carries no IP (L2 VLAN 999).
     """
 
     @pytest.fixture(autouse=True)
     def _restore_lag_members(self, ssh):
-        """Ensure all LAG member ports are admin-up after each test.
-
-        If the test fails after shutting a member down, this fixture
-        brings it back up so the switch is not left in a degraded state.
-        """
+        """Ensure all LAG member ports are admin-up after the test."""
         yield
         for port in LAG_MEMBERS:
             out, _, _ = ssh.run(
@@ -399,62 +312,49 @@ class TestLAGFailover:
                 time.sleep(2)
 
     def test_failover_and_recovery(self, ssh):
-        """Shut one member, verify connectivity, restore, verify both selected."""
-        fail_port = LAG_MEMBERS[0]  # Ethernet16
-        survive_port = LAG_MEMBERS[1]  # Ethernet32
+        """Shut Ethernet16, assert Ethernet32 stays selected; restore, assert both selected."""
+        fail_port = "Ethernet16"
+        survive_port = "Ethernet32"
 
-        # --- Phase 1: shut down one member ---
-        _, _, rc = ssh.run(
-            f"sudo config interface shutdown {fail_port}", timeout=15
-        )
+        # Phase 1: shut down fail_port
+        _, _, rc = ssh.run(f"sudo config interface shutdown {fail_port}", timeout=15)
         assert rc == 0, f"Failed to shutdown {fail_port}"
-        time.sleep(5)  # wait for LACP to converge
 
-        # Verify LAG still up with one member
-        summary = _portchannel_summary(ssh)
-        assert PORTCHANNEL_NAME in summary, (
-            f"{PORTCHANNEL_NAME} disappeared after shutting {fail_port}"
+        # Wait for survive_port to remain 'current' in teamdctl (within 10s)
+        ok = _wait_for_member_state(ssh, survive_port, "current", TEAMDCTL_FAILOVER_TIMEOUT)
+        members = _teamdctl_members(ssh)
+        print(f"  After shutdown {fail_port}: teamdctl members={members}")
+        assert ok, (
+            f"{survive_port} did not remain 'current' within {TEAMDCTL_FAILOVER_TIMEOUT}s "
+            f"after shutting {fail_port}. Members: {members}"
         )
-        protocol = summary[PORTCHANNEL_NAME]["protocol"]
-        print(f"  After shutdown {fail_port}: protocol={protocol}")
-        assert "Up" in protocol, (
+
+        # Also verify PortChannel is still up
+        summary = _portchannel_summary(ssh)
+        assert "Up" in summary.get(PORTCHANNEL_NAME, {}).get("protocol", ""), (
             f"{PORTCHANNEL_NAME} went down after shutting {fail_port}"
         )
-        members = summary[PORTCHANNEL_NAME]["members"]
-        assert members.get(survive_port) == "S", (
-            f"{survive_port} not Selected after {fail_port} shutdown: {members}"
-        )
-        # Verify ping still works
-        out, _, rc = ssh.run(f"ping -c3 -W2 {PEER_IP}", timeout=15)
-        m = re.search(r"(\d+)% packet loss", out)
-        loss = int(m.group(1)) if m else 100
-        print(f"  Ping during failover: {loss}% loss")
-        assert loss == 0, f"Ping failed during failover: {loss}% loss"
 
-        # --- Phase 2: restore the member ---
-        _, _, rc = ssh.run(
-            f"sudo config interface startup {fail_port}", timeout=15
-        )
+        # Phase 2: restore fail_port
+        _, _, rc = ssh.run(f"sudo config interface startup {fail_port}", timeout=15)
         assert rc == 0, f"Failed to startup {fail_port}"
-        time.sleep(8)  # wait for LACP reconvergence
 
-        # Verify both members are back to Selected
-        summary = _portchannel_summary(ssh)
-        assert PORTCHANNEL_NAME in summary
-        members = summary[PORTCHANNEL_NAME]["members"]
-        for port in LAG_MEMBERS:
-            state = members.get(port, "MISSING")
-            print(f"  After recovery: {port} state={state}")
-            assert state == "S", (
-                f"{port} state={state!r} after recovery; expected 'S'"
-            )
+        # Wait for both members to return to 'current' (within 30s)
+        deadline = time.time() + TEAMDCTL_RECOVER_TIMEOUT
+        both_selected = False
+        while time.time() < deadline:
+            members = _teamdctl_members(ssh)
+            if all(members.get(p) == "current" for p in LAG_MEMBERS):
+                both_selected = True
+                break
+            time.sleep(TEAMDCTL_POLL_INTERVAL)
 
-        # Verify ping still works with both members
-        out, _, rc = ssh.run(f"ping -c3 -W2 {PEER_IP}", timeout=15)
-        m = re.search(r"(\d+)% packet loss", out)
-        loss = int(m.group(1)) if m else 100
-        assert loss == 0, f"Ping failed after recovery: {loss}% loss"
-        print(f"  Recovery complete: both members Selected, ping OK")
+        members = _teamdctl_members(ssh)
+        print(f"  After recovery: teamdctl members={members}")
+        assert both_selected, (
+            f"Both members did not return to 'current' within {TEAMDCTL_RECOVER_TIMEOUT}s. "
+            f"Members: {members}"
+        )
 
 
 # ------------------------------------------------------------------
@@ -462,20 +362,14 @@ class TestLAGFailover:
 # ------------------------------------------------------------------
 
 class TestStandalonePortsUnaffected:
-    """Verify that non-LAG connected ports remain operational."""
 
     def test_standalone_ports_still_up(self, ssh):
         """Ethernet48 and Ethernet112 (not in LAG) remain oper=up."""
         out, _, rc = ssh.run("show interfaces status", timeout=30)
         assert rc == 0
         for port in STANDALONE_PORTS:
-            m = re.search(
-                rf"\s*{port}\s+.*?\s+(up|down)\s+(up|down)", out
-            )
+            m = re.search(rf"\s*{port}\s+.*?\s+(up|down)\s+(up|down)", out)
             assert m, f"Could not parse status for {port}"
             oper = m.group(1)
-            admin = m.group(2)
-            print(f"  {port}: oper={oper} admin={admin}")
-            assert oper == "up", (
-                f"{port} oper={oper!r} — LAG config should not affect standalone ports"
-            )
+            print(f"  {port}: oper={oper}")
+            assert oper == "up", f"{port} oper={oper!r} — standalone port should be up"

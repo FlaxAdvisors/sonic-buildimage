@@ -29,6 +29,7 @@ import configparser
 import json
 import os
 import re
+import time
 import pytest
 
 
@@ -41,7 +42,10 @@ def _load_links_config():
     config = configparser.ConfigParser()
     config.read(cfg_path)
 
-    default_ports = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
+    # Ethernet16 and Ethernet32 are PortChannel1 members (topology.json) —
+    # their admin_status and oper_status are PortChannel-managed, not standalone.
+    # Use the two non-PortChannel connected ports as defaults.
+    default_ports = ["Ethernet48", "Ethernet112"]
     default_peer   = "10.0.1.0"
 
     if not config.has_section("links"):
@@ -55,26 +59,6 @@ def _load_links_config():
 
 # Load once at module level — consistent across all tests in this file
 CONNECTED_PORTS, PEER_IP = _load_links_config()
-
-
-@pytest.fixture(scope="session", autouse=True)
-def configure_rsfec(ssh):
-    """Configure RS-FEC on connected ports; remove after stage completes."""
-    for port in CONNECTED_PORTS:
-        ssh.run(f"sudo config interface fec {port} rs", timeout=15)
-    # Wait for links to come up (up to 30 s)
-    import time
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        out, _, rc = ssh.run("show interfaces status 2>&1", timeout=15)
-        up_ports = [l for l in out.splitlines() if any(p in l for p in CONNECTED_PORTS) and " up " in l]
-        if len(up_ports) >= 2:  # at least 2 of 4 up (Ethernet104/108 blocked)
-            break
-        time.sleep(3)
-    yield
-    # Teardown: remove FEC
-    for port in CONNECTED_PORTS:
-        ssh.run(f"sudo config interface fec {port} none", timeout=15)
 
 
 # ------------------------------------------------------------------
@@ -277,7 +261,6 @@ def test_sys2_led_green_when_link_up(ssh):
         # ledd may have lost track of port states — restart and re-check
         print("  SYS2 LED not green; restarting ledd to resync port states...")
         ssh.run("docker exec pmon supervisorctl restart ledd", timeout=15)
-        import time
         time.sleep(3)
         val = _read_sys2_led(ssh)
         print(f"  SYS2 LED after ledd restart: {f'0x{val:02x}' if val is not None else 'read failed'}")
@@ -350,3 +333,59 @@ def test_lldp_neighbor_port_mapping(ssh):
             f"but found:\n{iface_data[port]}"
         )
         print(f"  {port} → {expected_peer_port} ✓")
+
+
+# ------------------------------------------------------------------
+# Optical port configuration (Ethernet100/104/108/116)
+# ------------------------------------------------------------------
+
+OPTICAL_PORTS = ["Ethernet100", "Ethernet104", "Ethernet108", "Ethernet116"]
+
+
+def test_optical_ports_fec_rs_in_config_db(ssh):
+    """Optical ports (Ethernet100/104/108/116) have fec=rs in CONFIG_DB.
+
+    Set by tools/deploy.py OpticalTask. All four ports use RS-FEC
+    regardless of module type (SR4, LR4, CWDM4).
+    """
+    for port in OPTICAL_PORTS:
+        out, _, rc = ssh.run(
+            f"redis-cli -n 4 hget 'PORT|{port}' fec", timeout=10
+        )
+        fec = out.strip()
+        print(f"  {port}: fec={fec!r}")
+        assert fec == "rs", (
+            f"{port}: fec={fec!r}, expected 'rs'.\n"
+            "Fix: tools/deploy.py --task optical"
+        )
+
+
+def test_optical_ports_admin_up(ssh):
+    """Optical ports are admin-up in CONFIG_DB."""
+    for port in OPTICAL_PORTS:
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 hget 'PORT|{port}' admin_status", timeout=10
+        )
+        admin = out.strip()
+        print(f"  {port}: admin_status={admin!r}")
+        assert admin == "up", (
+            f"{port}: admin_status={admin!r}, expected 'up'.\n"
+            f"Fix: sudo config interface startup {port}"
+        )
+
+
+def test_ethernet108_lldp_neighbor(ssh):
+    """Ethernet108 (SR4 fiber) has an LLDP neighbor.
+
+    Confirms the SR4 module is functioning and LLDP frames transit the fiber.
+    Skipped if no neighbor found (physical connectivity issue, not a platform bug).
+    """
+    out, _, rc = ssh.run("show lldp neighbors", timeout=30)
+    assert rc == 0, f"show lldp neighbors failed: {out}"
+
+    if "Ethernet108" not in out:
+        pytest.skip(
+            "Ethernet108 has no LLDP neighbor — fiber may be disconnected "
+            "or peer LLDP disabled. Skipping (not a platform failure)."
+        )
+    print(f"  Ethernet108: LLDP neighbor present")

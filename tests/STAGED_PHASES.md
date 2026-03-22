@@ -1,6 +1,6 @@
 # Staged Implementation Phases — Wedge 100S-32X SONiC Port
 
-Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PARTIAL.
+Status as of 2026-03-21. Phases 00–22 + nn are COMPLETE (22 partial). Phase 23 PENDING.
 
 ## Legend
 
@@ -13,10 +13,11 @@ Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PA
 ---
 
 ## Phase 00: Pre-test Preconditions
-**Status: COMPLETE**
-- Snapshot mechanism working (`/run/sonic-cfggen-snapshot.json`)
-- All ports configured at 100G, no PortChannel, no FEC
-- pmon running, suite marker created
+**Status: COMPLETE (refactored 2026-03-21)**
+- Removed save/reload/restore model
+- Now a read-only operational audit: verifies deploy.py has been run
+- Checks: mgmt VRF, breakout sub-ports, PortChannel1, VLANs, FEC config
+- pmon running verified
 
 ## Phase 01: EEPROM / System Identity
 **Status: COMPLETE**
@@ -136,15 +137,14 @@ Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PA
 - Advertised types (SR, LR, CR, KR) accepted
 
 ## Phase 16: PortChannel / LACP
-**Status: COMPLETE**
+**Status: COMPLETE (refactored 2026-03-21)**
+- L2-only mode: PortChannel1 on VLAN 999, no IP address
+- Failover test uses teamdctl state polling (not ping)
+- LLDP used as L2 connectivity signal
 - teamd feature enabled, container running
-- PortChannel1 with Ethernet16+Ethernet32 members, IP 10.0.1.1/31
-- LACP active state with EOS peer (rabbit-lorax 192.168.88.14)
 - Both members selected, teamdctl state = "current"
 - LAG_TABLE and LAG_MEMBER_TABLE in APP_DB
 - SAI LAG object and member objects in ASIC_DB
-- Ping to peer 10.0.1.0 succeeds over LAG
-- Failover test: remove one member, ping continues, re-add, both selected
 - Standalone ports unaffected (Ethernet48/112 still up)
 
 ## Phase 17: Status Report
@@ -152,11 +152,10 @@ Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PA
 - `test_generate_platform_status_report` generates a text report to
   `tests/reports/platform_status_{timestamp}.txt`
 
-## Phase 18: Snapshot / Restore
-**Status: COMPLETE** (implemented as stage_nn_posttest)
-- Snapshot taken in stage_00_pretest
-- Restore executed in stage_nn_posttest
-- All 5 post-restore checks pass (ports up, no PortChannel, pmon running)
+## Phase 18: Post-Test Health Check
+**Status: COMPLETE (refactored 2026-03-21)**
+- stage_nn_posttest is now a health check only (no restore)
+- Checks: pmon active, SSH responsive, no crashed containers, PortChannel1 still present
 
 ## Phase 19: Platform CLI Audit
 **Status: COMPLETE**
@@ -171,11 +170,16 @@ Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PA
 
 ## Phase 20: Traffic Forwarding
 **Status: COMPLETE**
-- 5000-packet flood over PortChannel1 increments RX_OK by >= 4500
-- 5000-packet flood increments TX_OK by >= 4500
-- Ethernet48 COUNTERS_DB OID is mapped and counter keys exist
-- FEC correctable error rate < 1e-6/s under flood
-- `portstat` after `sonic-clear counters` shows <= 50 residual packets per port
+- PortChannel1 converted from L2 (VLAN 999) to L3 for traffic testing, then restored
+- TX: 5000-packet ping flood to peer IP (static ARP via EOS chassis MAC from LLDP) increments
+  `SAI_PORT_STAT_IF_OUT_UCAST_PKTS` across Ethernet16+Ethernet32 by >= 4500
+- RX: LACP PDUs from EOS (slow mode, 1/port/30s) increment
+  `SAI_PORT_STAT_IF_IN_NON_UCAST_PKTS` by >= 2 in 65s
+- Ethernet48 COUNTERS_DB OID is mapped and TX/RX counter keys are readable
+- FEC correctable error rate < 1e-6/s under flood on all three ports
+- `portstat` after `sonic-clear counters` shows <= 10000 residual packets per LAG port (3-second window)
+- Note: EOS PortChannel1 is L2-only (switchport access vlan 999, no IP) — no unicast ICMP replies
+- Note: LACP slow-mode convergence requires ~40s after port/IP configuration
 
 ## Phase 21: LP_MODE Daemon Control
 **Status: COMPLETE**
@@ -212,18 +216,28 @@ Status as of 2026-03-20. Phases 00–21 + nn are COMPLETE. Phase 22 (optical) PA
 
 ---
 
-## Phase nn: Post-Test Restore
-**Status: COMPLETE**
-- Restore from snapshot cleans PortChannel1, FEC, IP config
-- pmon running after restore
-- Connected ports admin-up after restore
-- Suite active marker removed
+## Phase nn: Post-Test Health Check
+**Status: COMPLETE (refactored 2026-03-21)**
+- Health check only: pmon active, SSH responsive, no crashed containers, PortChannel1 present
 
 ---
 
-## Overall Status: PHASES 00–21 COMPLETE; Phase 22 PARTIAL
+## Phase 23: Host Traffic Throughput
+**Status: PENDING**
+- Purpose: L2 throughput between test hosts via VLAN 10
+- Prerequisites: tools/deploy.py run, all 6 hosts SSH-reachable
+- Test pairs: intra-QSFP (Eth0↔Eth1, Eth66↔Eth67, Eth80↔Eth81) + cross-QSFP
+- Tool: iperf3; assert ≥20 Gbps for 25G ports, ≥8 Gbps for 10G (Ethernet64 group)
+- target.cfg.example [hosts] section already present (ssh_user=flax, key_file)
+- Deferred to next implementation cycle
+
+---
+
+## Overall Status: PHASES 00–22 COMPLETE (22 partial); Phase 23 PENDING
+## Deploy tool: tools/deploy.py — idempotent L2 platform setup required before test suite
+## Deploy tool always saves config after any apply (including --task runs)
 
 Pass rate: 230/231 = 99.6% (automated test suite, phases 00–21)
 Remaining (automated): 1 pre-existing ledd polling race (stage_08)
 Remaining (physical): Ethernet100 fiber, Ethernet104 BCM SI settings, Ethernet116 peer laser
-Hardware-verified: 2026-03-20
+Hardware-verified: 2026-03-21

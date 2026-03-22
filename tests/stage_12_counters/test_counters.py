@@ -107,7 +107,12 @@ def test_counters_db_oid_has_stat_entries(ssh):
 
 
 def test_counters_key_fields_present(ssh):
-    """COUNTERS_DB has all expected RX and TX stat fields for Ethernet0."""
+    """COUNTERS_DB has all expected RX and TX stat fields for a non-breakout 100G port.
+
+    Breakout sub-ports (Ethernet0-3 etc.) only expose SAI_PORT_STAT_IN/OUT_DROPPED_PKTS
+    on this Tomahawk SAI.  The full IF counter set is only available on non-breakout
+    100G ports such as Ethernet16.
+    """
     EXPECTED_STATS = [
         "SAI_PORT_STAT_IF_IN_OCTETS",
         "SAI_PORT_STAT_IF_IN_UCAST_PKTS",
@@ -118,8 +123,10 @@ def test_counters_key_fields_present(ssh):
         "SAI_PORT_STAT_IF_OUT_ERRORS",
         "SAI_PORT_STAT_IF_OUT_DISCARDS",
     ]
+    # Ethernet16 is a non-breakout 100G port with the full SAI counter set.
+    # Breakout sub-ports (e.g. Ethernet0) only have IN/OUT_DROPPED_PKTS on this SAI.
     out, err, rc = ssh.run(
-        "redis-cli -n 2 hget COUNTERS_PORT_NAME_MAP Ethernet0", timeout=10
+        "redis-cli -n 2 hget COUNTERS_PORT_NAME_MAP Ethernet16", timeout=10
     )
     oid = out.strip()
     out2, _, _ = ssh.run(f"redis-cli -n 2 hkeys 'COUNTERS:{oid}'", timeout=15)

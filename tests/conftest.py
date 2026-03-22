@@ -27,8 +27,37 @@ def pytest_addoption(parser):
     )
 
 
+class _DurationPlugin:
+    """Write per-test elapsed times to tests/timing.log.
+
+    Each line: "<elapsed_s>\t<outcome>\t<nodeid>"
+    Sorted fastest-to-slowest for easy diagnosis of slow tests.
+    """
+
+    def __init__(self, config):
+        self._config = config
+        log_path = os.path.join(os.path.dirname(__file__), "timing.log")
+        self._log = open(log_path, "w", buffering=1)  # line-buffered
+        self._log.write("# elapsed   outcome  nodeid\n")
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_runtest_logreport(self, report):
+        if report.when != "call":
+            return
+        outcome = (
+            "PASSED"  if report.passed  else
+            "FAILED"  if report.failed  else
+            "SKIPPED"
+        )
+        self._log.write(f"{report.duration:7.2f}s  {outcome:<7}  {report.nodeid}\n")
+
+    def pytest_sessionfinish(self, session, exitstatus):
+        self._log.close()
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: mark test as slow-running")
+    config.pluginmanager.register(_DurationPlugin(config), "duration_plugin")
 
 
 def pytest_sessionstart(session):
@@ -48,7 +77,6 @@ def pytest_sessionstart(session):
             returncode=2,
         )
 
-    print(f"\n[target] Connecting to device using {cfg_path} …", flush=True)
     try:
         client = SSHClient(cfg_path)
         client.connect()
@@ -59,7 +87,6 @@ def pytest_sessionstart(session):
             returncode=2,
         )
 
-    # Quick sanity — confirm the shell is alive and print a banner.
     out, _, rc = client.run("uname -n && uname -r", timeout=10)
     if rc != 0:
         client.close()
@@ -69,17 +96,94 @@ def pytest_sessionstart(session):
             returncode=2,
         )
 
-    hostname, kernel = (out.strip().splitlines() + ["", ""])[:2]
-    print(f"[target] Connected  host={hostname}  kernel={kernel}\n", flush=True)
+    # ── Assertive pre-checks ──────────────────────────────────────────────
+    # These fail fast before any test collects, directing the user to
+    # run tools/deploy.py if the switch is not in operational state.
+
+    # 1. pmon running
+    out, _, rc = client.run("sudo systemctl is-active pmon 2>&1", timeout=15)
+    if rc != 0 or "active" not in out:
+        client.close()
+        pytest.exit(
+            "\n[target] pmon is not active.\n"
+            "Run: sudo systemctl start pmon\n",
+            returncode=2,
+        )
+
+    # 2. mgmt VRF present
+    out, _, rc = client.run("ip vrf show", timeout=10)
+    if "mgmt" not in out:
+        client.close()
+        pytest.exit(
+            "\n[target] mgmt VRF missing — run: tools/deploy.py\n",
+            returncode=3,
+        )
+
+    # 3. Breakout sub-ports in COUNTERS_PORT_NAME_MAP (ASIC_DB DB2)
+    _EXPECTED_SUBPORTS = [
+        "Ethernet0","Ethernet1","Ethernet2","Ethernet3",
+        "Ethernet64","Ethernet65","Ethernet66","Ethernet67",
+        "Ethernet80","Ethernet81","Ethernet82","Ethernet83",
+    ]
+    out, _, _ = client.run(
+        "redis-cli -n 2 HGETALL COUNTERS_PORT_NAME_MAP", timeout=15
+    )
+    missing_subports = [p for p in _EXPECTED_SUBPORTS if p not in out.split()]
+    if missing_subports:
+        client.close()
+        pytest.exit(
+            f"\n[target] breakout sub-ports missing: {missing_subports}\n"
+            "Run: tools/deploy.py --task breakout\n",
+            returncode=3,
+        )
+
+    # 4. PortChannel1 present in CONFIG_DB
+    out, _, _ = client.run(
+        r"redis-cli -n 4 EXISTS 'PORTCHANNEL|PortChannel1'", timeout=10
+    )
+    if out.strip() != "1":
+        client.close()
+        pytest.exit(
+            "\n[target] PortChannel1 missing — run: tools/deploy.py\n",
+            returncode=3,
+        )
+
+    # 5. VLAN 10 and VLAN 999 present in CONFIG_DB
+    out10, _, _ = client.run(
+        r"redis-cli -n 4 EXISTS 'VLAN|Vlan10'", timeout=10
+    )
+    out999, _, _ = client.run(
+        r"redis-cli -n 4 EXISTS 'VLAN|Vlan999'", timeout=10
+    )
+    if out10.strip() != "1" or out999.strip() != "1":
+        client.close()
+        pytest.exit(
+            "\n[target] VLANs missing (need Vlan10 and Vlan999) — run: tools/deploy.py\n",
+            returncode=3,
+        )
+
+    # Pre-checks passed — no banner; failures above already call pytest.exit()
 
     _SSH_CLIENT = client
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Close the SSH connection after all tests complete."""
+    """Close the SSH connection and run end-of-session health check."""
     global _SSH_CLIENT
     if _SSH_CLIENT is not None:
-        _SSH_CLIENT.close()
+        client = _SSH_CLIENT
+        # Health check
+        out, _, rc = client.run("sudo systemctl is-active pmon 2>&1", timeout=10)
+        if rc != 0:
+            print("\n[target] WARNING: pmon is not active at session end.", flush=True)
+        # Check for crashed containers
+        out, _, _ = client.run(
+            "docker ps --format '{{.Names}} {{.Status}}' | grep -E 'Exited|Error' || true",
+            timeout=10,
+        )
+        if out.strip():
+            print(f"\n[target] WARNING: crashed containers:\n{out.strip()}", flush=True)
+        client.close()
         _SSH_CLIENT = None
 
 

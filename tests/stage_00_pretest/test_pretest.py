@@ -1,94 +1,113 @@
-"""Stage 00 — Pre-Test: Save user config and apply clean-boot template.
+"""Stage 00 — Pre-Test: Operational state audit.
 
-This stage performs the config save + reload, then verifies the resulting
-state matches the clean-boot specification. Any failure calls pytest.exit()
-to abort the entire test suite before any test stage runs.
+Verifies that tools/deploy.py has been run and the switch is in the
+expected operational state before any functional tests execute.
 
-Run by: run_tests.py (injected as first stage for any stage selection).
+Failure here means "run tools/deploy.py" — these are NOT test failures
+in the traditional sense; they indicate missing prerequisite config.
 """
 
-import json
-import os
-import sys
-import time
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from lib.prepost import save_and_reload_clean, SNAPSHOT_PATH
-
-NUM_PORTS = 32
-EXPECTED_SPEED = "100000"
-
-
-@pytest.fixture(scope="session", autouse=True)
-def pretest_setup(ssh):
-    """Save config and apply clean-boot template. Aborts suite on failure."""
-    try:
-        save_and_reload_clean(ssh, timeout=120)
-    except Exception as exc:
-        pytest.exit(
-            f"\n[stage_00] Pre-test setup failed: {exc}\n"
-            "Cannot continue — target is in unknown state.",
-            returncode=3,
-        )
-
-
-def test_snapshot_exists(ssh):
-    """Pre-test snapshot file was created."""
-    out, err, rc = ssh.run(f"test -f {SNAPSHOT_PATH} && echo OK", timeout=10)
-    assert rc == 0 and "OK" in out, f"Snapshot not found at {SNAPSHOT_PATH}"
-
-
-def test_all_ports_100g(ssh):
-    """All 32 ports have speed=100000 in CONFIG_DB after clean reload."""
-    out, err, rc = ssh.run(
-        "sonic-cfggen -d --var-json PORT 2>&1", timeout=30
-    )
-    assert rc == 0, f"sonic-cfggen failed: {err}"
-    import json
-    ports = json.loads(out)
-    assert len(ports) == NUM_PORTS, f"Expected {NUM_PORTS} PORT entries, got {len(ports)}"
-    wrong = {k: v.get("speed") for k, v in ports.items() if v.get("speed") != EXPECTED_SPEED}
-    assert not wrong, f"Ports not at {EXPECTED_SPEED} speed: {wrong}"
-
-
-def test_no_portchannel(ssh):
-    """No PortChannel interfaces exist in clean state."""
-    out, err, rc = ssh.run("show interfaces portchannel 2>&1", timeout=30)
-    assert "PortChannel" not in out, (
-        f"PortChannel found in clean state:\n{out}\n"
-        "stage_16 is responsible for creating PortChannel1."
-    )
-
-
-def test_no_port_fec(ssh):
-    """No port-level FEC is configured in clean state."""
-    out, err, rc = ssh.run(
-        "redis-cli -n 4 keys 'PORT|*' | xargs -I{} redis-cli -n 4 hget {} fec 2>/dev/null",
-        timeout=30,
-    )
-    fec_values = [l.strip() for l in out.splitlines() if l.strip() and l.strip() != "none"]
-    assert not fec_values, f"Unexpected FEC in clean state: {fec_values}"
-
-
-def test_breakout_cfg_seeded(ssh):
-    """BREAKOUT_CFG is populated for all 32 ports."""
-    out, err, rc = ssh.run(
-        "redis-cli -n 4 keys 'BREAKOUT_CFG|*' | wc -l", timeout=15
-    )
-    count = int(out.strip()) if out.strip().isdigit() else 0
-    assert count >= NUM_PORTS, (
-        f"BREAKOUT_CFG has {count} entries, expected >= {NUM_PORTS}"
-    )
+CONNECTED_PORTS = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
+BREAKOUT_SUBPORTS = [
+    "Ethernet0", "Ethernet1", "Ethernet2", "Ethernet3",
+    "Ethernet64", "Ethernet65", "Ethernet66", "Ethernet67",
+    "Ethernet80", "Ethernet81", "Ethernet82", "Ethernet83",
+]
 
 
 def test_pmon_running(ssh):
-    """pmon service is active after config reload."""
-    out, err, rc = ssh.run("sudo systemctl is-active pmon", timeout=15)
-    assert rc == 0, f"pmon is not active: {out.strip()}"
+    """pmon service is active."""
+    out, _, rc = ssh.run("sudo systemctl is-active pmon", timeout=15)
+    assert rc == 0, f"pmon is not active: {out.strip()}\nFix: sudo systemctl start pmon"
 
 
-def test_suite_active_marker(ssh):
-    """Test suite active marker file exists."""
-    out, err, rc = ssh.run("test -f /run/wedge100s/test_suite_active && echo OK", timeout=5)
-    assert rc == 0, "Suite active marker /run/wedge100s/test_suite_active not found"
+def test_mgmt_vrf_present(ssh):
+    """mgmt VRF is configured."""
+    out, _, rc = ssh.run("ip vrf show", timeout=10)
+    assert "mgmt" in out, "mgmt VRF missing — run: tools/deploy.py"
+
+
+def test_breakout_subports_in_asic_db(ssh):
+    """All 12 breakout sub-ports are present in COUNTERS_PORT_NAME_MAP (ASIC_DB)."""
+    out, _, _ = ssh.run(
+        "redis-cli -n 2 HGETALL COUNTERS_PORT_NAME_MAP", timeout=15
+    )
+    present = set(out.split())
+    missing = [p for p in BREAKOUT_SUBPORTS if p not in present]
+    assert not missing, (
+        f"Breakout sub-ports missing in ASIC_DB: {missing}\n"
+        "Fix: tools/deploy.py --task breakout"
+    )
+
+
+def test_portchannel1_in_config_db(ssh):
+    """PortChannel1 exists in CONFIG_DB."""
+    out, _, _ = ssh.run(
+        r"redis-cli -n 4 EXISTS 'PORTCHANNEL|PortChannel1'", timeout=10
+    )
+    assert out.strip() == "1", (
+        "PortChannel1 missing in CONFIG_DB — run: tools/deploy.py"
+    )
+
+
+def test_portchannel1_has_no_ip(ssh):
+    """PortChannel1 has no IP address (L2 VLAN 999 only)."""
+    out, _, _ = ssh.run(
+        r"redis-cli -n 4 keys 'PORTCHANNEL_INTERFACE|PortChannel1|*'", timeout=10
+    )
+    assert not out.strip(), (
+        f"PortChannel1 has IP configured (L2 only expected): {out.strip()}\n"
+        "Fix: tools/deploy.py --task portchannel"
+    )
+
+
+def test_vlan10_and_999_exist(ssh):
+    """VLAN 10 and VLAN 999 are present in CONFIG_DB."""
+    for vid in (10, 999):
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 EXISTS 'VLAN|Vlan{vid}'", timeout=10
+        )
+        assert out.strip() == "1", (
+            f"VLAN {vid} missing in CONFIG_DB — run: tools/deploy.py"
+        )
+
+
+def test_vlan10_has_breakout_members(ssh):
+    """All 12 breakout sub-ports are VLAN 10 members."""
+    missing = []
+    for port in BREAKOUT_SUBPORTS:
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 EXISTS 'VLAN_MEMBER|Vlan10|{port}'", timeout=10
+        )
+        if out.strip() != "1":
+            missing.append(port)
+    assert not missing, (
+        f"Ports missing from VLAN 10: {missing}\nFix: tools/deploy.py --task vlans"
+    )
+
+
+def test_connected_ports_admin_up(ssh):
+    """Connected uplink ports (Ethernet16/32/48/112) are admin-up."""
+    for port in CONNECTED_PORTS:
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 hget 'PORT|{port}' admin_status", timeout=10
+        )
+        assert out.strip() == "up", (
+            f"{port} admin_status={out.strip()!r} — expected 'up'\n"
+            f"Fix: sudo config interface startup {port}"
+        )
+
+
+def test_optical_ports_fec_configured(ssh):
+    """Optical ports (Ethernet100/104/108/116) have FEC=rs in CONFIG_DB."""
+    optical = ["Ethernet100", "Ethernet104", "Ethernet108", "Ethernet116"]
+    for port in optical:
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 hget 'PORT|{port}' fec", timeout=10
+        )
+        assert out.strip() == "rs", (
+            f"{port} fec={out.strip()!r} — expected 'rs'\n"
+            f"Fix: tools/deploy.py --task optical"
+        )

@@ -37,7 +37,7 @@ def _present_ports(ssh):
 def _daemon_tick(ssh):
     """Force one daemon poll cycle and wait for it to complete."""
     ssh.run(
-        "wedge100s-i2c-daemon poll-presence",
+        "sudo wedge100s-i2c-daemon poll-presence",
         timeout=30,
     )
     time.sleep(0.5)
@@ -103,13 +103,13 @@ class TestLpmodeDaemon:
 
         # Teardown: always restore to lpmode=0 even if assertions fail mid-test.
         def _restore():
-            ssh.run(f"rm -f {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
-            ssh.run(f"echo 0 > {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
-            ssh.run("wedge100s-i2c-daemon poll-presence", timeout=30)
+            ssh.run(f"sudo rm -f {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
+            ssh.run(f"sudo bash -c 'echo 0 > {RUN_DIR}/sfp_{port}_lpmode_req'", timeout=5)
+            ssh.run("sudo wedge100s-i2c-daemon poll-presence", timeout=30)
 
         try:
             # Request LP_MODE assert
-            ssh.run(f"echo 1 > {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
+            ssh.run(f"sudo bash -c 'echo 1 > {RUN_DIR}/sfp_{port}_lpmode_req'", timeout=5)
             _daemon_tick(ssh)
 
             # State file should now be "1", req file should be gone
@@ -143,12 +143,13 @@ class TestLpmodeDaemon:
         )
         expected_lpmode = file_val.strip() == "1"
 
-        # Read via platform API
+        # Read via platform API (chassis._sfp_list has None sentinel at index 0,
+        # so physical port N maps to get_sfp(N+1))
         api_out, _, rc = ssh.run(
             f"python3 -c \""
             f"from sonic_platform.platform import Platform; "
             f"p = Platform(); "
-            f"sfp = p.get_chassis().get_sfp({port}); "
+            f"sfp = p.get_chassis().get_sfp({port + 1}); "
             f"print(sfp.get_lpmode())"
             f"\"",
             timeout=15,
@@ -170,17 +171,18 @@ class TestLpmodeDaemon:
         port = present[0]
 
         def _restore():
-            ssh.run(f"rm -f {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
-            ssh.run(f"echo 0 > {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
-            ssh.run("wedge100s-i2c-daemon poll-presence", timeout=30)
+            ssh.run(f"sudo rm -f {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
+            ssh.run(f"sudo bash -c 'echo 0 > {RUN_DIR}/sfp_{port}_lpmode_req'", timeout=5)
+            ssh.run("sudo wedge100s-i2c-daemon poll-presence", timeout=30)
 
         try:
-            # Call set_lpmode(True) via platform API
+            # Call set_lpmode(True) via platform API (needs sudo to write req file;
+            # chassis uses None sentinel at index 0, so physical port N → get_sfp(N+1))
             out, _, rc = ssh.run(
-                f"python3 -c \""
+                f"sudo python3 -c \""
                 f"from sonic_platform.platform import Platform; "
                 f"p = Platform(); "
-                f"sfp = p.get_chassis().get_sfp({port}); "
+                f"sfp = p.get_chassis().get_sfp({port + 1}); "
                 f"print(sfp.set_lpmode(True))"
                 f"\"",
                 timeout=15,

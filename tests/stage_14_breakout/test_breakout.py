@@ -27,22 +27,10 @@ import time
 import pytest
 
 
-# Port used for speed-change tests — disconnected, safe to modify
-SPEED_TEST_PORT = "Ethernet0"
-
-BREAKOUT_PORT = SPEED_TEST_PORT  # Same port used for breakout testing
-
-
-@pytest.fixture(scope="session", autouse=True)
-def stage14_setup_teardown(ssh):
-    """Ensure port is in 1x100G before testing; restore after."""
-    # Ensure starting in 1x100G
-    ssh.run(f"sudo config interface breakout {BREAKOUT_PORT} '1x100G[40G]' -y -f", timeout=60)
-    time.sleep(5)
-    yield
-    # Restore to 1x100G after breakout tests
-    ssh.run(f"sudo config interface breakout {BREAKOUT_PORT} '1x100G[40G]' -y -f", timeout=60)
-    time.sleep(5)
+# Ethernet4: Port 2, lanes 113-116, not in operational breakout, no connected hosts.
+# Safe to modify speed and break out for testing.
+SPEED_TEST_PORT = "Ethernet4"
+BREAKOUT_PORT = SPEED_TEST_PORT
 
 NUM_PORTS = 32
 
@@ -411,8 +399,12 @@ class TestBreakoutCli:
         Ethernet64/Ethernet80 in 4x25G mode) to coexist with the test
         suite without causing false failures.
         """
+        # Skip operational breakout parents — these are intentionally not 1x100G
+        operational_breakout_parents = {"Ethernet0", "Ethernet64", "Ethernet80"}
         saved = {}
         for port in PARENT_PORTS:
+            if port in operational_breakout_parents:
+                continue
             out, _, rc = ssh.run(
                 f"redis-cli -n 4 hget 'BREAKOUT_CFG|{port}' brkout_mode",
                 timeout=10,
@@ -505,22 +497,25 @@ class TestBreakoutCli:
         )
 
     def test_breakout_cfg_current_mode(self, ssh):
-        """All ports in BREAKOUT_CFG show current mode 1x100G[40G]."""
+        """All non-operational ports in BREAKOUT_CFG show current mode 1x100G[40G]."""
+        # Ethernet0, 64, 80 are operational breakout parents — skip them
+        operational_breakout_parents = {"Ethernet0", "Ethernet64", "Ethernet80"}
         issues = []
         for port in PARENT_PORTS:
+            if port in operational_breakout_parents:
+                continue
             out, _, rc = ssh.run(
                 f"redis-cli -n 4 hget 'BREAKOUT_CFG|{port}' brkout_mode",
                 timeout=10,
             )
             mode = out.strip()
             if not mode:
-                continue  # Skip if BREAKOUT_CFG not populated
+                continue
             if mode != "1x100G[40G]":
                 issues.append(f"  {port}: brkout_mode={mode!r}")
         if not issues:
-            print(f"\n  All ports in 1x100G[40G] mode")
+            print(f"\n  All non-operational ports in 1x100G[40G] mode")
         assert not issues, (
             f"Unexpected breakout modes in BREAKOUT_CFG:\n"
             + "\n".join(issues)
-            + "\nThis may indicate a port was broken out and not reverted."
         )

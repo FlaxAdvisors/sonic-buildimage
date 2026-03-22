@@ -19,6 +19,8 @@ import glob
 import os
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET
 
 TESTS_DIR   = os.path.dirname(os.path.abspath(__file__))
 STAGE_GLOB  = os.path.join(TESTS_DIR, "stage_*")
@@ -128,22 +130,145 @@ def _run_report(stage_names, cfg_path):
 # Default mode: pytest pass/fail
 # ---------------------------------------------------------------------------
 
+def _should_abort(tests: int, passed: int, skipped: int, xfailed: int) -> bool:
+    """Return True if the stage result warrants aborting remaining stages.
+
+    xfail counts as passed. A stage completely fails only when tests > 0,
+    effective_passed == 0, and skipped < tests (i.e. some tests actually ran
+    and failed or errored).
+    """
+    if tests == 0:
+        return False
+    effective_passed = passed + xfailed
+    if effective_passed == 0 and skipped < tests:
+        return True
+    return False
+
+
+def _parse_junit(xml_path: str) -> dict:
+    """Parse a JUnit XML file; return counts dict with keys:
+    tests, passed, failed, errored, skipped, xfailed.
+    """
+    try:
+        tree = ET.parse(xml_path)
+    except Exception:
+        return dict(tests=0, passed=0, failed=0, errored=0, skipped=0, xfailed=0)
+
+    root = tree.getroot()
+    # pytest --junitxml produces a <testsuite> as root or nested under <testsuites>
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    if suite is None:
+        return dict(tests=0, passed=0, failed=0, errored=0, skipped=0, xfailed=0)
+
+    tests    = int(suite.get("tests",    0))
+    failures = int(suite.get("failures", 0))
+    errors   = int(suite.get("errors",   0))
+    skipped  = int(suite.get("skipped",  0))
+
+    # Count xfail from individual <testcase> elements
+    xfailed = sum(
+        1 for tc in suite.findall("testcase")
+        if tc.find("skipped") is not None
+        and "xfail" in (tc.find("skipped").get("message", "") or "").lower()
+    )
+    # xfail appears as "skipped" in JUnit XML from pytest
+    # Adjust: xfailed tests counted above were already counted in skipped
+    skipped_real = skipped - xfailed
+
+    passed = tests - failures - errors - skipped
+
+    return dict(
+        tests=tests,
+        passed=passed,
+        failed=failures,
+        errored=errors,
+        skipped=skipped_real,
+        xfailed=xfailed,
+    )
+
+
+def _parse_junit_by_stage(xml_path: str, stage_names: list) -> dict:
+    """Parse a JUnit XML from a multi-directory pytest run.
+
+    Groups testcase results by stage directory name, extracted from the
+    classname attribute (e.g. 'stage_13_link.test_link' → 'stage_13_link').
+    """
+    empty = dict(tests=0, passed=0, failed=0, errored=0, skipped=0, xfailed=0)
+    by_stage = {s: dict(**empty) for s in stage_names}
+
+    try:
+        tree = ET.parse(xml_path)
+    except Exception:
+        return by_stage
+
+    root  = tree.getroot()
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    if suite is None:
+        return by_stage
+
+    for tc in suite.findall("testcase"):
+        classname = tc.get("classname", "")
+        stage     = classname.split(".")[0]
+        if stage not in by_stage:
+            continue
+        c = by_stage[stage]
+        c["tests"] += 1
+        if tc.find("failure") is not None:
+            c["failed"] += 1
+        elif tc.find("error") is not None:
+            c["errored"] += 1
+        elif tc.find("skipped") is not None:
+            msg = (tc.find("skipped").get("message", "") or "").lower()
+            if "xfail" in msg:
+                c["xfailed"] += 1
+            else:
+                c["skipped"] += 1
+        else:
+            c["passed"] += 1
+
+    return by_stage
+
+
 def _run_tests(stage_names, cfg_path, extra_pytest_args, inject_prepost=True):
     stage_names = _inject_prepost(stage_names, inject=inject_prepost)
-    # filter out stages that don't exist as directories
-    available = set(_available_stages())
+    available   = set(_available_stages())
     stage_names = [s for s in stage_names if s in available]
-    test_dirs = [os.path.join(TESTS_DIR, name) for name in stage_names]
+
     print("=" * 64)
     print("  Wedge 100S-32X SONiC Platform Test Suite")
     print(f"  Stages: {', '.join(stage_names)}")
     print("=" * 64)
+
+    stage_dirs = [os.path.join(TESTS_DIR, s) for s in stage_names]
+
+    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
+        junit_path = tf.name
+
+    # Single pytest invocation — one SSH connection for all stages.
     cmd = (
-        [sys.executable, "-m", "pytest", "--target-cfg", cfg_path]
-        + test_dirs
+        [sys.executable, "-m", "pytest", "--target-cfg", cfg_path,
+         f"--junitxml={junit_path}"]
+        + stage_dirs
         + extra_pytest_args
     )
     result = subprocess.run(cmd, cwd=TESTS_DIR)
+
+    by_stage = _parse_junit_by_stage(junit_path, stage_names)
+    try:
+        os.unlink(junit_path)
+    except OSError:
+        pass
+
+    print(f"\n{'─'*64}", flush=True)
+    for stage in stage_names:
+        c = by_stage[stage]
+        print(
+            f"  {stage}: "
+            f"passed={c['passed']} failed={c['failed']} "
+            f"skipped={c['skipped']} xfailed={c['xfailed']}",
+            flush=True,
+        )
+
     sys.exit(result.returncode)
 
 

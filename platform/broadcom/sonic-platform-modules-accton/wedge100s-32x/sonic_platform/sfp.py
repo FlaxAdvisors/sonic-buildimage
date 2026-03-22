@@ -181,6 +181,11 @@ class Sfp(SfpOptoeBase):
             # Demand-driven lower-page refresh when TTL has expired.
             if offset < 128 and (time.monotonic() - _DOM_LAST_REFRESH[self._port]) > _DOM_CACHE_TTL:
                 lower = self._hardware_read_lower_page()
+                # Always reset TTL regardless of read success/failure.  If the
+                # CP2112 is busy (i2c-poller contention), lower is None and we
+                # serve stale cached data rather than hammering the bus on every
+                # subsequent read_eeprom() call within the same get_transceiver_info().
+                _DOM_LAST_REFRESH[self._port] = time.monotonic()
                 if lower is not None and len(lower) == 128:
                     merged = bytearray(lower) + bytearray(cached_data[128:])
                     tmp = cache + '.tmp'
@@ -190,7 +195,6 @@ class Sfp(SfpOptoeBase):
                         os.replace(tmp, cache)
                     except OSError:
                         merged = cached_data  # write failed; serve old data
-                    _DOM_LAST_REFRESH[self._port] = time.monotonic()
                     cached_data = merged
             end = min(offset + num_bytes, 256)
             return cached_data[offset:end]

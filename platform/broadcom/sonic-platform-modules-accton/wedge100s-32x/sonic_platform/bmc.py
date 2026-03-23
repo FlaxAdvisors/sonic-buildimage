@@ -1,37 +1,46 @@
 #!/usr/bin/env python3
 """
-sonic_platform/bmc.py — BMC TTY helper for Accton Wedge 100S-32X.
+sonic_platform/bmc.py — BMC communication helper for Accton Wedge 100S-32X.
 
-Translates ONL platform_lib.c to Python.  All thermal, fan, and PSU
-telemetry is accessed via /dev/ttyACM0 on the host, which connects to
-the OpenBMC console at 57600 8N1.
+Primary path: SSH over USB-CDC-Ethernet (usb0).
+  BMC usb0 MAC 02:00:00:00:00:01 → IPv6 link-local fe80::ff:fe00:1%usb0
+  Switch usb0 MAC 02:00:00:00:00:02 → IPv6 link-local fe80::ff:fe00:2%usb0
+  Both addresses are auto-assigned from the MAC; no IP configuration needed
+  beyond bringing usb0 UP.  Fast and non-blocking; no TTY protocol overhead.
+
+  Key: /etc/sonic/wedge100s-bmc-key (ed25519, generated at postinst time).
+  Public key is provisioned to BMC /home/root/.ssh/authorized_keys via TTY
+  once at postinst, then persisted to /mnt/data/etc/authorized_keys for
+  BMC reboot survival.  After provisioning all runtime calls use SSH only.
+
+Fallback: None is returned when SSH fails.  Callers must handle None
+gracefully (return cached/default values).  The blocking TTY path is NOT
+used at runtime to avoid the 140-second login-timeout risk.
 
 Public API
 ----------
-send_command(cmd)              -> str  | None  -- raw BMC response
+send_command(cmd)              -> str  | None  -- raw BMC response (SSH only)
 file_read_int(path)            -> int  | None  -- cat a file on the BMC
 i2cget_byte(bus, addr, reg)    -> int  | None  -- BMC i2cget (byte)
 i2cget_word(bus, addr, reg)    -> int  | None  -- BMC i2cget (word)
-i2cset_byte(bus, addr, reg, v) -> bool |       -- BMC i2cset (byte)
+i2cset_byte(bus, addr, reg, v) -> bool         -- BMC i2cset (byte)
+
+Provisioning API (postinst only)
+---------------------------------
+provision_ssh_key()  -- generate key pair, push pubkey to BMC via TTY,
+                        persist to /mnt/data/etc/authorized_keys
 
 Design notes
 ------------
-* Open/close cycle per command mirrors bmc_send_command() in
-  platform_lib.c (static fd held only for the duration of a call).
-* _read_until() replaces the C "usleep then single read" with a proper
-  select()-based loop; correct behaviour on slow BMC responses.
-* The fd uses blocking I/O with VMIN=1.  ttyACM (USB CDC) does not
-  signal select() correctly under O_NONBLOCK on this kernel; blocking
-  mode with VMIN=1 is required.  select() still provides timeouts.
-* _TTY_PROMPT is b':~# ' (colon-tilde-hash-space), matching the OpenBMC
-  root shell prompt "root@HOSTNAME:~# " regardless of hostname.  The
-  C code used "@bmc:" which only works when the BMC hostname is "bmc";
-  on this target the hostname is "hare-lorax-bmc".
-* threading.Lock serialises access within one process; fcntl.flock on
-  _FLOCK_PATH serialises across processes (e.g. pmon bmc-poller racing
-  with a test or report subprocess calling send_command concurrently).
-* The null byte appended to every write mirrors C's
-  write(fd, buf, strlen(buf)+1).  It is harmless to the BMC shell.
+* SSH target uses IPv6 link-local with %usb0 zone ID.  subprocess.run passes
+  this literally to ssh; OpenSSH handles the zone ID correctly on Linux.
+* Thread-safety: each SSH call spawns an independent subprocess; no shared
+  state, so no lock is needed for the SSH path.
+* TTY helpers are retained for provision_ssh_key() only.  They are NOT called
+  from send_command() and therefore cannot cause runtime latency spikes.
+* _read_until() uses select() for timeouts; blocking I/O with VMIN=1 is
+  required because ttyACM (USB CDC) does not signal select() correctly under
+  O_NONBLOCK on this kernel.
 """
 
 import fcntl
@@ -42,64 +51,47 @@ import threading
 import time
 
 # ---------------------------------------------------------------------------
-# Constants (match platform_lib.c)
+# Constants
 # ---------------------------------------------------------------------------
-
-# Public API (R29): only send_command() remains after R29 refactor.
-# Thermal/fan/PSU reads now come from /run/wedge100s/ daemon files.
-# send_command() is retained for fan.set_speed() → 'set_fan_speed.sh <pct>'.
 
 _TTY_DEVICE    = '/dev/ttyACM0'
-_FLOCK_PATH    = '/run/wedge100s/bmc.lock'  # cross-process mutex
-# OpenBMC root shell prompt: "root@HOSTNAME:~# "
-# Using ":~# " matches any root-at-home-dir prompt regardless of hostname.
-# The C code uses "@bmc:" which only works when the BMC hostname is literally
-# "bmc"; on this system the hostname is "hare-lorax-bmc".
-_TTY_PROMPT    = b':~# '
+_TTY_PROMPT    = b':~# '          # matches "root@HOSTNAME:~# " regardless of hostname
 _TTY_RETRY     = 10
-_CMD_TIMEOUT   = 5.0   # seconds per attempt (vs C's 60 ms * attempt; generous)
-_LOGIN_TIMEOUT = 2.0   # seconds for each login step
+_CMD_TIMEOUT   = 5.0
+_LOGIN_TIMEOUT = 2.0
 _BUF_SIZE      = 1024
 
-# Serialises TTY access within a single Python process.
+# Serialises TTY access within a single Python process (provision_ssh_key only).
 _lock = threading.Lock()
+
+# USB-CDC-Ethernet SSH path.
+# IPv6 link-local addresses are derived from the fixed MAC addresses:
+#   BMC  usb0 MAC 02:00:00:00:00:01 → fe80::ff:fe00:1
+#   Switch usb0 MAC 02:00:00:00:00:02 → fe80::ff:fe00:2
+# No IP configuration is needed; the addresses auto-configure when usb0 is UP.
+_BMC_SSH_TARGET = 'root@fe80::ff:fe00:1%usb0'
+_SSH_TIMEOUT    = 5.0
+_SSH_KEY        = '/etc/sonic/wedge100s-bmc-key'
 
 
 # ---------------------------------------------------------------------------
-# Low-level TTY helpers
+# Low-level TTY helpers (provisioning use only)
 # ---------------------------------------------------------------------------
 
 def _tty_open():
-    """
-    Open and configure /dev/ttyACM0 as 57600 8N1 raw.
-    Retries up to 20 times (mirrors C tty_open's retry loop).
-    Returns a file descriptor >= 0, or -1 on failure.
-    """
     for _ in range(20):
         try:
             fd = os.open(_TTY_DEVICE, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
             attr = termios.tcgetattr(fd)
-            # c_iflag: ignore parity errors
             attr[0] = termios.IGNPAR
-            # c_oflag: no output processing
             attr[1] = 0
-            # c_cflag: 57600 | CS8 | CLOCAL | CREAD
             attr[2] = termios.B57600 | termios.CS8 | termios.CLOCAL | termios.CREAD
-            # c_lflag: raw (no echo, no canonical, no signals)
             attr[3] = 0
-            # c_cc: VMIN=1, VTIME=0 — read returns after the first byte arrives.
-            # (C code used VMIN=255 with O_NONBLOCK where it has no effect;
-            # we need VMIN=1 here because we use blocking I/O + select.)
             attr[6][termios.VMIN]  = 1
             attr[6][termios.VTIME] = 0
-            # baud rate in speed fields as well (mirrors cfset{i,o}speed calls)
             attr[4] = termios.B57600
             attr[5] = termios.B57600
             termios.tcsetattr(fd, termios.TCSANOW, attr)
-            # Switch to blocking I/O with VMIN=1 so select() returns on the
-            # first byte (VMIN=255 would make select() wait for 255 bytes).
-            # Note: ttyACM (USB CDC) does not signal select() correctly in
-            # O_NONBLOCK mode on this kernel; blocking mode is required.
             flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
             return fd
@@ -117,11 +109,6 @@ def _tty_close(fd):
 
 
 def _drain(fd, settle=0.05):
-    """
-    Discard pending input, waiting settle seconds after the last byte
-    to ensure any trailing prompts or echoes are fully consumed before
-    a new command is written.
-    """
     last_read = time.time()
     while True:
         elapsed = time.time() - last_read
@@ -132,16 +119,12 @@ def _drain(fd, settle=0.05):
         if r:
             try:
                 os.read(fd, _BUF_SIZE)
-                last_read = time.time()   # reset settle timer on each byte burst
+                last_read = time.time()
             except OSError:
                 break
 
 
 def _read_until(fd, needle, timeout):
-    """
-    Read from fd, accumulating bytes until needle is found or timeout
-    expires.  Returns all accumulated bytes (needle included if found).
-    """
     buf = b''
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -151,7 +134,7 @@ def _read_until(fd, needle, timeout):
             try:
                 chunk = os.read(fd, _BUF_SIZE)
                 if not chunk:
-                    break   # EOF / device gone
+                    break
                 buf += chunk
             except OSError:
                 break
@@ -160,26 +143,13 @@ def _read_until(fd, needle, timeout):
     return buf
 
 
-# ---------------------------------------------------------------------------
-# Login
-# ---------------------------------------------------------------------------
-
 def _tty_login(fd):
-    """
-    Bring the TTY to the @bmc: prompt.
-    Mirrors tty_login() in platform_lib.c.
-    Returns True when the prompt is reached.
-    """
     for _ in range(_TTY_RETRY):
-        # One CR refreshes the prompt; using one (not two as in C) avoids
-        # a double-prompt race where the second ":~# " arrives after login
-        # returns and is then mistaken for the command response.
         os.write(fd, b'\r\x00')
         buf = _read_until(fd, _TTY_PROMPT, 1.0)
         if _TTY_PROMPT in buf:
             return True
-
-        if b' login:' in buf:    # matches "hostname login:" regardless of hostname
+        if b' login:' in buf:
             os.write(fd, b'root\r\x00')
             buf = _read_until(fd, b'Password:', _LOGIN_TIMEOUT)
             if b'Password:' in buf:
@@ -187,10 +157,116 @@ def _tty_login(fd):
                 buf = _read_until(fd, _TTY_PROMPT, _LOGIN_TIMEOUT)
                 if _TTY_PROMPT in buf:
                     return True
-
         time.sleep(0.05)
-
     return False
+
+
+def _tty_send_raw(cmd):
+    """Send a command to the BMC via TTY. Returns response str or None.
+
+    FOR PROVISIONING USE ONLY — not called from send_command().
+    """
+    cmd_bytes = cmd.encode('ascii') + b'\r\n\x00'
+    with _lock:
+        for _ in range(1, _TTY_RETRY + 1):
+            fd = _tty_open()
+            if fd < 0:
+                continue
+            try:
+                if not _tty_login(fd):
+                    continue
+                _drain(fd)
+                os.write(fd, cmd_bytes)
+                buf = _read_until(fd, _TTY_PROMPT, _CMD_TIMEOUT)
+                if _TTY_PROMPT in buf:
+                    return buf.decode('latin-1', errors='replace')
+            except OSError:
+                pass
+            finally:
+                _tty_close(fd)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# SSH fast path
+# ---------------------------------------------------------------------------
+
+def _ssh_send_command(cmd):
+    """Send a shell command to the BMC via SSH over USB-CDC-Ethernet.
+
+    Returns stdout as str on success, None on any error.
+    Thread-safe: each call is an independent subprocess.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                'ssh',
+                '-i', _SSH_KEY,
+                '-o', 'StrictHostKeyChecking=no',
+                '-o', 'ConnectTimeout={:d}'.format(int(_SSH_TIMEOUT)),
+                '-o', 'BatchMode=yes',
+                _BMC_SSH_TARGET,
+                cmd,
+            ],
+            capture_output=True,
+            timeout=_SSH_TIMEOUT + 2,
+        )
+        if result.returncode == 0:
+            return result.stdout.decode('latin-1', errors='replace')
+        return None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Provisioning (postinst use only)
+# ---------------------------------------------------------------------------
+
+def provision_ssh_key():
+    """Generate a platform SSH key pair and provision it to the BMC via TTY.
+
+    Called from postinst on every package install/upgrade.  Idempotent:
+    skips key generation if the key already exists; always re-provisions
+    the pubkey to the BMC so upgrades replace any stale key.
+
+    Key locations:
+      Private: /etc/sonic/wedge100s-bmc-key       (accessible in pmon: /etc/sonic is mounted)
+      Public:  /etc/sonic/wedge100s-bmc-key.pub
+    BMC locations:
+      Runtime:    /home/root/.ssh/authorized_keys   (RAM, lost on reboot)
+      Persistent: /mnt/data/etc/authorized_keys     (jffs2, survives reboot)
+    """
+    import subprocess
+    key_path = _SSH_KEY
+    pub_path = key_path + '.pub'
+
+    os.makedirs(os.path.dirname(key_path), mode=0o755, exist_ok=True)
+    if not os.path.exists(key_path):
+        subprocess.run(
+            ['ssh-keygen', '-t', 'ed25519', '-N', '', '-f', key_path],
+            check=True, capture_output=True,
+        )
+
+    try:
+        with open(pub_path) as f:
+            pubkey = f.read().strip()
+    except OSError:
+        return False
+
+    # Provision to BMC via TTY.  Uses shell idiom to avoid duplicates.
+    cmd = (
+        'mkdir -p /home/root/.ssh && '
+        'chmod 700 /home/root/.ssh && '
+        "grep -qxF '{pk}' /home/root/.ssh/authorized_keys 2>/dev/null || "
+        "echo '{pk}' >> /home/root/.ssh/authorized_keys && "
+        'chmod 600 /home/root/.ssh/authorized_keys && '
+        'mkdir -p /mnt/data/etc && '
+        'cp /home/root/.ssh/authorized_keys /mnt/data/etc/authorized_keys'
+    ).format(pk=pubkey)
+
+    result = _tty_send_raw(cmd)
+    return result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -198,39 +274,52 @@ def _tty_login(fd):
 # ---------------------------------------------------------------------------
 
 def send_command(cmd):
+    """Send a shell command to the BMC and return the response string.
+
+    Uses SSH over USB-CDC-Ethernet only.  Returns None if SSH is unavailable
+    (usb0 down, key not provisioned, BMC unreachable).  Callers must handle
+    None gracefully — do NOT call this in a tight loop without caching.
+
+    cmd -- command text without trailing newline, e.g. 'cat /proc/uptime'
     """
-    Send a shell command to the BMC and return the full response string.
-
-    cmd   -- command text without trailing newline, e.g. 'cat /proc/uptime'
-
-    Returns the raw response (echo + output + prompt) as a str on
-    success, or None after all retries are exhausted.
-
-    Mirrors bmc_send_command() in platform_lib.c.
-    """
-    with open(_FLOCK_PATH, 'w') as _lf:
-        fcntl.flock(_lf, fcntl.LOCK_EX)
-        with _lock:
-            # Append \r\n to terminate the command line; append \x00 to mirror
-            # C's write(fd, buf, strlen(buf)+1) which includes the null byte.
-            cmd_bytes = cmd.encode('ascii') + b'\r\n\x00'
-            for _attempt in range(1, _TTY_RETRY + 1):
-                fd = _tty_open()
-                if fd < 0:
-                    continue
-                try:
-                    if not _tty_login(fd):
-                        continue
-                    _drain(fd)
-                    os.write(fd, cmd_bytes)
-                    buf = _read_until(fd, _TTY_PROMPT, _CMD_TIMEOUT)
-                    if _TTY_PROMPT in buf:
-                        return buf.decode('latin-1', errors='replace')
-                except OSError:
-                    pass
-                finally:
-                    _tty_close(fd)
-
-    return None
+    return _ssh_send_command(cmd)
 
 
+def file_read_int(path):
+    """cat a file on the BMC and return its integer value, or None."""
+    out = send_command('cat ' + path)
+    if out is None:
+        return None
+    try:
+        return int(out.strip().split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def i2cget_byte(bus, addr, reg):
+    """Run i2cget -y <bus> <addr> <reg> b on the BMC. Returns int or None."""
+    out = send_command('i2cget -y {:d} {:#x} {:#x} b'.format(bus, addr, reg))
+    if out is None:
+        return None
+    try:
+        return int(out.strip().split()[-1], 16)
+    except (ValueError, IndexError):
+        return None
+
+
+def i2cget_word(bus, addr, reg):
+    """Run i2cget -y <bus> <addr> <reg> w on the BMC. Returns int or None."""
+    out = send_command('i2cget -y {:d} {:#x} {:#x} w'.format(bus, addr, reg))
+    if out is None:
+        return None
+    try:
+        return int(out.strip().split()[-1], 16)
+    except (ValueError, IndexError):
+        return None
+
+
+def i2cset_byte(bus, addr, reg, value):
+    """Run i2cset -y <bus> <addr> <reg> <val> b on the BMC. Returns bool."""
+    out = send_command(
+        'i2cset -y {:d} {:#x} {:#x} {:#x} b'.format(bus, addr, reg, value))
+    return out is not None

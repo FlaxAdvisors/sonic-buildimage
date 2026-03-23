@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 # Allow running as tools/deploy.py from repo root
 _TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +37,12 @@ TASK_ORDER = [
     ("optical",       OpticalTask),
 ]
 
+# Tasks at or after this index require the SONiC platform stack to be up
+# (portsyncd must have populated PORT entries in config_db).  Tasks before
+# it (system_tuning, cpu_affinity, mgmt_vrf) must NOT be gated — especially
+# mgmt_vrf, which must run before the system is fully ready to restore SSH.
+_SYSTEM_READY_TASK = "breakout"
+
 DEFAULT_TARGET_CFG = os.path.join(_REPO_ROOT, "tests", "target.cfg")
 DEFAULT_TOPOLOGY   = os.path.join(_TOOLS_DIR, "topology.json")
 
@@ -53,6 +60,33 @@ def _validate_topology(topology: dict) -> None:
                 f"  VLAN 10 members: {sorted(vlan10_members)}\n"
                 "Fix topology.json before running deploy."
             )
+
+
+def _wait_system_ready(ssh, timeout: int = 300) -> None:
+    """Block until STATE_DB SYSTEM_READY|SYSTEM_STATE Status == UP.
+
+    Polls every 5 s.  Returns immediately if already UP (common on re-runs).
+    Exits with an error if the system does not become ready within `timeout` s.
+    """
+    cmd = "sonic-db-cli STATE_DB HGET 'SYSTEM_READY|SYSTEM_STATE' Status"
+    deadline = time.time() + timeout
+    first = True
+    while True:
+        out, _, _ = ssh.run(cmd, timeout=10)
+        if out.strip() == "UP":
+            if not first:
+                print("  [system-ready] System is ready.", flush=True)
+            return
+        if first:
+            print("  [system-ready] Waiting for SONiC to become ready "
+                  f"(timeout {timeout}s)...", flush=True)
+            first = False
+        if time.time() >= deadline:
+            sys.exit(
+                f"ERROR: system did not reach ready state within {timeout}s. "
+                "Check 'show system-health detail' on the switch."
+            )
+        time.sleep(5)
 
 
 def _run_task(name: str, task_cls, ssh, topology: dict, dry_run: bool) -> bool:
@@ -126,8 +160,17 @@ def main():
         else TASK_ORDER
     )
 
+    # Tasks at or after _SYSTEM_READY_TASK in TASK_ORDER require the platform stack.
+    _gate_idx = next(i for i, (n, _) in enumerate(TASK_ORDER) if n == _SYSTEM_READY_TASK)
+    _port_tasks = {n for i, (n, _) in enumerate(TASK_ORDER) if i >= _gate_idx}
+    needs_ready = any(name in _port_tasks for name, _ in tasks_to_run)
+    system_ready_checked = False
+
     all_ok = True
     for name, task_cls in tasks_to_run:
+        if needs_ready and not system_ready_checked and name in _port_tasks:
+            _wait_system_ready(ssh)
+            system_ready_checked = True
         ok = _run_task(name, task_cls, ssh, topology, dry_run=args.dry_run)
         if not ok:
             all_ok = False

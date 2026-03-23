@@ -223,17 +223,21 @@ Status as of 2026-03-21. Phases 00–22 + nn are COMPLETE (22 partial). Phase 23
 ---
 
 ## Phase 23: Host Traffic Throughput
-**Status: PENDING**
-- Purpose: L2 throughput between test hosts via VLAN 10
-- Prerequisites: tools/deploy.py run, all 6 hosts SSH-reachable
-- Test pairs: intra-QSFP (Eth0↔Eth1, Eth66↔Eth67, Eth80↔Eth81) + cross-QSFP
-- Tool: iperf3; assert ≥20 Gbps for 25G ports, ≥8 Gbps for 10G (Ethernet64 group)
-- target.cfg.example [hosts] section already present (ssh_user=flax, key_file)
-- Deferred to next implementation cycle
+**Status: COMPLETE (tests implemented 2026-03-22; hardware run pending)**
+- 6 tests, all skip when iperf3/hosts absent (graceful skip, not fail)
+- Test pairs: Ethernet66↔Ethernet67 (≥8 Gbps), Ethernet80↔Ethernet81 (≥20 Gbps),
+  Ethernet0↔Ethernet1 (≥20 Gbps, expected skip — Ethernet1 dark lane),
+  Ethernet66↔Ethernet80 cross-QSFP (≥8 Gbps),
+  Ethernet48↔EOS Et15/1 100G (≥90 Gbps), Ethernet112↔EOS Et16/1 100G (≥90 Gbps)
+- Tool: iperf3 via paramiko SSH; JSON output parsed for sum_received bits_per_second
+- Prerequisites: tools/deploy.py run; topology.json hosts entries with mgmt_ip/test_ip/port;
+  target.cfg [hosts] ssh_user + key_file; iperf3 installed on test hosts
+- 100G tests use temp /30 IPs (10.99.48.x, 10.99.112.x) assigned/removed via fixture teardown
+- EOS SSH: direct to 192.168.88.14 (no jump host needed when Po1 carries no IP)
 
 ---
 
-## Overall Status: PHASES 00–22 COMPLETE (22 partial); Phase 23 PENDING
+## Overall Status: PHASES 00–23 COMPLETE (22 partial, 23 hardware-run pending)
 ## Deploy tool: tools/deploy.py — idempotent L2 platform setup required before test suite
 ## Deploy tool always saves config after any apply (including --task runs)
 

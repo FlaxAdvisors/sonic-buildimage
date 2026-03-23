@@ -357,6 +357,27 @@ def do_sonic_platform_clean():
             print('{} is uninstalled'.format(PLATFORM_API2_WHL_FILE_PY3))
 
 
+def _configure_usb0():
+    """Bring up usb0 (CDC-ECM link to BMC) to trigger IPv6 link-local auto-config.
+
+    The usb0 interface is the host-facing end of the OpenBMC cdc_ether gadget.
+    Both sides have fixed MACs (switch: 02:00:00:00:00:02, BMC: 02:00:00:00:00:01),
+    so the IPv6 link-local addresses are deterministic:
+      switch usb0: fe80::ff:fe00:2
+      BMC    usb0: fe80::ff:fe00:1
+    bmc.py uses 'root@fe80::ff:fe00:1%usb0' — no IPv4 assignment needed.
+
+    systemd-networkd is masked on SONiC; this runs every boot via
+    wedge100s-platform-init.service.  Idempotent: 'ip link set up' is harmless
+    if the interface is already up.
+    """
+    try:
+        subprocess.run(['ip', 'link', 'set', 'usb0', 'up'], capture_output=True)
+        my_log("usb0: UP (IPv6 link-local fe80::ff:fe00:2 auto-configured)")
+    except Exception as e:
+        print("WARNING: _configure_usb0 exception: {}".format(e))
+
+
 def do_install():
     print("Checking system...")
     if not driver_check():
@@ -375,6 +396,7 @@ def do_install():
         print(PROJECT_NAME.upper() + " I2C devices already registered.")
     _pin_bcm_irq()
     do_sonic_platform_install()
+    _configure_usb0()
     print("Platform init complete.")
 
 

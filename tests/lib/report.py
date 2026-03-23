@@ -513,17 +513,312 @@ def report_link(ssh):
 
 
 # ---------------------------------------------------------------------------
+# Stage 09 — CPLD
+# ---------------------------------------------------------------------------
+
+def report_cpld(ssh):
+    """Stage 09 — CPLD version, PSU present/pgood bits, LED register raw values."""
+    sysfs = '/sys/bus/i2c/devices/1-0032'
+
+    ver_raw, _, _ = ssh.run(f"cat {sysfs}/cpld_version 2>/dev/null || echo N/A")
+    print(f"\n  CPLD version : {ver_raw.strip()}")
+
+    psu_rows = []
+    for slot in (1, 2):
+        for attr, label in [('psu_present', 'present'), ('psu_power_good', 'pgood')]:
+            val, _, rc = ssh.run(f"cat {sysfs}/{attr}{slot} 2>/dev/null")
+            psu_rows.append((f"PSU{slot}", label, val.strip() if rc == 0 else "err"))
+    _table(["PSU", "Signal", "Value"], psu_rows, title="PSU sysfs bits")
+
+    led_rows = []
+    for label, attr, reg in [("SYS1", 'led_sys1', '0x3e'), ("SYS2", 'led_sys2', '0x3f')]:
+        val, _, rc = ssh.run(f"cat {sysfs}/{attr} 2>/dev/null")
+        led_rows.append((label, reg, val.strip() if rc == 0 else "err"))
+    _table(["LED", "Reg", "Raw"], led_rows, title="LED registers")
+
+
+# ---------------------------------------------------------------------------
+# Stage 10 — I2C daemon health
+# ---------------------------------------------------------------------------
+
+def report_daemon(ssh):
+    """Stage 10 — i2c-poller timer state and /run/wedge100s/ cache health."""
+    timer_state, _, _ = ssh.run(
+        "systemctl is-active wedge100s-i2c-poller.timer 2>/dev/null || echo unknown"
+    )
+    print(f"\n  i2c-poller timer : {timer_state.strip()}")
+
+    last_trigger, _, _ = ssh.run(
+        "systemctl show wedge100s-i2c-poller.timer "
+        "--property=LastTriggerUSec --value 2>/dev/null || echo unknown"
+    )
+    print(f"  last trigger     : {last_trigger.strip()}")
+
+    age_out, _, _ = ssh.run(
+        "find /run/wedge100s -name 'sfp_*_present' -printf '%T@\\n' 2>/dev/null "
+        "| sort -n | head -1"
+    )
+    if age_out.strip():
+        import time as _time
+        try:
+            oldest = float(age_out.strip())
+            age_s = int(_time.time() - oldest)
+            print(f"  oldest present   : {age_s}s ago")
+        except ValueError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Stage 11 — Transceiver STATE_DB
+# ---------------------------------------------------------------------------
+
+def report_transceiver(ssh):
+    """Stage 11 — TRANSCEIVER_INFO and TRANSCEIVER_DOM_SENSOR from STATE_DB."""
+    info_out, _, _ = ssh.run(
+        "redis-cli -n 6 KEYS 'TRANSCEIVER_INFO|*' 2>/dev/null | sort", timeout=20
+    )
+    ports = [l.split('|', 1)[1] for l in info_out.splitlines() if '|' in l]
+
+    if not ports:
+        print("\n  No transceiver info in STATE_DB")
+        return
+
+    rows = []
+    for port in ports[:16]:
+        vendor, _, _ = ssh.run(
+            f"redis-cli -n 6 HGET 'TRANSCEIVER_INFO|{port}' vendor_name 2>/dev/null"
+        )
+        pn, _, _ = ssh.run(
+            f"redis-cli -n 6 HGET 'TRANSCEIVER_INFO|{port}' vendor_part_number 2>/dev/null"
+        )
+        temp, _, _ = ssh.run(
+            f"redis-cli -n 6 HGET 'TRANSCEIVER_DOM_SENSOR|{port}' temperature 2>/dev/null"
+        )
+        rows.append((port, vendor.strip() or "—", pn.strip() or "—", temp.strip() or "—"))
+
+    _table(["Port", "Vendor", "Part Number", "Temp (°C)"], rows, title=f"Transceivers (first {len(rows)} of {len(ports)})")
+    if len(ports) > 16:
+        print(f"    … and {len(ports) - 16} more")
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 — Interface counters
+# ---------------------------------------------------------------------------
+
+def report_counters(ssh):
+    """Stage 12 — RX/TX packets and errors for link-up ports."""
+    status_out, _, _ = ssh.run("show interfaces status 2>/dev/null", timeout=30)
+    up_ports = []
+    for line in status_out.splitlines():
+        m = re.match(r'\s*(Ethernet\d+)\s+', line)
+        if m and ' up ' in line:
+            up_ports.append(m.group(1))
+
+    if not up_ports:
+        print("\n  No link-up ports")
+        return
+
+    ctr_out, _, _ = ssh.run("show interfaces counters 2>/dev/null", timeout=30)
+    rows = []
+    for line in ctr_out.splitlines():
+        m = re.match(r'\s*(Ethernet\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)', line)
+        if m and m.group(1) in up_ports:
+            rows.append((m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)))
+
+    _table(["Port", "RX_OK", "RX_ERR", "TX_OK", "TX_ERR"], rows, title="Link-up port counters")
+
+
+# ---------------------------------------------------------------------------
+# Stage 14 — Breakout mode
+# ---------------------------------------------------------------------------
+
+def report_breakout(ssh):
+    """Stage 14 — Active breakout mode per parent port from CONFIG_DB vs platform.json defaults."""
+    _BREAKOUT_PARENTS = ["Ethernet0", "Ethernet64", "Ethernet80"]
+    rows = []
+    for parent in _BREAKOUT_PARENTS:
+        # CONFIG_DB breakout mode
+        mode_out, _, _ = ssh.run(
+            f"redis-cli -n 4 HGET 'BREAKOUT_CFG|{parent}' brkout_mode 2>/dev/null"
+        )
+        mode = mode_out.strip() or "1x100G[40G]"
+        # Count sub-ports in CONFIG_DB
+        count_out, _, _ = ssh.run(
+            f"redis-cli -n 4 KEYS 'PORT|{parent}*' 2>/dev/null | wc -l"
+        )
+        count = count_out.strip()
+        rows.append((parent, mode, count))
+    _table(["Parent Port", "Breakout Mode", "Sub-port Count"], rows, title="Breakout configuration")
+
+
+# ---------------------------------------------------------------------------
+# Stage 15 — Autoneg / FEC
+# ---------------------------------------------------------------------------
+
+def report_autoneg_fec(ssh):
+    """Stage 15 — FEC mode and autoneg state for connected ports."""
+    status_out, _, _ = ssh.run("show interfaces status 2>/dev/null", timeout=30)
+    rows = []
+    for line in status_out.splitlines():
+        m = re.match(r'\s*(Ethernet\d+)\s+[\d,]+\s+(\S+)\s+\d+\s+(\S+)\s+\S+\s+(\S+)', line)
+        if m:
+            port, speed, fec, oper = m.group(1), m.group(2), m.group(3), m.group(4)
+            if oper == 'up':
+                rows.append((port, speed, fec, oper))
+
+    _table(["Port", "Speed", "FEC", "Oper"], rows, title="FEC and autoneg (link-up ports)")
+
+
+# ---------------------------------------------------------------------------
+# Stage 16 — PortChannel
+# ---------------------------------------------------------------------------
+
+def report_portchannel(ssh):
+    """Stage 16 — PortChannel1 members, LACP state, VLAN membership."""
+    pc_out, _, _ = ssh.run("show interfaces portchannel 2>/dev/null", timeout=20)
+    print(f"\n  PortChannel state:\n")
+    for line in pc_out.strip().splitlines()[:20]:
+        print(f"    {line}")
+
+    lacp_out, _, rc = ssh.run("teamdctl PortChannel1 state 2>/dev/null || echo N/A")
+    if rc == 0 and lacp_out.strip() != "N/A":
+        import json as _json
+        try:
+            state = _json.loads(lacp_out)
+            ports = state.get("ports", {})
+            rows = [(p, d.get("runner", {}).get("selected", "?"), d.get("link", {}).get("up", "?"))
+                    for p, d in sorted(ports.items())]
+            _table(["Member", "LACP Selected", "Link Up"], rows, title="LACP member state")
+        except Exception:
+            print(f"\n  teamdctl output: {lacp_out.strip()[:200]}")
+
+    vlan_out, _, _ = ssh.run(
+        "redis-cli -n 4 SMEMBERS 'VLAN_MEMBER|Vlan999' 2>/dev/null"
+    )
+    print(f"\n  Vlan999 members: {vlan_out.strip() or '(none)'}")
+
+
+# ---------------------------------------------------------------------------
+# Stage 19 — Platform CLI
+# ---------------------------------------------------------------------------
+
+def report_platform_cli(ssh):
+    """Stage 19 — Base MAC, reboot cause, CPLD/BIOS version, watchdog status."""
+    rows = []
+
+    mac_out, _, _ = ssh.run("show platform syseeprom 2>/dev/null | grep 'Base MAC' || echo N/A")
+    rows.append(("Base MAC", mac_out.strip()))
+
+    reboot_out, _, _ = ssh.run("show reboot-cause 2>/dev/null || echo N/A")
+    rows.append(("Reboot cause", reboot_out.strip()[:80]))
+
+    cpld_out, _, _ = ssh.run(
+        "cat /sys/bus/i2c/devices/1-0032/cpld_version 2>/dev/null || echo N/A"
+    )
+    rows.append(("CPLD version", cpld_out.strip()))
+
+    bios_out, _, _ = ssh.run("sudo dmidecode -s bios-version 2>/dev/null || echo N/A")
+    rows.append(("BIOS version", bios_out.strip()))
+
+    wd_out, _, _ = ssh.run("show platform watchdog 2>/dev/null || echo N/A")
+    rows.append(("Watchdog", wd_out.strip()[:80]))
+
+    _table(["Item", "Value"], rows, title="Platform CLI summary")
+
+
+# ---------------------------------------------------------------------------
+# Stage 20 — Traffic counters
+# ---------------------------------------------------------------------------
+
+def report_traffic(ssh):
+    """Stage 20 — TX/RX counter deltas for Ethernet16/32 from COUNTERS_DB."""
+    _TRAFFIC_PORTS = ["Ethernet16", "Ethernet32"]
+
+    name_map_out, _, _ = ssh.run(
+        "redis-cli -n 2 HGETALL COUNTERS_PORT_NAME_MAP 2>/dev/null", timeout=15
+    )
+    name_map = {}
+    tokens = name_map_out.split()
+    for i in range(0, len(tokens) - 1, 2):
+        name_map[tokens[i]] = tokens[i + 1]
+
+    rows = []
+    for port in _TRAFFIC_PORTS:
+        oid = name_map.get(port)
+        if not oid:
+            rows.append((port, "OID not found", "—", "—", "—"))
+            continue
+        rx_out, _, _ = ssh.run(
+            f"redis-cli -n 2 HGET COUNTERS:{oid} SAI_PORT_STAT_IF_IN_UCAST_PKTS 2>/dev/null"
+        )
+        tx_out, _, _ = ssh.run(
+            f"redis-cli -n 2 HGET COUNTERS:{oid} SAI_PORT_STAT_IF_OUT_UCAST_PKTS 2>/dev/null"
+        )
+        rows.append((port, oid[:16] + "…", rx_out.strip() or "0", tx_out.strip() or "0", "snapshot"))
+
+    _table(["Port", "OID (truncated)", "RX ucast pkts", "TX ucast pkts", "Note"],
+           rows, title="Traffic counters (COUNTERS_DB snapshot)")
+    print("\n  Note: run 'show interfaces counters' for human-readable deltas")
+
+
+# ---------------------------------------------------------------------------
+# Stage 21 — LP_MODE
+# ---------------------------------------------------------------------------
+
+def report_lpmode(ssh):
+    """Stage 21 — LP_MODE state per installed SFP from /run/wedge100s/ cache."""
+    rows = []
+    for idx in range(32):
+        present_raw, _, _ = ssh.run(
+            f"cat /run/wedge100s/sfp_{idx}_present 2>/dev/null || echo -"
+        )
+        present = present_raw.strip()
+        if present != "1":
+            continue
+        lp_raw, _, _ = ssh.run(
+            f"cat /run/wedge100s/sfp_{idx}_lpmode 2>/dev/null || echo -"
+        )
+        lp = "asserted" if lp_raw.strip() == "1" else "deasserted"
+        rows.append((f"port {idx}", "Yes", lp))
+
+    if not rows:
+        print("\n  No present ports with lpmode cache files")
+        return
+    _table(["Port", "Present", "LP_MODE"], rows, title="LP_MODE state")
+
+
+# ---------------------------------------------------------------------------
+# Stage 23 — Throughput (placeholder)
+# ---------------------------------------------------------------------------
+
+def report_throughput(ssh):
+    """Stage 23 — Throughput placeholder."""
+    print("\n  Run: pytest tests/stage_23_throughput -v  for live throughput results")
+
+
+# ---------------------------------------------------------------------------
 # Registry: stage name → reporter function
 # ---------------------------------------------------------------------------
 
 REPORTERS = {
-    "stage_01_eeprom":   report_eeprom,
-    "stage_02_system":   report_system,
-    "stage_03_platform":  report_platform,
-    "stage_04_thermal":  report_thermal,
-    "stage_05_fan":      report_fan,
-    "stage_06_psu":      report_psu,
-    "stage_07_qsfp":     report_qsfp,
-    "stage_08_led":      report_led,
-    "stage_13_link":     report_link,
+    "stage_01_eeprom":      report_eeprom,
+    "stage_02_system":      report_system,
+    "stage_03_platform":    report_platform,
+    "stage_04_thermal":     report_thermal,
+    "stage_05_fan":         report_fan,
+    "stage_06_psu":         report_psu,
+    "stage_07_qsfp":        report_qsfp,
+    "stage_08_led":         report_led,
+    "stage_09_cpld":        report_cpld,
+    "stage_10_daemon":      report_daemon,
+    "stage_11_transceiver": report_transceiver,
+    "stage_12_counters":    report_counters,
+    "stage_13_link":        report_link,
+    "stage_14_breakout":    report_breakout,
+    "stage_15_autoneg_fec": report_autoneg_fec,
+    "stage_16_portchannel": report_portchannel,
+    "stage_19_platform_cli": report_platform_cli,
+    "stage_20_traffic":     report_traffic,
+    "stage_21_lpmode":      report_lpmode,
+    "stage_23_throughput":  report_throughput,
 }

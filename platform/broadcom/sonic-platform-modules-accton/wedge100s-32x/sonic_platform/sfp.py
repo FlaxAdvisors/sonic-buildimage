@@ -29,11 +29,6 @@ try:
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
-try:
-    from smbus2 import SMBus, i2c_msg as _i2c_msg
-    _SMBUS2_OK = True
-except ImportError:
-    _SMBUS2_OK = False
 
 # ---------------------------------------------------------------------------
 # CP2112 bus serialization lock
@@ -67,6 +62,12 @@ _I2C_EEPROM_CACHE  = '/run/wedge100s/sfp_{}_eeprom'
 _I2C_PRESENT_CACHE = '/run/wedge100s/sfp_{}_present'
 _LP_MODE_STATE = '/run/wedge100s/sfp_{}_lpmode'
 _LP_MODE_REQ   = '/run/wedge100s/sfp_{}_lpmode_req'
+_WRITE_REQ  = '/run/wedge100s/sfp_{}_write_req'   # pmon → daemon: JSON {offset, length, data_hex}
+_WRITE_ACK  = '/run/wedge100s/sfp_{}_write_ack'   # daemon → pmon: "ok" or "err:<msg>"
+_READ_REQ   = '/run/wedge100s/sfp_{}_read_req'    # pmon → daemon: JSON {offset, length}
+_READ_RESP  = '/run/wedge100s/sfp_{}_read_resp'   # daemon → pmon: hex-encoded bytes or "err:<msg>"
+_WRITE_TIMEOUT_S = 5.0
+_READ_TIMEOUT_S  = 5.0
 
 # Staleness threshold: fall back to live smbus2 if cache is older than this.
 # Daemon fires every 3 s; 8 s gives ~2.5 cycles of slack before triggering
@@ -90,7 +91,21 @@ _PCA9535_ADDR = [0x22, 0x23]
 # a fresh hardware fetch regardless of when the daemon wrote the initial cache.
 # ---------------------------------------------------------------------------
 
-_DOM_CACHE_TTL      = 10              # seconds: max age of lower-page DOM data
+_DOM_CACHE_TTL      = 20              # seconds: max staleness per port (was 10)
+_BANK_GROUP_A       = set(range(0, 16))   # mux 0x70 + 0x71 (Ethernet0–Ethernet60)
+_BANK_GROUP_B       = set(range(16, 32))  # mux 0x72 + 0x73 (Ethernet64–Ethernet124)
+_tick_counter       = 0               # incremented per xcvrd process; not persisted
+
+
+def _dom_refresh_eligible(port_index: int) -> bool:
+    """Return True if this port is in the active bank-group this tick.
+
+    Bank-group A (ports 0–15) refreshes on even ticks; bank-group B (ports 16–31)
+    on odd ticks.  Each port refreshes at most every 20s (2 ticks × 10s interval).
+    """
+    in_group_a = port_index < 16
+    even_tick  = (_tick_counter % 2 == 0)
+    return in_group_a == even_tick
 _DOM_LAST_REFRESH   = [0.0] * NUM_SFPS  # monotonic timestamp of last live read
 
 # ---------------------------------------------------------------------------
@@ -116,6 +131,16 @@ def _mux_for_bus(bus):
         if base <= bus < base + 8:
             return addr, (bus - 2) % 8
     return None, None
+
+
+def _wait_for_file(path, timeout_s):
+    """Poll path until it exists; return True on success, False on timeout."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -179,13 +204,15 @@ class Sfp(SfpOptoeBase):
 
         if cached_data is not None:
             # Demand-driven lower-page refresh when TTL has expired.
-            if offset < 128 and (time.monotonic() - _DOM_LAST_REFRESH[self._port]) > _DOM_CACHE_TTL:
+            if offset < 128 and (time.monotonic() - _DOM_LAST_REFRESH[self._port]) > _DOM_CACHE_TTL and _dom_refresh_eligible(self._port):
                 lower = self._hardware_read_lower_page()
                 # Always reset TTL regardless of read success/failure.  If the
                 # CP2112 is busy (i2c-poller contention), lower is None and we
                 # serve stale cached data rather than hammering the bus on every
                 # subsequent read_eeprom() call within the same get_transceiver_info().
                 _DOM_LAST_REFRESH[self._port] = time.monotonic()
+                global _tick_counter
+                _tick_counter += 1
                 if lower is not None and len(lower) == 128:
                     merged = bytearray(lower) + bytearray(cached_data[128:])
                     tmp = cache + '.tmp'
@@ -212,141 +239,97 @@ class Sfp(SfpOptoeBase):
         with _eeprom_bus_lock:
             return SfpOptoeBase.read_eeprom(self, offset, num_bytes)
 
-    def _hardware_read_eeprom(self):
-        """Read full 256-byte page 0 directly from hardware via smbus2 and the mux tree.
-
-        Route: CP2112 bus 1 → PCA9548 mux (0x70-0x73) → I2C addr 0x50.
-        Used by write_eeprom() for post-write cache refresh and by read_eeprom()
-        during INIT_SETTLE verification.
-
-        Returns bytearray(256) on success, None on any I2C error.
-        Acquires _eeprom_bus_lock; safe to call from outside any lock context.
-        """
-        if not _SMBUS2_OK:
-            return None
-        mux_addr, mux_chan = _mux_for_bus(self._bus)
-        if mux_addr is None:
-            return None
-        try:
-            with _eeprom_bus_lock:
-                with SMBus(1) as i2c:
-                    i2c.write_byte(mux_addr, 1 << mux_chan)
-
-                    # Lower page (bytes 0-127): set register pointer to 0x00.
-                    lower_rw = [_i2c_msg.write(0x50, [0x00]),
-                                _i2c_msg.read(0x50, 128)]
-                    i2c.i2c_rdwr(*lower_rw)
-                    lower = bytes(lower_rw[1])
-
-                    # Upper page 0 (bytes 128-255): set pointer to 0x80.
-                    upper_rw = [_i2c_msg.write(0x50, [0x80]),
-                                _i2c_msg.read(0x50, 128)]
-                    i2c.i2c_rdwr(*upper_rw)
-                    upper = bytes(upper_rw[1])
-
-                    i2c.write_byte(mux_addr, 0x00)  # deselect mux
-
-            return bytearray(lower + upper)
-
-        except Exception:
-            try:
-                with SMBus(1) as i2c:
-                    i2c.write_byte(mux_addr, 0x00)
-            except Exception:
-                pass
-            return None
-
     def _hardware_read_lower_page(self):
-        """Read lower page (bytes 0-127) directly from hardware via smbus2.
+        """Read lower page (bytes 0-127) from hardware via daemon read request file.
 
-        Route: CP2112 bus 1 → PCA9548 mux (0x70-0x73) → I2C addr 0x50.
-        Used by read_eeprom() for demand-driven DOM cache refresh.
-
-        Returns bytearray(128) on success, None on any I2C error.
-        Acquires _eeprom_bus_lock.
+        Returns bytearray(128) on success, None on timeout or error.
         """
-        if not _SMBUS2_OK:
+        req_path  = _READ_REQ.format(self._port)
+        resp_path = _READ_RESP.format(self._port)
+
+        payload = {"offset": 0, "length": 128}
+        try:
+            os.unlink(resp_path)
+        except OSError:
+            pass
+
+        import json as _json
+        try:
+            tmp = req_path + '.tmp'
+            with open(tmp, 'w') as f:
+                f.write(_json.dumps(payload))
+            os.replace(tmp, req_path)
+        except OSError:
             return None
-        mux_addr, mux_chan = _mux_for_bus(self._bus)
-        if mux_addr is None:
+
+        if not _wait_for_file(resp_path, _READ_TIMEOUT_S):
+            try:
+                os.unlink(req_path)
+            except OSError:
+                pass
+            return None
+
+        try:
+            with open(resp_path) as f:
+                result = f.read().strip()
+            os.unlink(resp_path)
+        except OSError:
+            return None
+
+        if result.startswith("err:"):
             return None
         try:
-            with _eeprom_bus_lock:
-                with SMBus(1) as i2c:
-                    i2c.write_byte(mux_addr, 1 << mux_chan)
-                    lower_rw = [_i2c_msg.write(0x50, [0x00]),
-                                _i2c_msg.read(0x50, 128)]
-                    i2c.i2c_rdwr(*lower_rw)
-                    lower = bytes(lower_rw[1])
-                    i2c.write_byte(mux_addr, 0x00)
-            return bytearray(lower)
-        except Exception:
-            try:
-                with SMBus(1) as i2c:
-                    i2c.write_byte(mux_addr, 0x00)
-            except Exception:
-                pass
+            data = bytes.fromhex(result)
+            return bytearray(data) if len(data) == 128 else None
+        except ValueError:
             return None
 
     def write_eeprom(self, offset, num_bytes, write_buffer):
-        """
-        Write to QSFP EEPROM via physical I2C, then refresh the daemon cache.
-
-        Route: smbus2 on CP2112 bus 1 → PCA9548 mux (0x70-0x73) → I2C addr 0x50.
-        Always writes to hardware regardless of cached value, then re-reads both
-        128-byte pages via _hardware_read_eeprom() and atomically replaces the
-        daemon cache file.  This keeps the non-polling architecture while ensuring
-        xcvrd control writes (TX_DISABLE, high-power class, etc.) actually reach
-        the module and the cache reflects hardware state.
-
-        Note: CP2112 i2c-dev (this path) and the daemon's hidraw0 path share the
-        same physical bus without kernel-level serialization.  _eeprom_bus_lock
-        serializes within xcvrd; the daemon's 3-second timer creates natural gaps.
-        """
-        if not _SMBUS2_OK or num_bytes <= 0 or write_buffer is None:
+        """Write to QSFP EEPROM via daemon request file; wait for ack."""
+        if num_bytes <= 0 or write_buffer is None:
             return False
         if not (0 <= offset < 256):
             return False
 
-        mux_addr, mux_chan = _mux_for_bus(self._bus)
-        if mux_addr is None:
+        req_path = _WRITE_REQ.format(self._port)
+        ack_path = _WRITE_ACK.format(self._port)
+
+        payload = {
+            "offset": offset,
+            "length": num_bytes,
+            "data_hex": bytes(write_buffer[:num_bytes]).hex()
+        }
+        # Remove stale ack from any prior request.
+        try:
+            os.unlink(ack_path)
+        except OSError:
+            pass
+
+        import json as _json
+        try:
+            tmp = req_path + '.tmp'
+            with open(tmp, 'w') as f:
+                f.write(_json.dumps(payload))
+            os.replace(tmp, req_path)
+        except OSError:
             return False
 
-        cache = _I2C_EEPROM_CACHE.format(self._port)
-
-        try:
-            with _eeprom_bus_lock:
-                with SMBus(1) as i2c:
-                    # Select mux channel for this port's EEPROM bus.
-                    i2c.write_byte(mux_addr, 1 << mux_chan)
-
-                    # Write registers.  write_i2c_block_data sends:
-                    #   START [0x50|W] [offset] [byte0 byte1 ...] STOP
-                    i2c.write_i2c_block_data(
-                        0x50, offset, list(write_buffer[:num_bytes]))
-
-                    time.sleep(0.05)  # allow EEPROM write cycle to complete
-
-                    # Deselect mux before releasing bus context.
-                    i2c.write_byte(mux_addr, 0x00)
-
-            # Re-read full page 0 from hardware and atomically replace cache.
-            hw_data = self._hardware_read_eeprom()
-            if hw_data is not None:
-                tmp = cache + '.tmp'
-                with open(tmp, 'wb') as f:
-                    f.write(hw_data)
-                os.replace(tmp, cache)
-            return True
-
-        except Exception:
-            # Best-effort mux deselect on error.
+        if not _wait_for_file(ack_path, _WRITE_TIMEOUT_S):
+            # Timeout — daemon did not respond.
             try:
-                with SMBus(1) as i2c:
-                    i2c.write_byte(mux_addr, 0x00)
-            except Exception:
+                os.unlink(req_path)
+            except OSError:
                 pass
             return False
+
+        try:
+            with open(ack_path) as f:
+                result = f.read().strip()
+            os.unlink(ack_path)
+        except OSError:
+            return False
+
+        return result == "ok"
 
     # ------------------------------------------------------------------
     # DeviceBase / SfpBase API

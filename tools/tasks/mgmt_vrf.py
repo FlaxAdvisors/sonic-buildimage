@@ -109,11 +109,13 @@ class MgmtVrfTask(ConfigTask):
         # `config vrf add mgmt` writes to config_db; hostcfgd picks it up and runs
         # `systemctl restart interfaces-config`, which creates the kernel VRF,
         # masters eth0, and sets up routing.  All of that is asynchronous, so we
-        # poll until eth0 is mastered before restarting SSH.
+        # poll until eth0 is mastered AND the default route is in table 5000 before
+        # restarting SSH — checking only for "master mgmt" is insufficient; sshd
+        # needs the return-path route or inbound connections succeed but replies drop.
         #
-        # We do NOT include `ip link set eth0 master mgmt` or `ip route add` here —
-        # interfaces-config owns those; issuing them manually races with ifup and
-        # causes "Device does not exist" errors.
+        # We do NOT manually run `ip link set eth0 master mgmt` or `ip route add` —
+        # interfaces-config owns those.  If it times out, we fall back to
+        # `systemctl restart networking` which re-runs ifup correctly.
         log_path    = "/tmp/deploy_mgmt_vrf.log"
         script_path = "/tmp/deploy_mgmt_vrf.sh"
         script = "\n".join([
@@ -122,25 +124,35 @@ class MgmtVrfTask(ConfigTask):
             "set -x",
             # Trigger SONiC VRF setup (hostcfgd → interfaces-config → ifup).
             f"sudo config vrf add {vrf}",
-            # Wait up to 60 s for interfaces-config to master eth0.
-            f"for i in $(seq 1 60); do",
-            f"  ip link show eth0 2>/dev/null | grep -q 'master {vrf}' && break",
+            # Wait up to 90 s for interfaces-config to BOTH master eth0 AND install
+            # the default route in the mgmt routing table.  Checking only for
+            # "master mgmt" is not enough — sshd needs the return-path route in
+            # table {self.MGMT_VRF_TABLE} or inbound TCP connections succeed but
+            # replies are dropped, causing _reconnect_ssh to time out.
+            f"for i in $(seq 1 90); do",
+            f"  ip link show eth0 2>/dev/null | grep -q 'master {vrf}' \\",
+            f"    && ip route show table {self.MGMT_VRF_TABLE} 2>/dev/null | grep -q 'default' \\",
+            f"    && break",
             f"  sleep 1",
             f"done",
-            # Fallback: if interfaces-config didn't master eth0, do it explicitly.
-            # SSH must not restart until eth0 is in the VRF — otherwise it binds
-            # on the wrong namespace and becomes unreachable.
-            f"ip link show eth0 | grep -q 'master {vrf}' || sudo ip link set eth0 master {vrf}",
-            # Kill ALL dhclient processes for eth0 with SIGKILL — interfaces-config
-            # will start a fresh VRF-aware one.  Use SIGKILL (not SIGTERM) because
-            # dhclient with -1 flag may delay or ignore SIGTERM while handling a
-            # renewal, leaving a stale default-namespace client that disrupts the
-            # management interface on every subsequent DHCP renewal cycle.
-            "pkill -9 -f 'dhclient.*eth0' || true",
-            # Brief pause so interfaces-config can restart dhclient in the VRF
-            # before SSH restarts (SSH restart is not dhclient-dependent, but
-            # waiting avoids a race where the new dhclient and SSH both start at once).
-            "sleep 1",
+            # Fallback: interfaces-config didn't fully set up the VRF in time.
+            # Run `systemctl restart networking` — the same manual recovery step
+            # an operator would take — which re-runs ifup, starts dhclient inside
+            # the VRF, and populates routing table {self.MGMT_VRF_TABLE}.
+            # Do NOT use `ip link set eth0 master mgmt` here: that only masters
+            # eth0 but leaves routing broken and races with interfaces-config.
+            f"if ! ip link show eth0 2>/dev/null | grep -q 'master {vrf}' \\",
+            f"   || ! ip route show table {self.MGMT_VRF_TABLE} 2>/dev/null | grep -q 'default'; then",
+            f"  systemctl restart networking",
+            f"  for i in $(seq 1 60); do",
+            f"    ip link show eth0 2>/dev/null | grep -q 'master {vrf}' \\",
+            f"      && ip route show table {self.MGMT_VRF_TABLE} 2>/dev/null | grep -q 'default' \\",
+            f"      && break",
+            f"    sleep 1",
+            f"  done",
+            f"fi",
+            # Brief pause to let the network stack settle before SSH restarts.
+            "sleep 2",
             # Reload systemd (picks up the drop-in written before this script ran),
             # then restart SSH so it listens inside the VRF.
             "systemctl daemon-reload",

@@ -58,6 +58,57 @@ if [ -f "$BREAKOUT_CFG" ]; then
     echo "wedge100s postinst: installed port_breakout_config_db.json to /etc/sonic/"
 fi
 
+# Install factory default config_db.json to /etc/sonic/ only on first install
+# (i.e. when /etc/sonic/config_db.json does not yet exist).  This pre-empts
+# the sonic-cfggen T0 topology generation that would otherwise flood every
+# port with BGP neighbors and ARP traffic on first boot.
+DEVICE_DIR="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0"
+FACTORY_CFG="$DEVICE_DIR/config_db.json"
+TARGET_CFG="/etc/sonic/config_db.json"
+if [ -f "$FACTORY_CFG" ] && [ ! -f "$TARGET_CFG" ]; then
+    cp "$FACTORY_CFG" "$TARGET_CFG"
+    echo "wedge100s postinst: installed factory config_db.json to /etc/sonic/"
+fi
+
+# Bring usb0 up immediately (CDC-ECM link to BMC).
+# systemd-networkd is masked on SONiC; the interface is kept up across reboots
+# by _configure_usb0() in wedge100s-platform-init.service.
+# IPv6 link-local (fe80::ff:fe00:1%usb0) auto-configures from the fixed BMC MAC.
+ip link set usb0 up 2>/dev/null || true
+echo "wedge100s postinst: usb0 UP (CDC-ECM; IPv6 link-local fe80::ff:fe00:1%usb0)"
+
+# Provision the platform SSH key to the BMC (one-time bootstrap via TTY).
+# Generates /etc/sonic/wedge100s-bmc-key (ed25519) if absent, then pushes
+# the public key to the BMC via /dev/ttyACM0 and persists it to
+# /mnt/data/etc/authorized_keys for BMC reboot survival.
+# /etc/sonic/ is already mounted ro inside pmon, so the key is accessible
+# to bmc.py running inside the pmon container without any extra mount.
+# Subsequent postinst runs re-provision idempotently (grep -qxF guards against
+# duplicate entries in authorized_keys).
+# After this block, all runtime BMC communication uses SSH — no TTY fallback.
+if [ -c /dev/ttyACM0 ]; then
+    python3 - <<'PYEOF' || true
+import sys
+# Prefer the installed wheel path; fall back to any dist-packages
+for p in ['/usr/local/lib/python3.13/dist-packages',
+          '/usr/local/lib/python3.11/dist-packages']:
+    import os; sys.path.insert(0, p) if os.path.isdir(p) else None
+try:
+    from sonic_platform import bmc
+    ok = bmc.provision_ssh_key()
+    if ok:
+        print("wedge100s postinst: BMC SSH key provisioned to fe80::ff:fe00:1%usb0")
+    else:
+        print("wedge100s postinst: WARNING: BMC SSH key provisioning failed (TTY unavailable?)",
+              file=sys.stderr)
+except Exception as e:
+    print("wedge100s postinst: WARNING: BMC SSH key provisioning exception: " + str(e),
+          file=sys.stderr)
+PYEOF
+else
+    echo "wedge100s postinst: WARNING: /dev/ttyACM0 absent — BMC SSH key not provisioned"
+fi
+
 # Patch pmon.sh to pass ttyACM0 (BMC USB-CDC serial) into the pmon container.
 #
 # Context: pmon.sh is generated at build time from docker_image_ctl.j2.
@@ -428,6 +479,22 @@ if command -v docker >/dev/null 2>&1; then
         if docker exec pmon test -f "$PLATFORM_WHEEL" 2>/dev/null; then
             docker exec pmon pip3 install --quiet --force-reinstall "$PLATFORM_WHEEL" 2>/dev/null || true
             echo "wedge100s postinst: reinstalled sonic_platform wheel in pmon container"
+        fi
+        # Ensure openssh-client (ssh binary) is available inside pmon.
+        # bmc.py uses subprocess.run(['ssh', ...]) for BMC communication.
+        # The pmon Docker image does not include openssh-client; copy the
+        # host binary until the Dockerfile is rebuilt with openssh-client.
+        if ! docker exec pmon which ssh >/dev/null 2>&1; then
+            SSH_BIN=$(which ssh 2>/dev/null)
+            if [ -n "$SSH_BIN" ]; then
+                docker cp "$SSH_BIN" pmon:/usr/bin/ssh 2>/dev/null || true
+                # Copy required shared libraries if missing
+                for lib in $(ldd "$SSH_BIN" 2>/dev/null | awk '/=>/{print $3}' | grep -v '^('); do
+                    [ -f "$lib" ] && docker exec pmon test -f "$lib" 2>/dev/null || \
+                        docker cp "$lib" pmon:"$lib" 2>/dev/null || true
+                done
+                echo "wedge100s postinst: copied ssh binary into pmon container"
+            fi
         fi
         # Patch psud poll interval: 3s → 30s (PSU insertion is a human-scale event).
         # This reduces I2C traffic through the CP2112 USB bridge, improving SSH responsiveness.

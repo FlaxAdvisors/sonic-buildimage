@@ -544,6 +544,173 @@ static int set_lpmode_hidraw(int port, int lpmode)
 }
 
 /*
+ * cp2112_write_eeprom — write bytes to QSFP EEPROM via the mux tree.
+ *
+ * The CP2112 DATA_WRITE_REQUEST supports up to 61 bytes total.
+ * reg_buf[0] = offset (1 byte), so max data bytes per call = 60.
+ * Callers must split writes larger than 60 bytes.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int cp2112_write_eeprom(int mux_addr, int mux_chan, int offset,
+                                const uint8_t *data, int len)
+{
+    if (len < 1 || len > 60) return -1;
+
+    uint8_t reg_buf[61];
+    reg_buf[0] = (uint8_t)offset;
+    memcpy(reg_buf + 1, data, len);
+
+    if (mux_select(mux_addr, mux_chan) < 0) return -1;
+    int rc = cp2112_write(0x50, reg_buf, len + 1);
+    mux_deselect(mux_addr);
+    return (rc < 0) ? -1 : 0;
+}
+
+/* ── poll_write_requests_hidraw — process pending sfp_N_write_req files ─── */
+
+static void poll_write_requests_hidraw(void)
+{
+    char req_path[128], ack_path[128], eeprom_path[128];
+    char read_buf[4096];
+    FILE *fp;
+
+    for (int port = 0; port < NUM_PORTS; port++) {
+        snprintf(req_path,    sizeof(req_path),    RUN_DIR "/sfp_%d_write_req",  port);
+        snprintf(ack_path,    sizeof(ack_path),    RUN_DIR "/sfp_%d_write_ack",  port);
+        snprintf(eeprom_path, sizeof(eeprom_path), RUN_DIR "/sfp_%d_eeprom",     port);
+
+        fp = fopen(req_path, "r");
+        if (!fp) continue;
+
+        /* Read JSON payload */
+        size_t n = fread(read_buf, 1, sizeof(read_buf) - 1, fp);
+        fclose(fp);
+        read_buf[n] = '\0';
+
+        /* Minimal JSON parse: extract offset, length, data_hex */
+        int offset = -1, length = -1;
+        char data_hex[512] = {0};
+        {
+            char *p;
+            p = strstr(read_buf, "\"offset\"");
+            if (p) sscanf(p + 8, " : %d", &offset);
+            p = strstr(read_buf, "\"length\"");
+            if (p) sscanf(p + 8, " : %d", &length);
+            p = strstr(read_buf, "\"data_hex\"");
+            if (p) sscanf(p + 10, " : \"%511[^\"]\"", data_hex);
+        }
+
+        if (offset < 0 || length <= 0 || length > 60 || data_hex[0] == '\0') {
+            write_str_file(ack_path, "err:bad_request");
+            unlink(req_path);
+            continue;
+        }
+
+        /* Convert hex string to bytes */
+        uint8_t write_buf[60];
+        int hex_len = (int)strlen(data_hex);
+        if (hex_len != length * 2) {
+            write_str_file(ack_path, "err:hex_length_mismatch");
+            unlink(req_path);
+            continue;
+        }
+        for (int i = 0; i < length; i++) {
+            unsigned int byte_val = 0;
+            sscanf(data_hex + i * 2, "%02x", &byte_val);
+            write_buf[i] = (uint8_t)byte_val;
+        }
+
+        /* Perform I2C write via hidraw */
+        int bus = SFP_BUS_MAP[port];
+        int mux_addr = bus_to_mux_addr(bus);
+        int mux_chan  = bus_to_mux_channel(bus);
+        int rc = cp2112_write_eeprom(mux_addr, mux_chan, offset, write_buf, length);
+
+        if (rc < 0) {
+            write_str_file(ack_path, "err:i2c_write_failed");
+        } else {
+            /* Refresh EEPROM cache */
+            refresh_eeprom_lower_page(port, eeprom_path);
+            write_str_file(ack_path, "ok");
+        }
+        unlink(req_path);
+    }
+}
+
+/* ── poll_read_requests_hidraw — process pending sfp_N_read_req files ───── */
+
+static void poll_read_requests_hidraw(void)
+{
+    char req_path[128], resp_path[128];
+    char read_buf[256];
+    FILE *fp;
+
+    for (int port = 0; port < NUM_PORTS; port++) {
+        snprintf(req_path,  sizeof(req_path),  RUN_DIR "/sfp_%d_read_req",  port);
+        snprintf(resp_path, sizeof(resp_path), RUN_DIR "/sfp_%d_read_resp", port);
+
+        fp = fopen(req_path, "r");
+        if (!fp) continue;
+
+        size_t n = fread(read_buf, 1, sizeof(read_buf) - 1, fp);
+        fclose(fp);
+        read_buf[n] = '\0';
+
+        /* We only support offset=0, length=128 (lower page DOM read) */
+        int offset = -1, length = -1;
+        {
+            char *p;
+            p = strstr(read_buf, "\"offset\"");
+            if (p) sscanf(p + 8, " : %d", &offset);
+            p = strstr(read_buf, "\"length\"");
+            if (p) sscanf(p + 8, " : %d", &length);
+        }
+
+        if (offset != 0 || length != 128) {
+            write_str_file(resp_path, "err:unsupported_range");
+            unlink(req_path);
+            continue;
+        }
+
+        int bus      = SFP_BUS_MAP[port];
+        int mux_addr = bus_to_mux_addr(bus);
+        int mux_chan  = bus_to_mux_channel(bus);
+
+        if (mux_addr < 0 || mux_chan < 0) {
+            write_str_file(resp_path, "err:bad_bus");
+            unlink(req_path);
+            continue;
+        }
+
+        if (mux_select(mux_addr, mux_chan) < 0) {
+            write_str_file(resp_path, "err:mux_select");
+            unlink(req_path);
+            continue;
+        }
+
+        unsigned char ebuf[128] = {0};
+        uint8_t lower_addr = 0x00;
+        int r = cp2112_write_read(0x50, &lower_addr, 1, ebuf, 128);
+        mux_deselect(mux_addr);
+
+        if (r != 128) {
+            write_str_file(resp_path, "err:i2c_read_failed");
+            unlink(req_path);
+            continue;
+        }
+
+        /* Encode as hex string */
+        char hex_resp[257];
+        for (int i = 0; i < 128; i++)
+            snprintf(hex_resp + i * 2, 3, "%02x", ebuf[i]);
+        hex_resp[256] = '\0';
+        write_str_file(resp_path, hex_resp);
+        unlink(req_path);
+    }
+}
+
+/*
  * Process LP_MODE state on each daemon invocation (hidraw path).
  *
  * Two actions in order:
@@ -1088,6 +1255,8 @@ int main(int argc, char *argv[])
         poll_syseeprom_hidraw();
         poll_presence_hidraw();
         poll_lpmode_hidraw();
+        poll_write_requests_hidraw();
+        poll_read_requests_hidraw();
         close(g_hidraw_fd);
         g_hidraw_fd = -1;
     } else {

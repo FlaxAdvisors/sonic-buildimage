@@ -1,0 +1,15 @@
+setup.cfg
+setup.py
+bmpcfgd/__init__.py
+bmpcfgd/bmpcfgd.py
+sonic_bmpcfgd_services.egg-info/PKG-INFO
+sonic_bmpcfgd_services.egg-info/SOURCES.txt
+sonic_bmpcfgd_services.egg-info/dependency_links.txt
+sonic_bmpcfgd_services.egg-info/entry_points.txt
+sonic_bmpcfgd_services.egg-info/requires.txt
+sonic_bmpcfgd_services.egg-info/top_level.txt
+tests/__init__.py
+tests/bmpcfgd_test.py
+tests/mock_connector.py
+tests/common/mock_bootloader.py
+tests/common/mock_configdb.py

@@ -1,0 +1,58 @@
+{
+  "device": {
+    "mgmt_gateway": "192.168.88.2",
+    "mgmt_vrf": "mgmt"
+  },
+  "breakout_ports": [
+    {
+      "parent": "Ethernet0",
+      "mode": "4x25G[10G]",
+      "subport_config": {"admin_status": "up", "speed": "25000", "fec": "none"}
+    },
+    {
+      "parent": "Ethernet64",
+      "mode": "4x25G[10G]",
+      "subport_config": {"admin_status": "up", "speed": "10000", "fec": "none"}
+    },
+    {
+      "parent": "Ethernet80",
+      "mode": "4x25G[10G]",
+      "subport_config": {"admin_status": "up", "speed": "25000", "fec": "none"}
+    }
+  ],
+  "vlans": [
+    {
+      "id": 10,
+      "members": [
+        "Ethernet0","Ethernet1","Ethernet2","Ethernet3",
+        "Ethernet64","Ethernet65","Ethernet66","Ethernet67",
+        "Ethernet80","Ethernet81","Ethernet82","Ethernet83"
+      ]
+    },
+    {
+      "id": 999,
+      "members": ["PortChannel1"]
+    }
+  ],
+  "portchannels": [
+    {"name": "PortChannel1", "members": ["Ethernet16","Ethernet32"]}
+  ],
+  "optical_ports": [
+    {"port": "Ethernet16",  "fec": "rs"},
+    {"port": "Ethernet32",  "fec": "rs"},
+    {"port": "Ethernet48",  "fec": "rs"},
+    {"port": "Ethernet112", "fec": "rs"},
+    {"port": "Ethernet100", "fec": "rs"},
+    {"port": "Ethernet104", "fec": "rs"},
+    {"port": "Ethernet108", "fec": "rs"},
+    {"port": "Ethernet116", "fec": "rs"}
+  ],
+  "hosts": [
+    {"port": "Ethernet0",  "mgmt_ip": "192.168.88.243", "test_ip": "10.0.10.243"},
+    {"port": "Ethernet1",  "mgmt_ip": "192.168.88.232", "test_ip": "10.0.10.232"},
+    {"port": "Ethernet66", "mgmt_ip": "192.168.88.237", "test_ip": "10.0.10.237"},
+    {"port": "Ethernet67", "mgmt_ip": "192.168.88.242", "test_ip": "10.0.10.242"},
+    {"port": "Ethernet80", "mgmt_ip": "192.168.88.225", "test_ip": "10.0.10.225"},
+    {"port": "Ethernet81", "mgmt_ip": "192.168.88.241", "test_ip": "10.0.10.241"}
+  ]
+}

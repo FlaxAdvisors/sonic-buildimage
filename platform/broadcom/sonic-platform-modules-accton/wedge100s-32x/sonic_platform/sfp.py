@@ -64,7 +64,6 @@ _READ_TIMEOUT_S  = 5.0
 
 _DOM_CACHE_TTL      = 20              # seconds: max staleness per port
 _DOM_LAST_REFRESH   = [0.0] * NUM_SFPS  # monotonic timestamp of last live read
-_POWER_INIT_MTIME: dict = {}           # port → eeprom mtime when Power Override was last written
 
 def _wait_for_file(path, timeout_s):
     """Poll path until it exists; return True on success, False on timeout."""
@@ -126,8 +125,6 @@ class Sfp(SfpOptoeBase):
 
         if cached_data is None:
             return None
-
-        self._init_power_override(cached_data)
 
         # Demand-driven lower-page refresh when TTL has expired.
         if offset < 128 and (time.monotonic() - _DOM_LAST_REFRESH[self._port]) > _DOM_CACHE_TTL:
@@ -194,32 +191,6 @@ class Sfp(SfpOptoeBase):
             return bytearray(data) if len(data) == 128 else None
         except ValueError:
             return None
-
-    def _init_power_override(self, cached_data):
-        """Set Power Override (byte 93 bit 1) on first EEPROM read after insertion.
-
-        SFF-8636 byte 129 bits 7-6 = 0b11 means Power Class 4+ (≥3.5 W).
-        Without Power Override=1 these modules stay in a reduced-power idle
-        state and the laser does not fire even with lpmode deasserted.
-
-        Keyed on eeprom file mtime so re-insertion triggers a fresh write.
-        Preserves CDR-control bits (3-2); clears Power Set (bit 0) so the
-        module runs at full rated power.
-        """
-        cache_path = _I2C_EEPROM_CACHE.format(self._port)
-        try:
-            mtime = os.path.getmtime(cache_path)
-        except OSError:
-            return
-        if _POWER_INIT_MTIME.get(self._port) == mtime:
-            return
-
-        if len(cached_data) >= 130 and ((cached_data[129] >> 6) & 0x03) == 0x03:
-            byte93 = cached_data[93]
-            if not (byte93 & 0x02):
-                self.write_eeprom(93, 1, bytearray([(byte93 | 0x02) & ~0x01]))
-
-        _POWER_INIT_MTIME[self._port] = mtime
 
     def write_eeprom(self, offset, num_bytes, write_buffer):
         """Write to QSFP EEPROM via daemon request file; wait for ack."""

@@ -130,6 +130,33 @@ git status             # submodule itself should show no SHA change
 
 **Applying and reverting patches manually (for testing):**
 
+Patches are applied inside the build container by slave.mk, immediately before each package build, and removed after. They never persist in the working tree.
+
+The exact lifecycle:
+
+    make init
+      └── git submodule update --init
+            └── src/sonic-utilities/ ← clean upstream, NO patches applied
+
+    make target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
+      └── slave.mk rule fires for each package:
+            1. quilt pop -a -f          ← clean any prior state
+            2. quilt push -a            ← apply src/sonic-utilities.patch/series
+            3. dpkg-buildpackage / make ← build with patches applied
+            4. quilt pop -a -f          ← remove patches
+            5. rm -rf .pc               ← clean quilt state
+            └── src/sonic-utilities/ ← clean again, as if nothing happened
+
+So if you cd src/sonic-utilities && grep something between builds, you'll see unpatched code. The patches only exist in the tree during the few seconds the build is actually running.
+
+Practical implication: if you want to develop/test against a patched submodule interactively, you have to apply them manually:
+
+    cd src/sonic-utilities
+    QUILT_PATCHES=../sonic-utilities.patch quilt push -a
+    # ... do your work ...
+    quilt pop -a -f && rm -rf .pc   # clean up when done
+
+
 ```bash
 # Apply
 cd src/sonic-swss
@@ -296,7 +323,8 @@ Build System File Map
 | `platform/broadcom/rules.mk` | Includes `platform-modules-accton.mk` |
 | `platform/broadcom/one-image.mk` | Adds wedge100s to `_LAZY_INSTALLS` |
 | `installer/platforms/x86_64-accton_wedge100s_32x-r0` | GRUB console params (ttyS0, 57600) |
-| `installer/platforms_asic` | Maps platform string to ASIC vendor (broadcom) |
+| `installer/platforms_asic` | has x86_64-accton_wedge100s_32x-r0
+ - Maps platform string to ASIC vendor (broadcom) |
 | `rules/config` | Default build variables (`SONIC_USE_PDDF_FRAMEWORK=y`) |
 | `rules/config.user` | Local overrides — gitignored |
 

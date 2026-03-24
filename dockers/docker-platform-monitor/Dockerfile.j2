@@ -33,8 +33,7 @@ RUN apt-get update &&   \
         ethtool         \
         xxd             \
         python3-yaml    \
-        python3-bottle  \
-        openssh-client
+        python3-bottle
 {% if sonic_asic_platform == 'mellanox' %}
 RUN apt-get install -y dbus
 {% endif %}

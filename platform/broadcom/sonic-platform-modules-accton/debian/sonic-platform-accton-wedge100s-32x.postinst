@@ -58,17 +58,6 @@ if [ -f "$BREAKOUT_CFG" ]; then
     echo "wedge100s postinst: installed port_breakout_config_db.json to /etc/sonic/"
 fi
 
-# Install factory default config_db.json to /etc/sonic/ only on first install
-# (i.e. when /etc/sonic/config_db.json does not yet exist).  This pre-empts
-# the sonic-cfggen T0 topology generation that would otherwise flood every
-# port with BGP neighbors and ARP traffic on first boot.
-DEVICE_DIR="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0"
-FACTORY_CFG="$DEVICE_DIR/config_db.json"
-TARGET_CFG="/etc/sonic/config_db.json"
-if [ -f "$FACTORY_CFG" ] && [ ! -f "$TARGET_CFG" ]; then
-    cp "$FACTORY_CFG" "$TARGET_CFG"
-    echo "wedge100s postinst: installed factory config_db.json to /etc/sonic/"
-fi
 
 # Bring usb0 up immediately (CDC-ECM link to BMC).
 # systemd-networkd is masked on SONiC; the interface is kept up across reboots

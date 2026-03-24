@@ -5,12 +5,12 @@ sonic_platform/psu.py — PSU implementation for Accton Wedge 100S-32X.
 Two AC PSUs.  Hardware access is split between two domains:
 
 Presence and power-good:
-  Read from wedge100s_cpld sysfs attributes under /sys/bus/i2c/devices/1-0032/:
+  Read from /run/wedge100s/ files written by wedge100s-i2c-daemon (poll_cpld):
     psu1_present  — 1 = present (driver inverts active-low bit 0 of reg 0x10)
     psu1_pgood    — 1 = power good (bit 1, active-high)
     psu2_present  — 1 = present (driver inverts active-low bit 4 of reg 0x10)
     psu2_pgood    — 1 = power good (bit 5, active-high)
-  Requires wedge100s_cpld kernel module (Phase R26).
+  Requires wedge100s_cpld kernel module (Phase R26) and wedge100s-i2c-daemon.
 
 PMBus telemetry (Phase R29):
   Read from /run/wedge100s/ files written by wedge100s-bmc-daemon (R28).
@@ -35,13 +35,6 @@ try:
     from sonic_platform_base.psu_base import PsuBase
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
-
-
-# ---------------------------------------------------------------------------
-# Host CPLD sysfs path (wedge100s_cpld driver, Phase R26)
-# ---------------------------------------------------------------------------
-
-_CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
 
 
 # ---------------------------------------------------------------------------
@@ -92,19 +85,12 @@ def _pmbus_decode_linear11(raw):
 # ---------------------------------------------------------------------------
 
 def _read_cpld_attr(name):
-    """
-    Read a CPLD integer attribute from the daemon cache (/run/wedge100s/).
-    Falls back to kernel sysfs if the cache file is not yet present
-    (early boot before the first wedge100s-i2c-daemon tick).
-    Returns the integer value, or None on error.
-    """
-    for base in (_RUN_DIR, _CPLD_SYSFS):
-        try:
-            with open('{}/{}'.format(base, name)) as f:
-                return int(f.read().strip(), 0)
-        except Exception:
-            continue
-    return None
+    """Read a CPLD integer attribute from the daemon cache (/run/wedge100s/)."""
+    try:
+        with open('{}/{}'.format(_RUN_DIR, name)) as f:
+            return int(f.read().strip(), 0)
+    except Exception:
+        return None
 
 
 def _read_daemon_int(path):

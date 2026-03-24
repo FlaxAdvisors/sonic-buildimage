@@ -31,13 +31,27 @@ The BMC exports a CDC Composite Gadget with **both** CDC-ECM and CDC-ACM interfa
 
 ## Plan for implementation (Task 8)
 
-Assign private /30 link addresses:
-- Switch `usb0`: `169.254.100.1/30`
-- BMC `usb0`: `169.254.100.2/30`
+Do not mess with private addresses - use IPv6LL:
+- Switch `usb0`: `fe80::ff:fe00:2%usb0`
+- BMC `usb0`: `fe80::ff:fe00:1%usb0`
+
+For example:
+
+```bash
+admin@hare-lorax:~$ ssh root@fe80::ff:fe00:1%usb0
+The authenticity of host 'fe80::ff:fe00:1%usb0 (fe80::ff:fe00:1%usb0)' can't be established.
+ED25519 key fingerprint is SHA256:FxC6WPXnMC9iMre2DUbx7JCHC6F1sMEux6qSbYzUEbU.
+This key is not known by any other names.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added 'fe80::ff:fe00:1%usb0' (ED25519) to the list of known hosts.
+root@fe80::ff:fe00:1%usb0's password:
+Last login: Mon Mar 23 12:11:45 2026
+root@hare-lorax-bmc:~# logout
+Connection to fe80::ff:fe00:1%usb0 closed.
+```
 
 Both ends can be configured at boot:
-- Switch: postinst or platform-init assigns IP
-- BMC: BMC config or systemd-networkd assigns IP
+- Use the /dev/ttySCM0 to push the sonic ssh key 
 
 Once IP is assigned, BMC commands can be sent via SSH or a lightweight TCP socket
 instead of the blocking TTY path (`/dev/ttyACM0`), eliminating the 140s timeout

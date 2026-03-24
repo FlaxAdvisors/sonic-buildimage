@@ -9,11 +9,11 @@ The at24 device is registered by accton_wedge100s_util.py at boot via:
     echo 24c64 0x50 > /sys/bus/i2c/devices/i2c-40/new_device
 Sysfs node: /sys/bus/i2c/devices/40-0050/eeprom
 
-Primary source: /run/wedge100s/syseeprom written by wedge100s-i2c-daemon at
-first boot (OnBootSec=5s, before pmon starts).  This eliminates CP2112 mux
-contention: the system EEPROM (mux 0x74 ch6) and PCA9535 presence chips
-(mux 0x74 ch2/3) share the same PCA9548 0x74 mux; concurrent reads cause
-the 0x51 address corruption and zeroed-data incidents observed pre-daemon.
+Source: /run/wedge100s/syseeprom written by wedge100s-i2c-daemon at first
+boot.  This is the only read path; there is no sysfs fallback.  The daemon
+serialises all CP2112 access, eliminating the mux-contention issue (shared
+PCA9548 0x74 between EEPROM ch6 and PCA9535 presence chips ch2/3) that
+caused address corruption and zeroed-data before the daemon architecture.
 """
 
 try:
@@ -22,25 +22,18 @@ except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
 _SYSEEPROM_DAEMON_CACHE = '/run/wedge100s/syseeprom'
-_SYSEEPROM_SYSFS        = '/sys/bus/i2c/devices/40-0050/eeprom'
 _ONIE_MAGIC             = b'TlvInfo\x00'
 
 
 class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
 
     def __init__(self):
-        # Initialize TlvInfoDecoder with sysfs as the raw path.
-        # use_cache=False — we manage our own cache via the daemon file.
-        super(SysEeprom, self).__init__(_SYSEEPROM_SYSFS, 0, '', False)
+        # TlvInfoDecoder base path is not used (read_eeprom is fully overridden).
+        super(SysEeprom, self).__init__('', 0, '', False)
         self._eeprom_cache = None
 
     def read_eeprom(self):
-        """
-        Return raw EEPROM bytes.
-
-        Primary: /run/wedge100s/syseeprom written by wedge100s-i2c-daemon.
-        Fallback: direct sysfs read (first ~5 s of boot, or daemon failed).
-        """
+        """Return raw EEPROM bytes from the daemon cache, or None if absent."""
         try:
             with open(_SYSEEPROM_DAEMON_CACHE, 'rb') as f:
                 data = f.read(8192)
@@ -48,13 +41,7 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
                 return bytearray(data)
         except OSError:
             pass
-
-        # Fallback: read directly from sysfs
-        try:
-            with open(_SYSEEPROM_SYSFS, 'rb') as f:
-                return bytearray(f.read(8192))
-        except OSError:
-            return None
+        return None
 
     def get_eeprom(self):
         """
@@ -62,7 +49,10 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
 
         Keys are hex type-code strings (e.g. "0x21" for Product Name).
         Values are their decoded string representations.
-        Returns {} on any read or parse error.
+
+        Returns {} without caching when the daemon file is absent (normal for
+        the first few seconds after boot) so the next call retries.  Once a
+        valid parse succeeds the result is cached permanently (EEPROM is static).
         """
         if self._eeprom_cache is not None:
             return self._eeprom_cache
@@ -72,6 +62,7 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
         except Exception:
             return {}
 
+        # Daemon file absent or invalid — do not cache; caller will retry.
         if raw is None or len(raw) < self._TLV_INFO_HDR_LEN + 2:
             return {}
 
@@ -92,7 +83,8 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
                 break
             idx += 2 + tlv_len
 
-        self._eeprom_cache = result
+        if result:
+            self._eeprom_cache = result  # cache only on successful parse
         return result
 
     def system_eeprom_info(self):

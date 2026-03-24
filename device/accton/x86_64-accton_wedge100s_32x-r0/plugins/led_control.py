@@ -13,8 +13,8 @@
 #   0x02 = green        0x0a = green blinking
 #   0x04 = blue         0x0c = blue blinking
 #
-# Phase R26: writes via wedge100s_cpld sysfs attributes (led_sys1, led_sys2)
-# instead of i2cset subprocess.  Sysfs path: /sys/bus/i2c/devices/1-0032/
+# Writes to /run/wedge100s/led_sys{1,2}; wedge100s-i2c-daemon applies those
+# values to the wedge100s_cpld sysfs attributes on its 3-second poll tick.
 #
 
 import os
@@ -24,10 +24,7 @@ try:
 except ImportError as e:
     raise ImportError(str(e) + " - required module not found")
 
-# CPLD sysfs attributes from wedge100s_cpld driver (Phase R26)
-_CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
-
-# /run mirror — written alongside every CPLD update for observability
+# wedge100s-i2c-daemon applies writes to CPLD sysfs on its 3-second tick.
 _RUN_DIR = '/run/wedge100s'
 
 # Register values
@@ -36,16 +33,11 @@ _LED_GREEN = 0x02
 
 
 def _led_write(attr, val):
-    """Write LED value to both /run/wedge100s mirror and CPLD sysfs."""
+    """Write LED value to /run/wedge100s/; daemon handles CPLD write-through."""
     try:
         os.makedirs(_RUN_DIR, exist_ok=True)
         with open('{}/{}'.format(_RUN_DIR, attr), 'w') as f:
             f.write('{}\n'.format(val))
-    except Exception:
-        pass
-    try:
-        with open('{}/{}'.format(_CPLD_SYSFS, attr), 'w') as f:
-            f.write(str(val))
     except Exception:
         pass
 

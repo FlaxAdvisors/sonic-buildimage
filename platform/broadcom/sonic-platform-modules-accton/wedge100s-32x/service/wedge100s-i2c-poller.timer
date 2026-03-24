@@ -1,9 +1,11 @@
 [Unit]
 Description=Wedge100S QSFP I2C poller timer (presence + event-driven EEPROM)
+After=wedge100s-platform-init.service
+Requires=wedge100s-platform-init.service
 
 [Timer]
-# First run 5 s after boot — platform-init finishes ~3 s before this fires.
-OnBootSec=5s
+# Fire immediately when this timer unit activates (after platform-init).
+OnActiveSec=0
 # Poll every 3 s: 4 PCA9535 SMBus reads (~5 ms each, ~20 ms/cycle).
 # EEPROM reads only on insertion; steady-state I2C traffic is minimal.
 OnUnitActiveSec=3s

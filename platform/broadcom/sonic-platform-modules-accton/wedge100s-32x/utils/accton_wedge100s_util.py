@@ -357,6 +357,25 @@ def do_sonic_platform_clean():
             print('{} is uninstalled'.format(PLATFORM_API2_WHL_FILE_PY3))
 
 
+def _request_led_init():
+    """Write syscpld_led_ctrl.set so bmc-daemon clears the ONIE rainbow.
+
+    ONIE leaves syscpld register 0x3c = 0xe0 (rainbow animation, BCM LEDUP
+    gated off).  bmc-daemon reads this .set file on its next 10 s cycle and
+    issues 'i2cset -f -y 12 0x31 0x3c 0x02' via the BMC TTY, then removes
+    the file.  Value 0x02 = th_led_en=1 (BCM LEDUP passthrough, all test
+    modes off).
+    """
+    set_path = '/run/wedge100s/syscpld_led_ctrl.set'
+    try:
+        os.makedirs('/run/wedge100s', exist_ok=True)
+        with open(set_path, 'w') as f:
+            f.write('0x02\n')
+        my_log("LED init requested: {} = 0x02 (bmc-daemon will apply)".format(set_path))
+    except Exception as e:
+        print("WARNING: _request_led_init: {}".format(e))
+
+
 def _configure_usb0():
     """Bring up usb0 (CDC-ECM link to BMC) to trigger IPv6 link-local auto-config.
 
@@ -397,6 +416,7 @@ def do_install():
     _pin_bcm_irq()
     do_sonic_platform_install()
     _configure_usb0()
+    _request_led_init()
     print("Platform init complete.")
 
 
@@ -565,9 +585,7 @@ def set_device(args):
             return
         # Fan speed is set via BMC TTY using set_fan_speed.sh (implemented in bmc.py / fan.py).
         # This CLI shim invokes it directly without the pmon sonic_platform layer.
-        log_os_system(
-            "bash -c 'echo 2 | tee /run/wedge100s/led_sys1 "
-            "> /sys/bus/i2c/devices/1-0032/led_sys1'", 0)  # keep SYS1 green while adjusting
+        log_os_system("bash -c 'echo 2 > /run/wedge100s/led_sys1'", 0)  # keep SYS1 green while adjusting
         status, output = log_os_system(
             "python3 -c \"import sys; sys.path.insert(0,'/usr/lib/python3/dist-packages');"
             "from sonic_platform import bmc; "
@@ -585,10 +603,9 @@ def set_device(args):
         except ValueError:
             show_set_help()
             return
-        for attr, reg in (('led_sys1', '0x3e'), ('led_sys2', '0x3f')):
+        for attr in ('led_sys1', 'led_sys2'):
             log_os_system(
-                "bash -c 'echo {val} | tee /run/wedge100s/{attr} "
-                "> /sys/bus/i2c/devices/1-0032/{attr}'".format(val=color, attr=attr), 1)
+                "bash -c 'echo {val} > /run/wedge100s/{attr}'".format(val=color, attr=attr), 1)
         print("LED color set to 0x{:02x}".format(color))
     elif args[0] == 'sfp':
         # QSFP LP_MODE / RESET pins are on the mux board and not accessible

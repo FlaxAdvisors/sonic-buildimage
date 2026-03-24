@@ -2,7 +2,7 @@
 
 import subprocess
 
-CPLD_VERSION_PATH = "/sys/bus/i2c/devices/1-0032/cpld_version"
+CPLD_VERSION_PATH = "/run/wedge100s/cpld_version"
 
 
 class Component:

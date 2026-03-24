@@ -350,7 +350,7 @@ thermalctld's first poll cycle.
 | `xcvrd` | `sfp.read_eeprom()` / `sfp.get_eeprom_path()` | `/run/wedge100s/sfp_N_eeprom` (daemon) |
 | `thermalctld` | `thermal.get_temperature()` | `/run/wedge100s/thermal_N` (bmc-daemon) or host sysfs coretemp |
 | `thermalctld` | `fan.get_speed()`, `fan.get_presence()` | `/run/wedge100s/fan_*` (bmc-daemon) |
-| `thermalctld` | `fan.set_speed()` | BMC TTY command `set_fan_speed.sh <pct>` |
+| `thermalctld` | `fan.set_speed()` | BMC SSH command `set_fan_speed.sh <pct>` |
 | `psud` | `psu.get_presence()`, `psu.get_powergood_status()` | CPLD sysfs `1-0032/psu{N}_{present,pgood}` |
 | `psud` | `psu.get_voltage()`, `psu.get_power()`, etc. | `/run/wedge100s/psu_N_{vin,iin,iout,pout}` (bmc-daemon) |
 | `ledd` / `healthd` | `chassis.set_status_led()` | CPLD sysfs `1-0032/led_sys1` |

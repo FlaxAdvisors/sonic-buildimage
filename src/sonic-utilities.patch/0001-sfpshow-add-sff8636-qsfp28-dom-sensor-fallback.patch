@@ -1,0 +1,74 @@
+From 9a408e6180566e11bd465ee8dcbd1facc86a0651 Mon Sep 17 00:00:00 2001
+From: wedge100s-port <wedge100s@local>
+Date: 2026-03-20
+Subject: [PATCH] sfpshow: add SFF-8636/QSFP28 DOM sensor fallback for sfp pm
+
+sfpshow's `sfp pm` command previously printed
+"Transceiver performance monitoring not applicable" for any port
+whose transceiver lacked CMIS VDM data (e.g. SFF-8636 QSFP28
+modules such as those fitted in the Wedge 100S-32X).
+
+Add a fallback path: when sfp_pm_dict is absent and the module is
+NOT a CMIS device, render TRANSCEIVER_DOM_SENSOR lane data
+(rx/tx power, bias current, temperature, voltage) using the same
+tabulate formatting as the CMIS path.  CMIS modules still fall
+through to ZR_PM_NOT_APPLICABLE_STR.
+
+Also: guard the TRANSCEIVER_DOM_THRESHOLD dict with `or {}` to
+avoid a later TypeError if Redis returns None; remove unused
+`table = []`.
+---
+ scripts/sfpshow | 27 +++++++++++++++++++++++++--
+ 1 file changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/sfpshow b/scripts/sfpshow
+index 05754e4..4d35efd 100755
+--- a/scripts/sfpshow
++++ b/scripts/sfpshow
+@@ -253,6 +253,8 @@ ZR_PM_NOT_APPLICABLE_STR = 'Transceiver performance monitoring not applicable'
+
++SFF8636_PM_HEADER = ['Lane', 'Rx Power (dBm)', 'Tx Bias (mA)', 'Tx Power (dBm)']
++
+ QSFP_STATUS_NOT_APPLICABLE_STR = 'Transceiver status info not applicable'
+
+ def display_invalid_intf_eeprom(intf_name):
+@@ -609,10 +611,9 @@ class SFPShow(object):
+         sfp_pm_dict = state_db.get_all(
+             self.db.STATE_DB, 'TRANSCEIVER_PM|{}'.format(first_subport))
+         sfp_threshold_dict = state_db.get_all(
+-            state_db.STATE_DB, 'TRANSCEIVER_DOM_THRESHOLD|{}'.format(first_subport))
++            state_db.STATE_DB, 'TRANSCEIVER_DOM_THRESHOLD|{}'.format(first_subport)) or {}
+         # Convert VDM THRESHOLD fields to legacy DOM THRESHOLD fields
+         self.convert_vdm_fields_to_legacy_fields(state_db, first_subport, sfp_threshold_dict, CCMIS_VDM_THRESHOLD_TO_LEGACY_DOM_THRESHOLD_MAP, 'THRESHOLD')
+-        table = []
+         indent_num = 4
+         indent = ' ' * indent_num
+         if sfp_pm_dict:
+@@ -650,7 +651,26 @@ class SFPShow(object):
+                                ZR_PM_HEADER, disable_numparse=True).replace('\n', '\n' + indent)
+             output += '\n'
+         else:
+-            output = ZR_PM_NOT_APPLICABLE_STR + '\n'
++            # SFF-8636 / QSFP28 intensity-modulated fallback: render TRANSCEIVER_DOM_SENSOR
++            sfp_info_dict = state_db.get_all(state_db.STATE_DB, 'TRANSCEIVER_INFO|{}'.format(interface_name)) or {}
++            is_cmis = is_transceiver_cmis(sfp_info_dict)
++            dom_sensor_dict = state_db.get_all(state_db.STATE_DB, 'TRANSCEIVER_DOM_SENSOR|{}'.format(first_subport)) or {}
++            if not is_cmis and dom_sensor_dict:
++                lane_rows = []
++                for lane in range(1, 5):
++                    rx = dom_sensor_dict.get('rx{}power'.format(lane), 'N/A')
++                    bias = dom_sensor_dict.get('tx{}bias'.format(lane), 'N/A')
++                    txpwr = dom_sensor_dict.get('tx{}power'.format(lane), 'N/A')
++                    lane_rows.append([str(lane), str(rx), str(bias), str(txpwr)])
++                output = '\n' + indent
++                output += tabulate(lane_rows, SFF8636_PM_HEADER,
++                                   disable_numparse=True).replace('\n', '\n' + indent)
++                temp = dom_sensor_dict.get('temperature', 'N/A')
++                voltage = dom_sensor_dict.get('voltage', 'N/A')
++                output += '\n{}Temperature: {} C\n{}Voltage: {} Volts\n'.format(
++                    indent, temp, indent, voltage)
++            else:
++                output = ZR_PM_NOT_APPLICABLE_STR + '\n'
+         return output
+
+     def is_valid_physical_port(self, port_name):

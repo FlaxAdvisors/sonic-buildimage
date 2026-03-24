@@ -25,17 +25,6 @@ from sonic_platform.psu import Psu, NUM_PSUS
 from sonic_platform.sfp import Sfp, NUM_SFPS
 from sonic_platform.eeprom import SysEeprom
 from sonic_platform.watchdog import Watchdog
-from sonic_platform import platform_smbus
-
-# PCA9535 presence registers (bus, i2c_addr, register).
-# Register 0 = INPUT0 (GPIO lines 0-7), register 1 = INPUT1 (GPIO lines 8-15).
-# Lines are wired with XOR-1 interleave: line (r*8+b) ^ 1 = port within chip group.
-_PRESENCE_REGS = [
-    (36, 0x22, 0),   # chip 36-0022 INPUT0 → ports {1,0,3,2,5,4,7,6}
-    (36, 0x22, 1),   # chip 36-0022 INPUT1 → ports {9,8,11,10,13,12,15,14}
-    (37, 0x23, 0),   # chip 37-0023 INPUT0 → ports {17,16,19,18,21,20,23,22}
-    (37, 0x23, 1),   # chip 37-0023 INPUT1 → ports {25,24,27,26,29,28,31,30}
-]
 
 
 class Chassis(ChassisBase):
@@ -74,13 +63,12 @@ class Chassis(ChassisBase):
     # overall health state.  The CPLD driver exposes the attr led_sys1.
     # led_control.py owns SYS2 (port-activity) independently via ledd.
     #
-    # Write-through: every set writes to /run/wedge100s/led_sys1 (observable
-    # state) AND to the CPLD sysfs attribute (immediate hardware effect).
-    # The /run file lets the CLI utility and other tools read current state
-    # without touching the i2c bus.
+    # All LED I/O goes through /run/wedge100s/led_sys1.  wedge100s-i2c-daemon
+    # picks up the value on its 3-second tick (apply_led_writes) and writes
+    # it through to the CPLD sysfs attribute.  No Python code touches the
+    # i2c bus or CPLD sysfs directly.
     # ------------------------------------------------------------------
-    _CPLD_SYSFS = '/sys/bus/i2c/devices/1-0032'
-    _RUN_DIR    = '/run/wedge100s'
+    _RUN_DIR = '/run/wedge100s'
     _LED_ENCODE = {
         'green':         0x02,
         'red':           0x01,
@@ -110,24 +98,17 @@ class Chassis(ChassisBase):
             os.makedirs(self._RUN_DIR, exist_ok=True)
             with open('{}/led_sys1'.format(self._RUN_DIR), 'w') as f:
                 f.write('{}\n'.format(val))
-        except Exception:
-            pass
-        try:
-            with open('{}/led_sys1'.format(self._CPLD_SYSFS), 'w') as f:
-                f.write(str(val))
             return True
         except Exception:
             return False
 
     def get_status_led(self):
-        for base in (self._RUN_DIR, self._CPLD_SYSFS):
-            try:
-                with open('{}/led_sys1'.format(base)) as f:
-                    val = int(f.read().strip(), 0)
-                return self._LED_DECODE.get(val, self.STATUS_LED_COLOR_OFF)
-            except Exception:
-                continue
-        return self.STATUS_LED_COLOR_OFF
+        try:
+            with open('{}/led_sys1'.format(self._RUN_DIR)) as f:
+                val = int(f.read().strip(), 0)
+            return self._LED_DECODE.get(val, self.STATUS_LED_COLOR_OFF)
+        except Exception:
+            return self.STATUS_LED_COLOR_OFF
 
     def get_name(self):
         return "Wedge 100S-32X"
@@ -139,57 +120,30 @@ class Chassis(ChassisBase):
         """
         Read all 32 port presence bits from wedge100s-i2c-daemon cache files.
 
-        Primary path: /run/wedge100s/sfp_N_present written by the daemon every 3 s.
-        Eliminates direct mux-tree I2C from the chassis polling loop, removing
-        the residual mux race between chassis.py presence reads (mux 0x74 ch2/3)
-        and daemon EEPROM reads (mux 0x70-0x73) on module insertion.
-
-        Fallback (daemon not yet run — first ~5 s of boot): direct smbus2 reads
-        of PCA9535 INPUT registers, identical to the old primary path.
+        Reads /run/wedge100s/sfp_N_present for each port.  Ports whose file
+        is absent (daemon not yet started — normal for the first few seconds
+        after pmon start) are reported as not present.
 
         Returns dict {port (0-based): bool present}.
         """
         result = {}
-        # Try daemon cache files (normal operation after first daemon tick)
-        cache_miss = False
         for port in range(NUM_SFPS):
             cache = '/run/wedge100s/sfp_{}_present'.format(port)
             try:
                 with open(cache) as f:
                     result[port] = f.read().strip() == '1'
             except OSError:
-                cache_miss = True
-                break
-
-        if not cache_miss:
-            return result
-
-        # Fallback: direct smbus2 (daemon not yet run — first ~5 s of boot)
-        result = {}
-        for reg_idx, (bus, addr, reg) in enumerate(_PRESENCE_REGS):
-            byte = platform_smbus.read_byte(bus, addr, reg)
-            if byte is None:
-                return {i: self._sfp_list[i + 1].get_presence()
-                        for i in range(NUM_SFPS)}
-            group   = reg_idx // 2
-            reg_num = reg_idx % 2
-            for bit in range(8):
-                line = reg_num * 8 + bit
-                port = group * 16 + (line ^ 1)
-                result[port] = not bool((byte >> bit) & 1)
+                result[port] = False
         return result
 
     def get_change_event(self, timeout=0):
         """
-        Poll all QSFP ports for presence changes using bulk I2C reads.
+        Poll all QSFP ports for presence changes via daemon cache files.
 
-        Replaces the per-port GPIO sysfs loop (330 reads/sec) with 4
-        smbus2 reads of the PCA9535 INPUT registers — matching the ONL
-        onlp_sfpi_presence_bitmap_get() pattern exactly.
-
+        Reads /run/wedge100s/sfp_N_present for all 32 ports; no I2C access.
         xcvrd calls this with timeout in milliseconds.  We sleep 1 second
-        between polls (down from 0.1s), which is appropriate since module
-        insertion/removal is a human-scale event.
+        between polls, which is appropriate since module insertion/removal
+        is a human-scale event.
 
         Returns:
             (True, {'sfp': {port_idx: '1'|'0', ...}})

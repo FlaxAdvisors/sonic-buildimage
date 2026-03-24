@@ -1,0 +1,27 @@
+From 18752666b9bf902a72515b92c516ae5210bd78b1 Mon Sep 17 00:00:00 2001
+From: wedge100s-port <wedge100s@local>
+Date: 2026-03-17
+Subject: [PATCH] fix: zmqorch.h expose doTask via using declaration
+
+ZmqOrch overrides both doTask(ConsumerBase&) and doTask(Consumer&).
+Without an explicit using declaration for Orch::doTask, GCC 12+
+raises a "hides overloaded virtual function" warning that becomes
+a hard error in -Werror builds.
+
+Add `using Orch::doTask;` in the public section so all Orch overloads
+remain visible alongside the ZmqOrch-specific specialisations.
+---
+ orchagent/zmqorch.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/orchagent/zmqorch.h b/orchagent/zmqorch.h
+index 264611e..ad7022c 100644
+--- a/orchagent/zmqorch.h
++++ b/orchagent/zmqorch.h
+@@ -28,6 +28,7 @@ public:
+     ZmqOrch(swss::DBConnector *db, const std::vector<std::string> &tableNames, swss::ZmqServer *zmqServer);
+     ZmqOrch(swss::DBConnector *db, const std::vector<table_name_with_pri_t> &tableNames_with_pri, swss::ZmqServer *zmqServer);
+
++    using Orch::doTask;
+     virtual void doTask(ConsumerBase &consumer) { };
+     void doTask(Consumer &consumer) override;

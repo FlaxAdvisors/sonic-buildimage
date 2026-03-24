@@ -7,6 +7,8 @@ platforms. Task 7 (4a — INT_L persistent daemon) **CANCELLED**.
 
 ---
 
+** NOTE ** BMC HAS THIS INT_L GPIO ACCESSIBLE - described here tests/notes/bmc-gpio-architecture-2026-03-23.md
+
 ## Hardware: GPIO chips visible to host CPU
 
 | gpiochip    | label        | ngpio | Notes                                         |

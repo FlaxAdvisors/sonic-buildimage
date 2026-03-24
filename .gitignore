@@ -131,3 +131,9 @@ sources.list.*
 apt-retries-count
 database-chassis.service
 .worktrees/
+
+# dev notes
+.claude
+CLAUDE.md
+*.local.md
+*~

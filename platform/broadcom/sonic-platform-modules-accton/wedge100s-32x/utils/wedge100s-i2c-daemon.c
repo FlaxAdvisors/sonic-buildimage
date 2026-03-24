@@ -890,18 +890,15 @@ static void poll_lpmode_sysfs(void)
     }
 }
 
-/* ── poll_cpld — mirror CPLD sysfs attrs to /run/wedge100s/ ─────────────── */
+/* ── poll_cpld — mirror read-only CPLD sysfs attrs to /run/wedge100s/ ────── */
 
 /*
- * Copy each wedge100s_cpld sysfs attribute to RUN_DIR so that Python
- * consumers (psu.py, chassis.py) read from the canonical daemon-cache
- * directory rather than directly from the kernel i2c sysfs tree.
+ * Copy read-only wedge100s_cpld sysfs attributes to RUN_DIR so that Python
+ * consumers (psu.py, component.py) have a single canonical read path that
+ * does not touch the kernel i2c sysfs tree directly.
  *
- * For read-only attributes (cpld_version, psuN_present, psuN_pgood) this
- * is the only writer.  For read-write attributes (led_sys1, led_sys2) the
- * platform code also writes to RUN_DIR on every set_status_led() call;
- * this function provides the initial seed and keeps them in sync on each
- * 3-second poll tick.
+ * LED attributes (led_sys1, led_sys2) are NOT mirrored here; they are
+ * managed exclusively by apply_led_writes() below.
  */
 static void poll_cpld(void)
 {
@@ -909,7 +906,6 @@ static void poll_cpld(void)
         "cpld_version",
         "psu1_present", "psu1_pgood",
         "psu2_present", "psu2_pgood",
-        "led_sys1",     "led_sys2",
         NULL
     };
 
@@ -930,6 +926,64 @@ static void poll_cpld(void)
             write_str_file(dst, val);
         }
         fclose(f);
+    }
+}
+
+/* ── apply_led_writes — write-through LED state to CPLD ─────────────────── */
+
+/*
+ * Manages /run/wedge100s/led_sys{1,2} as the sole path for LED state.
+ * chassis.py writes the desired value to RUN_DIR; this function pushes
+ * it through to the wedge100s_cpld sysfs attribute (and hence the CPLD
+ * hardware) on every poll tick — no Python code touches CPLD sysfs.
+ *
+ * Seed path (file absent): on the first tick after boot, the run-dir file
+ * does not yet exist.  Read the hardware's current value from CPLD sysfs
+ * and write it to RUN_DIR so get_status_led() returns the correct state
+ * before the first set_status_led() call.
+ *
+ * Write-through path (file present): read the value chassis.py wrote to
+ * RUN_DIR and write it to CPLD sysfs.  Idempotent — writing the same
+ * value repeatedly is harmless.
+ */
+static void apply_led_writes(void)
+{
+    static const char *leds[] = { "led_sys1", "led_sys2", NULL };
+
+    for (int i = 0; leds[i]; i++) {
+        char run_path[128], cpld_path[128], val[64];
+        snprintf(run_path,  sizeof(run_path),  RUN_DIR    "/%s", leds[i]);
+        snprintf(cpld_path, sizeof(cpld_path), CPLD_SYSFS "/%s", leds[i]);
+
+        FILE *rf = fopen(run_path, "r");
+        if (!rf) {
+            /* Seed: /run file absent — copy hardware state into RUN_DIR. */
+            FILE *cf = fopen(cpld_path, "r");
+            if (!cf) continue;
+            if (fgets(val, (int)sizeof(val), cf)) {
+                int n = (int)strlen(val);
+                while (n > 0 && (val[n-1] == '\n' || val[n-1] == '\r' ||
+                                 val[n-1] == ' '))
+                    val[--n] = '\0';
+                write_str_file(run_path, val);
+            }
+            fclose(cf);
+            continue;
+        }
+
+        /* Write-through: push RUN_DIR value to CPLD sysfs. */
+        if (!fgets(val, (int)sizeof(val), rf)) { fclose(rf); continue; }
+        fclose(rf);
+
+        int n = (int)strlen(val);
+        while (n > 0 && (val[n-1] == '\n' || val[n-1] == '\r' ||
+                         val[n-1] == ' '))
+            val[--n] = '\0';
+
+        FILE *cf = fopen(cpld_path, "w");
+        if (!cf) continue;
+        fprintf(cf, "%s", val);
+        fclose(cf);
     }
 }
 
@@ -1266,18 +1320,22 @@ int main(int argc, char *argv[])
     }
 
     /*
-     * CPLD attributes (psu presence/pgood, led state, version) are read from
-     * the wedge100s_cpld kernel driver sysfs — not via hidraw — and cached to
-     * RUN_DIR so Python consumers have a single canonical read path.
+     * LED write-through: apply_led_writes() runs first.  chassis.py writes
+     * the desired LED value to RUN_DIR; apply_led_writes() pushes it to the
+     * wedge100s_cpld sysfs attribute.  On the very first tick, when the RUN_DIR
+     * file does not yet exist, it seeds RUN_DIR from the hardware state instead.
      *
-     * Must run AFTER the hidraw block: each poll_cpld() sysfs read causes
+     * CPLD read-only mirror: poll_cpld() then mirrors cpld_version and
+     * psuN_present/pgood to RUN_DIR so Python consumers never read sysfs.
+     *
+     * Both must run AFTER the hidraw block: each CPLD sysfs access causes
      * hid_cp2112 to conduct an I2C transaction, leaving two stale HID input
      * reports (0x16 TRANSFER_STATUS_RESPONSE + 0x13 DATA_READ_RESPONSE) in
-     * the hidraw buffer per attribute (7 attrs × 2 = 14 reports total).
-     * cp2112_cancel() only drains 8 — leaving stale 0x16 COMPLETE reports
-     * that cp2112_wait_complete() would consume as false completions for
-     * subsequent mux writes, causing PCA9535 presence reads to fail.
+     * the hidraw buffer per attribute.  cp2112_cancel() only drains 8 —
+     * leaving stale reports that cp2112_wait_complete() would consume as
+     * false completions for subsequent mux writes, corrupting PCA9535 reads.
      */
+    apply_led_writes();
     poll_cpld();
 
     return 0;

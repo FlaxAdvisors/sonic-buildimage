@@ -46,34 +46,55 @@ syscpld register `0x3c` hardware power-on default is `0xe0` (test mode, rainbow)
 ### Solution
 `wedge100s-platform-init.service` (already runs before pmon) gains a one-time idempotent step to patch the BMC's own `setup_board.sh`. After this patch is applied, the BMC self-manages LED test mode at every BMC boot — no further SONiC involvement needed.
 
+### `clear_led_diag.sh` — BMC-side utility
+
+The four LED register writes are factored into a named BMC utility at `/usr/local/bin/clear_led_diag.sh`. This means:
+
+- Any operator can clear the rainbow at any time: `ssh root@bmc 'clear_led_diag.sh'`
+- SONiC platform-init calls it directly on every boot — no SONiC reboot required after BMC reflash
+- `setup_board.sh` just calls it — no register writes embedded in setup_board.sh itself
+
+```sh
+#!/bin/sh
+# clear_led_diag.sh — disable syscpld LED test pattern, enable TH LEDUP output
+# Installed by SONiC platform-init. Safe to run at any time.
+. /usr/local/bin/board-utils.sh
+echo 0 > ${SYSCPLD_SYSFS_DIR}/led_test_mode_en
+echo 0 > ${SYSCPLD_SYSFS_DIR}/led_test_blink_en
+echo 0 > ${SYSCPLD_SYSFS_DIR}/walk_test_en
+echo 1 > ${SYSCPLD_SYSFS_DIR}/th_led_en
+```
+
 ### Platform-init sequence (revised)
 
 ```
 wedge100s-platform-init:
   1. Load kernel modules, create /run/wedge100s/
   2. wedge100s-bmc-auth              ← push SSH key via /dev/ttyACM0
-  3. SSH probe: ssh -O check OR 'echo ok'  ← gate for step 4
+  3. SSH probe: ssh -O check OR 'echo ok'  ← gate for steps 4-5
   4. If SSH reachable:
-       a. grep -q "# SONiC LED init" /etc/init.d/setup_board.sh
-       b. If absent: append LED init block; run setup_board.sh immediately
-       c. If present: run setup_board.sh immediately (idempotent)
+       a. Deploy clear_led_diag.sh to BMC /usr/local/bin/ if absent or changed
+       b. grep -q "clear_led_diag.sh" /etc/init.d/setup_board.sh
+          If absent: append "    clear_led_diag.sh" inside board_rev >= 2 block
+       c. ssh bmc 'clear_led_diag.sh'   ← run immediately every boot
        d. Log result to syslog
      If SSH unreachable: log warning, continue (non-fatal)
   5. Continue with i2c init, register devices
 ```
 
-Step 3 is the gate: SSH failure skips the patch (LEDs show rainbow until next BMC reboot), but does not block platform init.
+Step 3 is the gate. SSH failure skips the clear (LEDs show rainbow), but does not block platform init. On the next successful SSH connection (e.g., after BMC recovers), platform-init is not re-run — but an operator can manually run `ssh root@bmc 'clear_led_diag.sh'` or trigger it via a future SONiC CLI command.
 
-### LED init block appended to `setup_board.sh`
+Step 4c runs `clear_led_diag.sh` **directly and unconditionally** on every platform-init run. This means:
+- First boot after BMC reflash: platform-init deploys the script and clears the rainbow immediately, without any SONiC reboot
+- Subsequent boots: script is already deployed, idempotent run clears any transient test-mode state
 
-Inserted **inside** the existing `if [ $board_rev -ge 2 ]` block, after the three existing lines. `SYSCPLD_SYSFS_DIR` is already defined by the sourced `board-utils.sh` as `/sys/class/i2c-adapter/i2c-12/12-0031`.
+### `setup_board.sh` patch
+
+One line appended inside the existing `if [ $board_rev -ge 2 ]` block:
 
 ```sh
-    # SONiC LED init — disable test pattern, enable TH LEDUP output
-    echo 0 > ${SYSCPLD_SYSFS_DIR}/led_test_mode_en
-    echo 0 > ${SYSCPLD_SYSFS_DIR}/led_test_blink_en
-    echo 0 > ${SYSCPLD_SYSFS_DIR}/walk_test_en
-    echo 1 > ${SYSCPLD_SYSFS_DIR}/th_led_en
+    # SONiC LED init
+    clear_led_diag.sh
 ```
 
 ### Impact on bmc-daemon
@@ -83,7 +104,12 @@ Inserted **inside** the existing `if [ $board_rev -ge 2 ]` block, after the thre
 `_request_led_init()` and its call from `do_install()` are **removed**. After D1 ships nobody reads `syscpld_led_ctrl.set`; leaving the call in produces a misleading syslog entry and accumulates a stale file in `/run/wedge100s/` indefinitely.
 
 ### BMC reflash note
-The patch is written to the BMC's writable overlay (OpenBMC squashfs + NAND overlay). A BMC firmware reflash wipes the overlay, reverting `setup_board.sh` to factory state. On the next SONiC boot after a BMC reflash, platform-init will detect the absent marker, re-push the key via `wedge100s-bmc-auth`, and re-apply the patch — rainbow LEDs will appear briefly on that one boot only. This is the expected self-healing path; no operator action is required.
+The patch is written to the BMC's writable overlay (OpenBMC squashfs + NAND overlay). A BMC firmware reflash wipes the overlay, reverting `setup_board.sh` to factory state and removing `clear_led_diag.sh`. Two recovery paths exist — no SONiC reboot is required for either:
+
+| Path | How |
+|---|---|
+| **Operator** | `ssh root@192.168.88.13 'clear_led_diag.sh'` — works after platform-init has re-deployed it on the current SONiC boot |
+| **Automatic** | Next SONiC platform-init run re-deploys `clear_led_diag.sh`, re-patches `setup_board.sh`, and runs the script immediately (step 4c) |
 
 ### BMC boot order (for reference)
 ```
@@ -381,6 +407,7 @@ Speed+link is a static BCM LED program. Option d (per-port policy, blink rates, 
 | File | Description |
 |---|---|
 | `utils/wedge100s-bmc-auth.c` | Shared TTY key-push utility |
+| `utils/clear_led_diag.sh` | BMC-side utility: clears LED test mode, enables TH LEDUP; deployed to BMC `/usr/local/bin/` by platform-init |
 | `service/wedge100s-i2c-daemon.service` | Persistent i2c-daemon unit (replaces poller pair) |
 | `service/wedge100s-bmc-daemon.service` | Persistent bmc-daemon unit (replaces poller pair) |
 

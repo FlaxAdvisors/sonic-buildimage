@@ -33,6 +33,10 @@ I2C_SERVICE = "wedge100s-i2c-poller.service"
 BMC_TIMER   = "wedge100s-bmc-poller.timer"
 BMC_SERVICE = "wedge100s-bmc-poller.service"
 
+# New: persistent daemon tests (will pass after D2 ships)
+I2C_DAEMON  = "wedge100s-i2c-daemon.service"
+BMC_DAEMON  = "wedge100s-bmc-daemon.service"
+
 NUM_PORTS     = 32
 NUM_THERMALS  = 7
 NUM_FAN_TRAYS = 5
@@ -108,6 +112,13 @@ def test_bmc_service_not_failed(ssh):
         f"{BMC_SERVICE} is in failed state.\n"
         f"Check: sudo journalctl -u {BMC_SERVICE} -n 20"
     )
+
+
+def test_i2c_daemon_running(ssh):
+    """wedge100s-i2c-daemon.service is active (persistent daemon, D2)."""
+    active = _systemctl_is_active(ssh, I2C_DAEMON)
+    print(f"\n{I2C_DAEMON}: {'active' if active else 'INACTIVE'}")
+    assert active, f"{I2C_DAEMON} not active — D2 not yet deployed"
 
 
 # ------------------------------------------------------------------
@@ -311,6 +322,13 @@ def test_bmc_cache_fresh(ssh):
         f"thermal_1 is {age}s old (>{STALE_THRESHOLD_S}s threshold).\n"
         f"BMC daemon may not be running: sudo systemctl start {BMC_TIMER}"
     )
+
+
+def test_bmc_daemon_running(ssh):
+    """wedge100s-bmc-daemon.service is active (persistent daemon, D3)."""
+    active = _systemctl_is_active(ssh, BMC_DAEMON)
+    print(f"\n{BMC_DAEMON}: {'active' if active else 'INACTIVE'}")
+    assert active, f"{BMC_DAEMON} not active — D3 not yet deployed"
 
 
 def test_bmc_led_init_deployed(ssh):

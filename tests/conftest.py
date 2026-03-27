@@ -110,14 +110,7 @@ def pytest_sessionstart(session):
             returncode=2,
         )
 
-    # 2. mgmt VRF present
-    out, _, rc = client.run("ip vrf show", timeout=10)
-    if "mgmt" not in out:
-        client.close()
-        pytest.exit(
-            "\n[target] mgmt VRF missing — run: tools/deploy.py\n",
-            returncode=3,
-        )
+    # 2. mgmt VRF — check removed: VRF disabled to avoid oob-mgmt issues.
 
     # 3. Breakout sub-ports in COUNTERS_PORT_NAME_MAP (ASIC_DB DB2)
     _EXPECTED_SUBPORTS = [

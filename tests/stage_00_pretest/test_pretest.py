@@ -23,6 +23,7 @@ def test_pmon_running(ssh):
     assert rc == 0, f"pmon is not active: {out.strip()}\nFix: sudo systemctl start pmon"
 
 
+@pytest.mark.skip(reason="mgmt VRF removed — causes oob-mgmt connectivity issues")
 def test_mgmt_vrf_present(ssh):
     """mgmt VRF is configured."""
     out, _, rc = ssh.run("ip vrf show", timeout=10)

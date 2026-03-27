@@ -29,22 +29,26 @@ EOF
 systemctl daemon-reload
 echo "wedge100s postinst: installed pmon.service drop-in $DROPIN_FILE"
 
-# Phase R28: enable BMC sensor polling daemon timer.
-# The timer fires every 10 s and invokes wedge100s-bmc-daemon (one-shot),
-# which reads all BMC sensors in a single TTY session and writes plain-integer
-# files to /run/wedge100s/.  Python platform APIs (thermal.py, fan.py, psu.py)
-# will read from these files in Phase R29 instead of issuing per-call TTY I/O.
-mkdir -p /run/wedge100s
-systemctl enable wedge100s-bmc-poller.timer
-systemctl start  wedge100s-bmc-poller.timer || true
+# Migration: stop and disable old poller timer units if still present.
+# Use unconditional disable (not guarded by is-enabled): systemd reports
+# "not-found" for units whose files have been removed but which still have
+# enabled symlinks, causing is-enabled to return non-zero incorrectly.
+for unit in wedge100s-bmc-poller.timer wedge100s-bmc-poller.service \
+            wedge100s-i2c-poller.timer wedge100s-i2c-poller.service; do
+    systemctl disable --now "$unit" 2>/dev/null || true
+    echo "wedge100s postinst: disabled legacy unit $unit (if present)"
+done
 
-# Phase EOS: enable QSFP presence + EEPROM cache daemon timer.
-# The timer fires every 3 s and invokes wedge100s-i2c-daemon (one-shot),
-# which reads PCA9535 presence via i2c-dev ioctl and writes cached files
-# to /run/wedge100s/.  sfp.py and chassis.py read these files instead of
-# issuing direct mux-tree I2C, eliminating the CP2112 mux race.
-systemctl enable wedge100s-i2c-poller.timer
-systemctl start  wedge100s-i2c-poller.timer || true
+# D3: enable BMC sensor persistent daemon.
+# Replaced timer+oneshot with timerfd-driven persistent process.
+mkdir -p /run/wedge100s
+systemctl enable wedge100s-bmc-daemon.service
+systemctl start  wedge100s-bmc-daemon.service || true
+
+# D2: enable QSFP I2C persistent daemon.
+# Replaced timer+oneshot with timerfd+inotify driven persistent process.
+systemctl enable wedge100s-i2c-daemon.service
+systemctl start  wedge100s-i2c-daemon.service || true
 
 # Install port_breakout_config_db.json to /etc/sonic/ if not already present.
 # The DPB CLI reads this file from /etc/sonic/ to get default config for new

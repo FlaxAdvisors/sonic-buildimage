@@ -62,6 +62,12 @@
 #include <sys/types.h>
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
+#include <limits.h>
+#include <poll.h>
+#include <signal.h>
+#include <syslog.h>
+#include <sys/inotify.h>
+#include <sys/timerfd.h>
 
 /* ── constants ─────────────────────────────────────────────────────────── */
 
@@ -323,6 +329,21 @@ static int mux_deselect(int mux_addr)
 {
     uint8_t off = 0x00;
     return cp2112_write((uint8_t)mux_addr, &off, 1);
+}
+
+/* Deselect all channels on all five PCA9548 muxes.
+ * Called at startup/restart for crash-recovery: a prior crash may have
+ * left a mux channel selected, mis-routing all subsequent I2C addresses.
+ * Returns 0 if all deselects succeed, -1 if any fail.
+ */
+static int mux_deselect_all(void)
+{
+    static const uint8_t mux_addrs[] = {0x70, 0x71, 0x72, 0x73, 0x74};
+    int ok = 0;
+    for (int i = 0; i < 5; i++) {
+        if (mux_deselect(mux_addrs[i]) < 0) ok = -1;
+    }
+    return ok;
 }
 
 /* ── i2c helpers (Phase 1 fallback) ─────────────────────────────────────── */
@@ -902,26 +923,42 @@ static void poll_lpmode_sysfs(void)
  */
 static void poll_cpld(void)
 {
-    static const char *attrs[] = {
-        "cpld_version",
+    /* cpld_version: static hardware info — read once at first tick only. */
+    {
+        char dst[128];
+        struct stat st;
+        snprintf(dst, sizeof(dst), RUN_DIR "/cpld_version");
+        if (stat(dst, &st) != 0) {
+            char src[128], val[64];
+            snprintf(src, sizeof(src), CPLD_SYSFS "/cpld_version");
+            FILE *f = fopen(src, "r");
+            if (f) {
+                if (fgets(val, (int)sizeof(val), f)) {
+                    int n = (int)strlen(val);
+                    while (n > 0 && (val[n-1]=='\n'||val[n-1]=='\r'||val[n-1]==' '))
+                        val[--n] = '\0';
+                    write_str_file(dst, val);
+                }
+                fclose(f);
+            }
+        }
+    }
+
+    /* PSU state: dynamic — read every tick. */
+    static const char *psu_attrs[] = {
         "psu1_present", "psu1_pgood",
         "psu2_present", "psu2_pgood",
         NULL
     };
-
-    for (int i = 0; attrs[i]; i++) {
+    for (int i = 0; psu_attrs[i]; i++) {
         char src[128], dst[128], val[64];
-        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", attrs[i]);
-        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", attrs[i]);
-
+        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", psu_attrs[i]);
+        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", psu_attrs[i]);
         FILE *f = fopen(src, "r");
         if (!f) continue;
-
         if (fgets(val, (int)sizeof(val), f)) {
-            /* strip trailing whitespace (newline from sysfs) */
             int n = (int)strlen(val);
-            while (n > 0 && (val[n-1] == '\n' || val[n-1] == '\r' ||
-                             val[n-1] == ' '))
+            while (n > 0 && (val[n-1]=='\n'||val[n-1]=='\r'||val[n-1]==' '))
                 val[--n] = '\0';
             write_str_file(dst, val);
         }
@@ -1276,67 +1313,169 @@ static void poll_presence(void)
     }
 }
 
+/* ── persistent daemon helpers ──────────────────────────────────────────── */
+
+/* Drain all pending inotify events (prevents thundering-herd on burst writes). */
+static void drain_inotify(int inotify_fd)
+{
+    char ibuf[sizeof(struct inotify_event) + NAME_MAX + 1];
+    while (read(inotify_fd, ibuf, sizeof(ibuf)) > 0)
+        ;
+}
+
+/*
+ * service_write_requests — scan /run/wedge100s/ for pending request files.
+ *
+ * Called on inotify IN_CLOSE_WRITE events (~50 ms latency).
+ * Scans the directory rather than replaying inotify filenames:
+ * inotify coalesces duplicate events, so directory scan is the only
+ * reliable way to find all pending work on burst writes.
+ */
+static void service_write_requests(void)
+{
+    if (g_hidraw_fd < 0) return;
+    poll_lpmode_hidraw();
+    poll_write_requests_hidraw();
+    poll_read_requests_hidraw();
+    apply_led_writes();   /* respond to led_sys{1,2} writes ~50ms */
+}
+
+/*
+ * daemon_init — open hidraw0, drain stale reports, deselect all muxes.
+ *
+ * On crash recovery (Restart=on-failure), a prior run may have left
+ * the CP2112 in mid-transaction and a PCA9548 mux channel selected.
+ * Draining stale HID reports and writing 0x00 to all five mux addresses
+ * resets the bus to a known-good state before the main loop starts.
+ *
+ * If the first attempt fails, try BMC escalation (i2c_flush + mux reset
+ * via SSH), then retry once.  If still failing, return -1 so systemd
+ * Restart=on-failure handles the backoff.
+ */
+static int daemon_init(void)
+{
+    static const char SSH_FLUSH[] =
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%%usb0 "
+        "/usr/local/bin/cp2112_i2c_flush.sh >/dev/null 2>&1";
+    static const char SSH_RESET_MUX[] =
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%%usb0 "
+        "/usr/local/bin/reset_qsfp_mux.sh >/dev/null 2>&1";
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (attempt == 1) {
+            syslog(LOG_WARNING, "wedge100s-i2c-daemon: attempting BMC escalation");
+            (void)system(SSH_FLUSH);
+            (void)system(SSH_RESET_MUX);
+            usleep(500000);
+        }
+
+        if (g_hidraw_fd >= 0) { close(g_hidraw_fd); g_hidraw_fd = -1; }
+        g_hidraw_fd = open("/dev/hidraw0", O_RDWR);
+        if (g_hidraw_fd < 0) {
+            syslog(LOG_ERR, "wedge100s-i2c-daemon: open /dev/hidraw0: %s",
+                   strerror(errno));
+            continue;
+        }
+
+        cp2112_cancel();
+
+        if (mux_deselect_all() == 0) {
+            syslog(LOG_INFO, "wedge100s-i2c-daemon: daemon_init OK (hidraw0 open)");
+            return 0;
+        }
+        syslog(LOG_WARNING,
+               "wedge100s-i2c-daemon: mux_deselect_all failed (attempt %d)",
+               attempt + 1);
+    }
+
+    syslog(LOG_ERR, "wedge100s-i2c-daemon: daemon_init failed after BMC escalation");
+    return -1;
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
-int main(int argc, char *argv[])
+int main(void)
 {
+    int timer_fd, inotify_fd;
+    struct itimerspec its = {
+        .it_interval = {1, 0},
+        .it_value    = {1, 0},
+    };
+
+    openlog("wedge100s-i2c-daemon", LOG_PID | LOG_NDELAY, LOG_DAEMON);
     mkdir(RUN_DIR, 0755);
 
-    if (argc < 2 || strcmp(argv[1], "poll-presence") != 0) {
-        fprintf(stderr, "Usage: %s poll-presence\n", argv[0]);
+    if (daemon_init() < 0) {
+        syslog(LOG_ERR, "daemon_init failed — exiting for systemd restart");
         return 1;
     }
 
-    /*
-     * Phase 2: try to open /dev/hidraw0 for direct CP2112 access.
-     * If successful, all mux-tree I2C goes through raw HID reports —
-     * no kernel i2c_mux_pca954x or optoe1 involvement.
-     *
-     * Phase 1 fallback: hidraw0 unavailable (permission, missing device, or
-     * hid_cp2112 has exclusive ownership). Use i2c-dev ioctl for PCA9535
-     * and optoe1 sysfs for EEPROM.
-     *
-     * Note: when hid_cp2112 is loaded, both hid_cp2112 and our hidraw fd
-     * receive all CP2112 interrupt reports.  CPLD accesses (address 0x32,
-     * no mux) are safe to interleave because they do not change mux state.
-     * For full isolation, Step P2-4 removes i2c_mux_pca954x and optoe1,
-     * ensuring no kernel driver touches the mux tree concurrently.
-     */
-    g_hidraw_fd = open("/dev/hidraw0", O_RDWR);
-
-    if (g_hidraw_fd >= 0) {
-        cp2112_cancel();  /* drain any stale CP2112 state from prior users */
-        poll_syseeprom_hidraw();
-        poll_presence_hidraw();
-        poll_lpmode_hidraw();
-        poll_write_requests_hidraw();
-        poll_read_requests_hidraw();
-        close(g_hidraw_fd);
-        g_hidraw_fd = -1;
-    } else {
-        poll_syseeprom();
-        poll_presence();
-        poll_lpmode_sysfs();
+    timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+    if (timer_fd < 0) {
+        syslog(LOG_ERR, "timerfd_create: %s", strerror(errno));
+        return 1;
     }
+    timerfd_settime(timer_fd, 0, &its, NULL);
 
-    /*
-     * LED write-through: apply_led_writes() runs first.  chassis.py writes
-     * the desired LED value to RUN_DIR; apply_led_writes() pushes it to the
-     * wedge100s_cpld sysfs attribute.  On the very first tick, when the RUN_DIR
-     * file does not yet exist, it seeds RUN_DIR from the hardware state instead.
-     *
-     * CPLD read-only mirror: poll_cpld() then mirrors cpld_version and
-     * psuN_present/pgood to RUN_DIR so Python consumers never read sysfs.
-     *
-     * Both must run AFTER the hidraw block: each CPLD sysfs access causes
-     * hid_cp2112 to conduct an I2C transaction, leaving two stale HID input
-     * reports (0x16 TRANSFER_STATUS_RESPONSE + 0x13 DATA_READ_RESPONSE) in
-     * the hidraw buffer per attribute.  cp2112_cancel() only drains 8 —
-     * leaving stale reports that cp2112_wait_complete() would consume as
-     * false completions for subsequent mux writes, corrupting PCA9535 reads.
-     */
-    apply_led_writes();
-    poll_cpld();
+    inotify_fd = inotify_init1(IN_NONBLOCK);
+    if (inotify_fd < 0) {
+        syslog(LOG_ERR, "inotify_init1: %s", strerror(errno));
+        return 1;
+    }
+    inotify_add_watch(inotify_fd, RUN_DIR, IN_CLOSE_WRITE);
 
-    return 0;
+    struct pollfd pfds[2] = {
+        {.fd = timer_fd,   .events = POLLIN},
+        {.fd = inotify_fd, .events = POLLIN},
+    };
+
+    syslog(LOG_INFO, "wedge100s-i2c-daemon: entering main loop (1s tick + inotify)");
+
+    while (1) {
+        int r = poll(pfds, 2, -1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            syslog(LOG_ERR, "poll: %s", strerror(errno));
+            return 1;
+        }
+
+        /* inotify: write-request response (~50 ms latency) */
+        if (pfds[1].revents & POLLIN) {
+            drain_inotify(inotify_fd);
+            service_write_requests();
+        }
+
+        /* timer: 1s tick — full poll cycle */
+        if (pfds[0].revents & POLLIN) {
+            uint64_t exp;
+            (void)read(timer_fd, &exp, sizeof(exp));
+
+            /*
+             * cp2112_cancel() at tick-start drains the two stale HID input
+             * reports left by each prior CPLD sysfs access.  Must run before
+             * any hidraw operation this tick.
+             */
+            cp2112_cancel();
+
+            /* hidraw poll functions (order matters — see comment in spec) */
+            poll_syseeprom_hidraw();
+            poll_presence_hidraw();
+            poll_lpmode_hidraw();
+            poll_write_requests_hidraw();
+            poll_read_requests_hidraw();
+
+            /*
+             * apply_led_writes() and poll_cpld() run LAST: each CPLD sysfs
+             * access leaves two stale HID reports; cp2112_cancel() at the
+             * NEXT tick-start drains them.
+             */
+            apply_led_writes();
+            poll_cpld();
+        }
+    }
+    return 0; /* unreachable — suppresses gcc -O2 end-of-function warning */
 }

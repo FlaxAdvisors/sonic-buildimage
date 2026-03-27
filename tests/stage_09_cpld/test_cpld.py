@@ -67,17 +67,21 @@ def test_cpld_driver_name(ssh):
 # ------------------------------------------------------------------
 
 def test_all_sysfs_attrs_readable(ssh):
-    """All 7 CPLD sysfs attributes are readable without error."""
+    """All 7 CPLD attributes are readable from the daemon cache (/run/wedge100s/).
+
+    Reads from the daemon cache rather than the kernel sysfs directly to avoid
+    competing with wedge100s-i2c-daemon for the shared CP2112 USB-HID bus.
+    """
     missing = []
     for attr in SYSFS_ATTRS:
-        path = f"{CPLD_SYSFS}/{attr}"
+        path = f"{RUN_DIR}/{attr}"
         out, err, rc = ssh.run(f"cat {path} 2>&1", timeout=10)
         if rc != 0 or "No such file" in out or "Permission denied" in out:
             missing.append(f"{attr}: {out.strip() or err.strip()}")
         else:
             print(f"  {attr}: {out.strip()!r}")
     assert not missing, (
-        f"CPLD sysfs attributes not readable:\n" + "\n".join(missing)
+        f"CPLD attrs missing from daemon cache:\n" + "\n".join(missing)
     )
 
 
@@ -208,47 +212,18 @@ def test_led_sys2_valid(ssh):
     )
 
 
-def test_led_sys2_write_restore(ssh):
-    """led_sys2 is writable; write restores original value correctly.
+def test_led_sys2_cache_readable(ssh):
+    """led_sys2 daemon cache file exists and contains a valid LED value.
 
-    Writes to the kernel sysfs attr (hardware effect) and verifies the
-    readback via the daemon cache (/run/wedge100s/led_sys2).  The restore
-    writes back to both paths so that the cache matches hardware state.
+    The hardware LED state is owned by ledd and reflected by wedge100s-i2c-daemon
+    into /run/wedge100s/led_sys2.  Direct sysfs writes are avoided while the
+    daemon is running to prevent CP2112 bus contention.
     """
-    sysfs_path  = f"{CPLD_SYSFS}/led_sys2"
-    run_path    = f"{RUN_DIR}/led_sys2"
-
-    # Read original from daemon cache (canonical read path)
+    run_path = f"{RUN_DIR}/led_sys2"
     out, _, rc = ssh.run(f"cat {run_path}", timeout=10)
     assert rc == 0, f"Could not read {run_path}"
-    original = int(out.strip(), 0)
-    print(f"\nled_sys2 original: {original}")
-
-    # Pick a write target that differs from the original
-    test_val = 2 if original != 2 else 1  # green or red
-
-    try:
-        # Write test value to hardware (sysfs) and cache
-        _, _, rc = ssh.run(
-            f"echo {test_val} | sudo tee {sysfs_path} > /dev/null && "
-            f"echo {test_val} | sudo tee {run_path} > /dev/null",
-            timeout=10,
-        )
-        assert rc == 0, f"Write to led_sys2 failed (rc={rc})"
-
-        # Read back from daemon cache (canonical path)
-        out, _, rc = ssh.run(f"cat {run_path}", timeout=10)
-        assert rc == 0
-        readback = int(out.strip(), 0)
-        print(f"  Wrote {test_val}, read back {readback}")
-        assert readback == test_val, (
-            f"led_sys2 write/read mismatch: wrote {test_val}, got {readback}"
-        )
-    finally:
-        # Restore original to both paths
-        ssh.run(
-            f"echo {original} | sudo tee {sysfs_path} > /dev/null && "
-            f"echo {original} | sudo tee {run_path} > /dev/null",
-            timeout=10,
-        )
-        print(f"  Restored led_sys2 to {original}")
+    val = int(out.strip(), 0)
+    print(f"\nled_sys2 (cache): {val} (0x{val:02x})")
+    assert val in LED_VALID, (
+        f"led_sys2 cache value {val} is not a valid LED encoding {sorted(LED_VALID)}"
+    )

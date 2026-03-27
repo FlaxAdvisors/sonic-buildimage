@@ -9,6 +9,7 @@ Type=simple
 ExecStart=/usr/bin/wedge100s-i2c-daemon
 Restart=on-failure
 RestartSec=2s
+TimeoutStopSec=5s
 
 [Install]
 WantedBy=multi-user.target

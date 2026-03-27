@@ -11,11 +11,6 @@
     "LOOPBACK_INTERFACE": {
         "Loopback0": {}
     },
-    "MGMT_VRF_CONFIG": {
-        "vrf_global": {
-            "mgmtVrfEnabled": "true"
-        }
-    },
     "MGMT_INTERFACE": {
         "eth0": {},
         "eth0|REPLACE-WITH-IP/PREFIX": {

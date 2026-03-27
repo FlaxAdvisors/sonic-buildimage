@@ -4,11 +4,15 @@ LED register map:
   0x3E — SYS1 (system-status LED)  — green while SONiC is running
   0x3F — SYS2 (port-activity LED)  — green when ≥1 port is link-up
 
-Register values:
+Register values (from ONL ledi.c):
   0x00 = Off
   0x01 = Red
   0x02 = Green
   0x04 = Blue
+  0x08 = Off (alternate)
+  0x09 = Red blinking
+  0x0a = Green blinking
+  0x0c = Blue blinking
 
 Phase reference: Phase 9 (LED Control).
 """
@@ -19,12 +23,25 @@ import pytest
 SYS1_REG  = 0x3E
 SYS2_REG  = 0x3F
 
-LED_OFF   = 0x00
-LED_RED   = 0x01
-LED_GREEN = 0x02
-LED_BLUE  = 0x04
+LED_OFF         = 0x00
+LED_RED         = 0x01
+LED_GREEN       = 0x02
+LED_BLUE        = 0x04
+LED_OFF_ALT     = 0x08
+LED_RED_BLINK   = 0x09
+LED_GREEN_BLINK = 0x0a
+LED_BLUE_BLINK  = 0x0c
 
-LED_NAMES = {LED_OFF: "off", LED_RED: "red", LED_GREEN: "green", LED_BLUE: "blue"}
+LED_NAMES = {
+    LED_OFF:         "off",
+    LED_RED:         "red",
+    LED_GREEN:       "green",
+    LED_BLUE:        "blue",
+    LED_OFF_ALT:     "off(alt)",
+    LED_RED_BLINK:   "red_blink",
+    LED_GREEN_BLINK: "green_blink",
+    LED_BLUE_BLINK:  "blue_blink",
+}
 
 # Canonical daemon-cache path (written by wedge100s-i2c-daemon every 3 s)
 RUN_DIR    = '/run/wedge100s'

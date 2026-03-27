@@ -4,6 +4,25 @@ depmod -a
 systemctl enable wedge100s-platform-init.service
 systemctl start wedge100s-platform-init.service
 
+# Remove the management VRF networking drop-in if present.
+# SONiC's 'config mgmt-vrf enable' creates
+# /etc/systemd/system/networking.service.d/restart-ssh.conf with an
+# ExecStartPost that calls 'systemctl restart ssh'.  On this platform the
+# mgmt VRF never comes up, so that restart hangs indefinitely, blocking
+# networking.service (which has no timeout) and preventing SSH from starting.
+# The ZTP l2-config_db.json no longer sets mgmtVrfEnabled, but clean up any
+# remnant from a prior install or manual 'config mgmt-vrf enable'.
+DROPIN="/etc/systemd/system/networking.service.d/restart-ssh.conf"
+if [ -f "$DROPIN" ]; then
+    rm -f "$DROPIN"
+    systemctl daemon-reload
+    echo "wedge100s postinst: removed VRF networking drop-in $DROPIN"
+fi
+if redis-cli -n 4 ping >/dev/null 2>&1; then
+    redis-cli -n 4 del 'MGMT_VRF_CONFIG|vrf_global' >/dev/null 2>&1 || true
+    echo "wedge100s postinst: cleared MGMT_VRF_CONFIG from CONFIG_DB"
+fi
+
 # sysstat was enabled for SSH-blackout investigation; disable it to reduce
 # journal noise (8,640 "Starting/Finished sysstat-collect" lines/day at 10 min intervals).
 if systemctl is-enabled sysstat >/dev/null 2>&1; then
@@ -29,15 +48,6 @@ EOF
 systemctl daemon-reload
 echo "wedge100s postinst: installed pmon.service drop-in $DROPIN_FILE"
 
-# Migration: stop and disable old poller timer units if still present.
-# Use unconditional disable (not guarded by is-enabled): systemd reports
-# "not-found" for units whose files have been removed but which still have
-# enabled symlinks, causing is-enabled to return non-zero incorrectly.
-for unit in wedge100s-bmc-poller.timer wedge100s-bmc-poller.service \
-            wedge100s-i2c-poller.timer wedge100s-i2c-poller.service; do
-    systemctl disable --now "$unit" 2>/dev/null || true
-    echo "wedge100s postinst: disabled legacy unit $unit (if present)"
-done
 
 # D3: enable BMC sensor persistent daemon.
 # Replaced timer+oneshot with timerfd-driven persistent process.
@@ -62,6 +72,23 @@ if [ -f "$BREAKOUT_CFG" ]; then
     echo "wedge100s postinst: installed port_breakout_config_db.json to /etc/sonic/"
 fi
 
+# Seed BREAKOUT_CFG in CONFIG_DB from hwsku.json default_brkout_mode values.
+# config-setup does not pass -H to sonic-cfggen, so on a fresh install the
+# BREAKOUT_CFG table is never populated; without it `config interface breakout`
+# returns "Entry not found" and DPB refuses to operate.
+# Only runs when the table is entirely absent — existing breakout config is preserved.
+if redis-cli -n 4 ping >/dev/null 2>&1; then
+    BRKOUT_COUNT=$(redis-cli -n 4 keys 'BREAKOUT_CFG*' 2>/dev/null | wc -l)
+    if [ "$BRKOUT_COUNT" -eq 0 ]; then
+        sonic-cfggen -H -k Accton-WEDGE100S-32X --print-data 2>/dev/null \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({'BREAKOUT_CFG': d.get('BREAKOUT_CFG', {})}))" \
+            | sonic-cfggen -j /dev/stdin --write-to-db 2>/dev/null \
+            && echo "wedge100s postinst: seeded BREAKOUT_CFG (32 entries) from hwsku.json defaults" \
+            || echo "wedge100s postinst: WARNING: BREAKOUT_CFG seed failed" >&2
+    else
+        echo "wedge100s postinst: BREAKOUT_CFG already populated ($BRKOUT_COUNT entries) — skip seed"
+    fi
+fi
 
 # Bring usb0 up immediately (CDC-ECM link to BMC).
 # systemd-networkd is masked on SONiC; the interface is kept up across reboots

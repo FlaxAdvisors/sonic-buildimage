@@ -114,15 +114,23 @@ Key properties of the fix:
 **To stop the daemon safely before any manual I2C work:**
 
 ```bash
-# Stop BOTH timer and service — stopping the timer alone is insufficient
-# if a service instance is already queued from the last tick
-sudo systemctl stop wedge100s-i2c-poller.timer wedge100s-i2c-poller.service
+sudo systemctl stop wedge100s-i2c-daemon wedge100s-bmc-daemon pmon
 ```
 
 To resume:
 ```bash
-sudo systemctl start wedge100s-i2c-poller.timer
+sudo systemctl start wedge100s-i2c-daemon wedge100s-bmc-daemon pmon
 ```
+
+**⚠ Do not delete `/run/wedge100s/sfp_N_eeprom` files while the daemon is running.**
+Deleting these files triggers immediate EEPROM re-reads on the next daemon tick.
+If this happens within 2–5 s of LP_MODE deassert (e.g. a fresh restart), the
+module MCU is not yet ready and the upper-page read returns zeros. Byte 220
+(DIAG_MON_TYPE, vendor/PN strings) is in the upper page and is NOT refreshed by
+the DOM TTL cycle — the zeros persist until the module is re-plugged or the daemon
+restarts cleanly. Recovery requires reprogram from the Arista peer (see §3 repair
+procedure). This happened in session 2026-03-27; root cause documented in
+`notes/2026-03-27-daemon-restart-dom-fix.md`.
 
 **The i2c_topology.json `_NOTICE` block records this as authoritative:**
 
@@ -203,6 +211,6 @@ any package change that `lsmod | grep -E 'pca954|optoe|at24'` returns empty outp
 |---|---|---|
 | Read system EEPROM | `cat /run/wedge100s/syseeprom` or `show platform syseeprom` | `onie-syseeprom` (reads EC chip, not EEPROM) |
 | Read QSFP EEPROM | `cat /run/wedge100s/sfp_N_eeprom` | `i2cget -y <N> 0x50 ...` while daemon is running |
-| Debug I2C bus | Stop timer first: `systemctl stop wedge100s-i2c-poller.timer wedge100s-i2c-poller.service` | Any i2c tool while daemon is polling (3 s interval) |
+| Debug I2C bus | Stop daemon first: `systemctl stop wedge100s-i2c-daemon wedge100s-bmc-daemon pmon` | Any i2c tool while daemon is running |
 | Verify system EEPROM content | `xxd /run/wedge100s/syseeprom \| head` — look for `TlvInfo` at offset 0 | `i2cget -y 1 0x50 0x00` — returns EC version byte, not EEPROM |
 | Load kernel mux driver | **Don't.** Remove all QSFPs first if you must. | `modprobe i2c_mux_pca954x` with modules inserted |

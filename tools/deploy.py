@@ -29,7 +29,7 @@ from tools.tasks.optical import OpticalTask
 
 TASK_ORDER = [
     ("system_tuning", SystemTuningTask),
-    ("cpu_affinity",  CpuAffinityTask),
+#    ("cpu_affinity",  CpuAffinityTask),
 #    ("mgmt_vrf",      MgmtVrfTask),
     ("breakout",      BreakoutTask),
     ("portchannel",   PortChannelTask),

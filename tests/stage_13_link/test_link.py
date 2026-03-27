@@ -236,8 +236,12 @@ def test_asic_db_port_admin_state(ssh):
 # ------------------------------------------------------------------
 
 def _read_sys2_led(ssh):
-    """Read SYS2 LED via wedge100s_cpld sysfs; returns int or None."""
-    out, _, rc = ssh.run("cat /sys/bus/i2c/devices/1-0032/led_sys2", timeout=10)
+    """Read SYS2 LED from daemon cache (/run/wedge100s/led_sys2); returns int or None.
+
+    Reads from the daemon cache rather than sysfs directly to avoid competing
+    with wedge100s-i2c-daemon for the shared CP2112 USB-HID bus.
+    """
+    out, _, rc = ssh.run("cat /run/wedge100s/led_sys2", timeout=10)
     if rc != 0:
         return None
     try:
@@ -378,14 +382,23 @@ def test_ethernet108_lldp_neighbor(ssh):
     """Ethernet108 (SR4 fiber) has an LLDP neighbor.
 
     Confirms the SR4 module is functioning and LLDP frames transit the fiber.
-    Skipped if no neighbor found (physical connectivity issue, not a platform bug).
+    Skipped if the link is down (no LLDP expected) or if the peer has LLDP
+    disabled (link up, but no neighbor — a peer configuration issue, not a
+    platform bug).
     """
+    # Check link state first so the skip message is accurate
+    status_out, _, _ = ssh.run("show interfaces status Ethernet108", timeout=15)
+    oper_up = "  up  " in status_out or status_out.count(" up ") >= 1
+
     out, _, rc = ssh.run("show lldp neighbors", timeout=30)
     assert rc == 0, f"show lldp neighbors failed: {out}"
 
     if "Ethernet108" not in out:
-        pytest.skip(
-            "Ethernet108 has no LLDP neighbor — fiber may be disconnected "
-            "or peer LLDP disabled. Skipping (not a platform failure)."
-        )
+        if not oper_up:
+            pytest.skip("Ethernet108 oper=down — no LLDP expected (fiber disconnected?)")
+        else:
+            pytest.skip(
+                "Ethernet108 is oper=up but has no LLDP neighbor — "
+                "peer device has LLDP disabled on this port. Not a platform failure."
+            )
     print(f"  Ethernet108: LLDP neighbor present")

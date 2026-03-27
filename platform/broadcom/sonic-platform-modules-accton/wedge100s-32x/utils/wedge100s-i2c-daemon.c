@@ -60,6 +60,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
 #include <limits.h>
@@ -135,6 +136,25 @@ static const unsigned char ONIE_MAGIC[8] = {
 
 /* hidraw fd; -1 = not open (Phase 1 fallback active) */
 static int g_hidraw_fd = -1;
+
+/*
+ * Per-port LP_MODE deassert timestamp (CLOCK_MONOTONIC, nanoseconds).
+ * Set to clock_gettime() when set_lpmode_hidraw(port, 0) succeeds.
+ * refresh_eeprom_lower_page() refuses to read the upper page from
+ * hardware until LP_MODE_READY_NS has elapsed, preventing the race where
+ * an EEPROM read fires while the module MCU is still resetting.
+ * Initialised to 0 (always-expired) so absent/legacy ports are unaffected.
+ */
+#define LP_MODE_READY_NS  2500000000LL   /* 2.5 s: SFF-8636 module MCU init */
+static long long g_lp_deassert_ns[NUM_PORTS];  /* 0 = no recent deassert */
+
+/* Return current CLOCK_MONOTONIC time in nanoseconds. */
+static long long now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
 
 /* ── hidraw transport ────────────────────────────────────────────────────── */
 
@@ -480,8 +500,23 @@ static int refresh_eeprom_lower_page(int port, const char *eeprom_path)
                 (void)fread(ebuf + 128, 1, 128, cf);
             fclose(cf);
         } else {
+            /* Upper page must be read from hardware — but only after the module
+             * MCU has had time to initialise following LP_MODE deassert.
+             * If the lock has not expired, skip the write entirely and return 0
+             * so the caller retries on the next tick. */
+            long long elapsed = now_ns() - g_lp_deassert_ns[port];
+            if (g_lp_deassert_ns[port] != 0 && elapsed < LP_MODE_READY_NS) {
+                mux_deselect(mux_addr);
+                return 0;   /* not ready; caller will retry next tick */
+            }
             uint8_t upper_addr = 0x80;
-            cp2112_write_read(0x50, &upper_addr, 1, ebuf + 128, 128);
+            int ur = cp2112_write_read(0x50, &upper_addr, 1, ebuf + 128, 128);
+            if (ur != 128) {
+                /* Upper page read failed; do not write a cache with zero upper page.
+                 * Return 0 so caller retries next tick. */
+                mux_deselect(mux_addr);
+                return 0;
+            }
         }
         write_binary_file(eeprom_path, ebuf, EEPROM_SIZE);
         ok = 1;
@@ -561,6 +596,10 @@ static int set_lpmode_hidraw(int port, int lpmode)
     }
 
     mux_deselect(0x74);
+    /* Record deassert time so refresh_eeprom_lower_page() can gate
+     * upper-page reads until the module MCU has had time to initialise. */
+    if (!lpmode)
+        g_lp_deassert_ns[port] = now_ns();
     return 0;
 }
 
@@ -799,18 +838,17 @@ static void poll_lpmode_hidraw(void)
         if (set_lpmode_hidraw(port, 0) == 0) {
             write_str_file(state_path, "0");
             /*
-             * Immediately refresh the lower page now that LP_MODE is deasserted.
-             * poll_presence_hidraw() ran earlier this tick and wrote a LP-mode
-             * snapshot (DOM bytes = 0 → -inf dBm).  Re-reading here in the same
-             * invocation overwrites it with post-deassert values so xcvrd never
-             * sees the stale snapshot.  On failure the stale cache is deleted so
-             * xcvrd gets a cache-miss (None) rather than wrong data; the next
-             * tick's poll_presence_hidraw() will retry the lower-page read.
+             * Do NOT read EEPROM here.  The QSFP module's MCU resets during
+             * LP_MODE exit: attempting cp2112_write_read(0x50,...) immediately
+             * after deassert hangs the I2C bus, leaving the CP2112 in a
+             * permanently stuck BUSY state that survives cp2112_cancel().
+             *
+             * poll_presence_hidraw() already ran earlier this tick while
+             * modules were in LP_MODE and wrote a valid cache (identifier byte
+             * is stable between LP_MODE and full-power).  xcvrd will use that
+             * cache to determine module type; DOM data is read on-demand via
+             * sfp_N_read_req, not from the cache.
              */
-            char eeprom_path[80];
-            snprintf(eeprom_path, sizeof(eeprom_path), RUN_DIR "/sfp_%d_eeprom", port);
-            if (!refresh_eeprom_lower_page(port, eeprom_path))
-                unlink(eeprom_path);
         } else {
             fprintf(stderr,
                     "wedge100s-i2c-daemon: initial deassert port %d failed\n",
@@ -1334,6 +1372,16 @@ static void drain_inotify(int inotify_fd)
 static void service_write_requests(void)
 {
     if (g_hidraw_fd < 0) return;
+    /*
+     * Drain stale HID input reports before any hidraw operation.
+     * apply_led_writes() (at the end of this function and of each timer tick)
+     * accesses CPLD sysfs via the kernel hid-cp2112 driver, which leaves 1-2
+     * STATUS_RESPONSE reports in the USB input buffer.  Without draining them,
+     * the next call's cp2112_wait_complete() receives a stale STATUS_ERROR or
+     * STATUS_COMPLETE from the CPLD access instead of the response to its own
+     * DATA_WRITE_REQUEST, causing spurious PCA9535/LP_MODE failures.
+     */
+    cp2112_cancel();
     poll_lpmode_hidraw();
     poll_write_requests_hidraw();
     poll_read_requests_hidraw();
@@ -1368,6 +1416,10 @@ static int daemon_init(void)
     for (int attempt = 0; attempt < 2; attempt++) {
         if (attempt == 1) {
             syslog(LOG_WARNING, "wedge100s-i2c-daemon: attempting BMC escalation");
+            /* Re-provision BMC SSH key via /dev/ttyACM0 before trying SSH.
+             * The BMC clears authorized_keys on every reboot; without this
+             * the SSH commands below fail silently and escalation does nothing. */
+            (void)system("/usr/bin/wedge100s-bmc-auth >/dev/null 2>&1");
             (void)system(SSH_FLUSH);
             (void)system(SSH_RESET_MUX);
             usleep(500000);
@@ -1384,6 +1436,33 @@ static int daemon_init(void)
         cp2112_cancel();
 
         if (mux_deselect_all() == 0) {
+            /* Remove stale lpmode state files so that poll_lpmode_hidraw()
+             * re-deasserts LP_MODE for all ports on the first tick.
+             * EEPROM cache files are intentionally kept: modules need up to
+             * 2 s after LP_MODE exit before their MCU is ready for reads;
+             * poll_presence_hidraw() serves the cached data meanwhile, and
+             * the 20 s DOM TTL timer triggers a fresh lower-page read once
+             * the module is fully initialised. */
+            {
+                char path[80];
+                for (int p = 0; p < NUM_PORTS; p++) {
+                    snprintf(path, sizeof(path), RUN_DIR "/sfp_%d_lpmode", p);
+                    unlink(path);
+                }
+            }
+            /* Deassert LP_MODE for all ports so modules power up fully
+             * before the first tick reads EEPROM. */
+            {
+                int failed = 0;
+                for (int p = 0; p < NUM_PORTS; p++) {
+                    if (set_lpmode_hidraw(p, 0) < 0)
+                        failed++;
+                }
+                if (failed)
+                    syslog(LOG_WARNING,
+                           "wedge100s-i2c-daemon: daemon_init: %d port(s) failed LP_MODE deassert",
+                           failed);
+            }
             syslog(LOG_INFO, "wedge100s-i2c-daemon: daemon_init OK (hidraw0 open)");
             return 0;
         }

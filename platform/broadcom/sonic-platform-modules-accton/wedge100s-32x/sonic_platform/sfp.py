@@ -327,6 +327,27 @@ class Sfp(SfpOptoeBase):
         except OSError:
             return False
 
+    def get_xcvr_api(self):
+        """Return xcvr API, patching temperature support for the byte 220 quirk.
+
+        Some QSFP28 modules (e.g. Arista QSFP28-SR4-100G) have DIAG_MON_TYPE
+        (byte 220) with bit 5 clear, so Sff8636Api.get_temperature_support()
+        returns False even though bytes 22-23 contain valid temperature data.
+        Monkey-patch the instance so xcvrd reports temperature for these modules.
+        """
+        api = super().get_xcvr_api()
+        if api is None:
+            return None
+        try:
+            from sonic_platform_base.sonic_xcvr.api.public.sff8636 import Sff8636Api
+            if isinstance(api, Sff8636Api) and not api.get_temperature_support():
+                raw = self.read_eeprom(22, 2)
+                if raw and len(raw) == 2 and (raw[0] != 0 or raw[1] != 0):
+                    api.get_temperature_support = lambda: True
+        except Exception:
+            pass
+        return api
+
     def get_error_description(self):
         if not self.get_presence():
             return self.SFP_STATUS_UNPLUGGED

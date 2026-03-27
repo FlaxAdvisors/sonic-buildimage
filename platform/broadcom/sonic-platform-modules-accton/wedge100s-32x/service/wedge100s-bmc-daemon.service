@@ -9,6 +9,7 @@ Type=simple
 ExecStart=/usr/bin/wedge100s-bmc-daemon
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=5s
 
 [Install]
 WantedBy=multi-user.target

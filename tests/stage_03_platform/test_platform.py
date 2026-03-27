@@ -10,6 +10,7 @@ Phase references: Phase 0 (I2C topology), Phase 2 (BMC TTY helper), Phase R28 (b
 """
 
 import re
+import time
 import pytest
 
 # CPLD I2C address on bus 1
@@ -223,18 +224,18 @@ def test_platform_init_service_active(ssh):
 # ------------------------------------------------------------------
 
 def test_bmc_poller_timer_active(ssh):
-    """wedge100s-bmc-poller.timer is active (triggers sensor poll every 10 s).
+    """wedge100s-bmc-daemon.service is active (persistent timerfd-driven BMC sensor daemon).
 
-    The poller itself is a oneshot service; the timer is what must be running.
+    Replaced the old timer+oneshot (wedge100s-bmc-poller.timer) in D3 refactor.
     """
     out, _, _ = ssh.run(
-        "systemctl is-active wedge100s-bmc-poller.timer 2>/dev/null || echo UNKNOWN"
+        "systemctl is-active wedge100s-bmc-daemon.service 2>/dev/null || echo UNKNOWN"
     )
     state = out.strip()
-    print(f"\nwedge100s-bmc-poller.timer: {state}")
+    print(f"\nwedge100s-bmc-daemon.service: {state}")
     assert state == "active", (
-        f"wedge100s-bmc-poller.timer is {state!r} — /run/wedge100s/ files will go stale.\n"
-        "Start with: sudo systemctl start wedge100s-bmc-poller.timer"
+        f"wedge100s-bmc-daemon.service is {state!r} — /run/wedge100s/ files will go stale.\n"
+        "Start with: sudo systemctl start wedge100s-bmc-daemon.service"
     )
 
 
@@ -298,4 +299,104 @@ print(' '.join(ok) if ok else 'NONE')
     assert "NONE" not in out and out.strip(), (
         "All /run/wedge100s/fan_N_front files are missing or zero.\n"
         "Check: systemctl status wedge100s-bmc-poller"
+    )
+
+
+# ------------------------------------------------------------------
+# LP_MODE readiness lock (SFF-8636 MCU init guard)
+# ------------------------------------------------------------------
+
+def test_lp_mode_readiness_lock(ssh):
+    """After daemon restart, EEPROM cache is withheld for ~2.5 s then written correctly.
+
+    Validates the LP_MODE readiness lock: when a populated port's EEPROM cache
+    file is absent, wedge100s-i2c-daemon must not write the upper page until
+    LP_MODE_READY_NS (2.5 s) has elapsed since the last LP_MODE deassert.
+    Writing the upper page too early captures zeros from the still-resetting
+    module MCU and permanently corrupts byte 220 (vendor info).
+
+    Test procedure:
+      1. Find a populated optical port (sfp index with a valid EEPROM file,
+         byte 0 in [0x01, 0x7f]).
+      2. Restart wedge100s-i2c-daemon (triggers LP_MODE deassert for all ports).
+      3. Delete the selected port's EEPROM cache file to force a hardware read.
+      4. At t+1s: file must be absent (guard still active).
+      5. At t+5s: file must exist with a valid identifier byte (guard expired,
+         EEPROM written from hardware with correct data).
+
+    Skipped if no populated optical port is found.
+    """
+    # Step 1: find a populated optical port with a valid EEPROM (identifier != 0)
+    find_code = """\
+import os, glob
+RUN_DIR = '/run/wedge100s'
+result = None
+for path in sorted(glob.glob(f'{RUN_DIR}/sfp_*_eeprom')):
+    try:
+        with open(path, 'rb') as f:
+            data = f.read(1)
+        if data and 0x01 <= data[0] <= 0x7f:
+            idx = path.split('_')[1]
+            result = idx
+            break
+    except OSError:
+        pass
+print(result if result else 'NONE')
+"""
+    out, _, rc = ssh.run_python(find_code, timeout=10)
+    port_idx = out.strip()
+    if port_idx == 'NONE' or not port_idx.isdigit():
+        pytest.skip("No populated optical port with valid EEPROM found — skipping guard test")
+
+    eeprom_path = f"/run/wedge100s/sfp_{port_idx}_eeprom"
+    print(f"\n  Using sfp_{port_idx}_eeprom for LP_MODE guard test")
+
+    # Step 2: restart the daemon to trigger LP_MODE deassert
+    _, _, rc = ssh.run("sudo systemctl restart wedge100s-i2c-daemon", timeout=15)
+    assert rc == 0, "daemon restart failed"
+    t_restart = time.time()
+
+    # Step 3: delete the cache file immediately after restart
+    ssh.run(f"sudo rm -f {eeprom_path}", timeout=5)
+
+    # Step 4: at t+1s the file must still be absent (guard still active)
+    elapsed = time.time() - t_restart
+    time.sleep(max(0, 1.0 - elapsed))
+    out, _, _ = ssh.run(f"test -e {eeprom_path} && echo EXISTS || echo ABSENT", timeout=5)
+    print(f"  t+1s: {out.strip()}")
+    assert out.strip() == "ABSENT", (
+        f"sfp_{port_idx}_eeprom appeared within 1s of daemon restart — "
+        "LP_MODE readiness guard is not blocking upper-page reads.\n"
+        "Expected: file absent for at least 2.5 s after LP_MODE deassert.\n"
+        "Risk: module MCU still resetting; EEPROM upper page (byte 220) "
+        "may be zero-filled, permanently corrupting vendor data."
+    )
+
+    # Step 5: at t+5s the file must exist with valid identifier byte
+    elapsed = time.time() - t_restart
+    time.sleep(max(0, 5.0 - elapsed))
+    read_code = f"""\
+import os
+path = '{eeprom_path}'
+try:
+    with open(path, 'rb') as f:
+        b0 = f.read(1)
+    if b0 and 0x01 <= b0[0] <= 0x7f:
+        print(f'OK id=0x{{b0[0]:02x}}')
+    elif b0:
+        print(f'BAD id=0x{{b0[0]:02x}}')
+    else:
+        print('EMPTY')
+except FileNotFoundError:
+    print('ABSENT')
+except Exception as e:
+    print(f'ERROR {{e}}')
+"""
+    out, _, _ = ssh.run_python(read_code, timeout=10)
+    result = out.strip()
+    print(f"  t+5s: {result}")
+    assert result.startswith("OK"), (
+        f"sfp_{port_idx}_eeprom not written correctly after 5s: {result}\n"
+        "Expected: file present with valid SFF-8024 identifier (byte 0 in [0x01, 0x7f]).\n"
+        "Check: sudo journalctl -u wedge100s-i2c-daemon -n 20"
     )

@@ -35,12 +35,8 @@ def _present_ports(ssh):
 
 
 def _daemon_tick(ssh):
-    """Force one daemon poll cycle and wait for it to complete."""
-    ssh.run(
-        "sudo wedge100s-i2c-daemon poll-presence",
-        timeout=30,
-    )
-    time.sleep(0.5)
+    """Wait for one daemon poll cycle to complete (1s tick interval)."""
+    time.sleep(2)
 
 
 class TestLpmodeDaemon:
@@ -105,7 +101,7 @@ class TestLpmodeDaemon:
         def _restore():
             ssh.run(f"sudo rm -f {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
             ssh.run(f"sudo bash -c 'echo 0 > {RUN_DIR}/sfp_{port}_lpmode_req'", timeout=5)
-            ssh.run("sudo wedge100s-i2c-daemon poll-presence", timeout=30)
+            time.sleep(2)
 
         try:
             # Request LP_MODE assert
@@ -173,7 +169,7 @@ class TestLpmodeDaemon:
         def _restore():
             ssh.run(f"sudo rm -f {RUN_DIR}/sfp_{port}_lpmode_req", timeout=5)
             ssh.run(f"sudo bash -c 'echo 0 > {RUN_DIR}/sfp_{port}_lpmode_req'", timeout=5)
-            ssh.run("sudo wedge100s-i2c-daemon poll-presence", timeout=30)
+            time.sleep(2)
 
         try:
             # Call set_lpmode(True) via platform API (needs sudo to write req file;
@@ -189,12 +185,19 @@ class TestLpmodeDaemon:
             )
             assert rc == 0 and "True" in out, f"set_lpmode(True) failed: {out}"
 
-            # Verify req file written
+            # Verify req file written (or already processed by inotify).
+            # The daemon watches RUN_DIR via inotify and may consume the req
+            # file before we read it — accept either the req file containing
+            # "1" OR the state file already updated to "1".
             req_val, _, _ = ssh.run(
                 f"cat {RUN_DIR}/sfp_{port}_lpmode_req 2>/dev/null", timeout=5
             )
-            assert req_val.strip() == "1", (
-                f"Expected req file to contain '1', got '{req_val.strip()}'"
+            state_val, _, _ = ssh.run(
+                f"cat {RUN_DIR}/sfp_{port}_lpmode 2>/dev/null", timeout=5
+            )
+            assert req_val.strip() == "1" or state_val.strip() == "1", (
+                f"set_lpmode(True) had no effect: "
+                f"req='{req_val.strip()}' state='{state_val.strip()}'"
             )
 
         finally:

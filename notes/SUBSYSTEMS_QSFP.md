@@ -79,6 +79,32 @@ present = not bool((byte >> bit) & 1)   # active-low
 - Fallback: 4 × `platform_smbus.read_byte()` of PCA9535 INPUT registers
 - Change event loop sleeps 3 s between polls (daemon cadence)
 
+## Test Bench Module Inventory (verified 2026-03-27)
+
+14 of 32 ports populated.  Passive copper DAC cables have no DOM (byte 220 = 0x00,
+`temp_support=False`, `temp=N/A` is correct behaviour — not a bug).
+
+| SONiC Port | 0-based | Vendor | Part Number | Type | DOM |
+|---|---|---|---|---|---|
+| Ethernet0   |  0 | Mellanox       | MCP7F00-A002R    | Passive DAC 2m  | None |
+| Ethernet8   |  2 | Mellanox       | MCP1600-C01A     | Passive DAC     | None |
+| Ethernet12  |  3 | FS             | Q28-PC03         | Passive DAC 3m  | None |
+| Ethernet16  |  4 | FS             | Q28-PC02         | Passive DAC 2m  | None |
+| Ethernet32  |  8 | FS             | Q28-PC02         | Passive DAC 2m  | None |
+| Ethernet48  | 12 | FS             | Q28-PC02         | Passive DAC 2m  | None |
+| Ethernet64  | 16 | Mellanox       | MCP7904-X002A    | Passive DAC     | None |
+| Ethernet76  | 19 | AOI            | AQPLBCQ4EDMA1105 | Active optical  | byte220=0x0c ✓ |
+| Ethernet80  | 20 | Amphenol       | NDAQGF-F305      | Passive DAC     | None |
+| Ethernet84  | 21 | Arista Networks| QSFP28-SR4-100G  | Optical SR4     | byte220=0x0c ✓ |
+| Ethernet100 | 25 | Arista Networks| QSFP28-SR4-100G  | Optical SR4     | byte220=0x0c ✓ |
+| Ethernet104 | 26 | Arista Networks| QSFP28-LR4-100G  | Optical LR4     | byte220=0x0c ✓ |
+| Ethernet108 | 27 | Arista Networks| QSFP28-SR4-100G  | Optical SR4     | byte220=0x0c ✓ |
+| Ethernet112 | 28 | FS             | Q28-PC01         | Passive DAC 1m  | None |
+
+Arista SR4-100G: byte 220 = 0x0c (bits 3+2 = bias/power monitoring; bits 5+4 = 0 →
+voltage `N/A` is correct per module spec; temperature reported via SFF-8636 pre-Rev-2.8
+path).
+
 ## Pass Criteria
 
 - For each present port N (0-based): `/run/wedge100s/sfp_N_present` contains `"1"`

@@ -1,5 +1,10 @@
 # LED Daemon Architecture Implementation Plan
 
+> **STATUS: COMPLETE** — All D1–D4 tasks implemented and committed as of 2026-03-27.
+> Commits: `ff3d83a6c` (D1), `88cf7f1b6` (D2), `ce2e4b0e7` (D3), `6979a7af3` (integration),
+> `32c12fb43` (D4 docs), `af4cd1462` (test fixes).
+> Checkboxes below were not ticked during implementation; plan preserved for reference.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace two timer+oneshot BMC/I2C polling pairs with persistent daemons, and permanently clear the ONIE LED rainbow via a BMC-side init script deployed by platform-init.

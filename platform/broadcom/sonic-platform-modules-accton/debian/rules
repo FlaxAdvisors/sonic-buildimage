@@ -45,6 +45,7 @@ override_dh_auto_clean:
 		fi; \
 		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-daemon; \
 		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-i2c-daemon; \
+		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth; \
 	done)
 	dh_clean
 
@@ -72,6 +73,11 @@ override_dh_auto_build:
 			gcc -O2 -o $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-i2c-daemon \
 				$(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-i2c-daemon.c; \
 			echo "Built wedge100s-i2c-daemon for $$mod"; \
+		fi; \
+		if [ -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth.c ]; then \
+			gcc -O2 -o $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth \
+				$(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth.c; \
+			echo "Built wedge100s-bmc-auth for $$mod"; \
 		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/pddf ]; then \
 			cd $(MOD_SRC_DIR)/$${mod}/pddf; \

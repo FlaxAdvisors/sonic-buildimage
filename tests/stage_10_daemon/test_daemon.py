@@ -311,3 +311,29 @@ def test_bmc_cache_fresh(ssh):
         f"thermal_1 is {age}s old (>{STALE_THRESHOLD_S}s threshold).\n"
         f"BMC daemon may not be running: sudo systemctl start {BMC_TIMER}"
     )
+
+
+def test_bmc_led_init_deployed(ssh):
+    """D1: clear_led_diag.sh is on BMC and th_led_en=1 (platform-init ran)."""
+    # clear_led_diag.sh must exist on BMC
+    # BMC key is root-owned; use sudo for SSH commands.
+    _, _, rc = ssh.run(
+        "sudo ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%usb0 test -x /usr/local/bin/clear_led_diag.sh",
+        timeout=15
+    )
+    assert rc == 0, "clear_led_diag.sh missing from BMC /usr/local/bin/"
+
+    # th_led_en must be 1
+    out, _, rc2 = ssh.run(
+        "sudo ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%usb0 "
+        "cat /sys/class/i2c-adapter/i2c-12/12-0031/th_led_en",
+        timeout=15
+    )
+    val = out.strip().split()[0] if out.strip() else ""
+    assert rc2 == 0 and val in ("1", "0x1"), (
+        f"th_led_en={out.strip()!r} (expected 1/0x1) — D1 LED init not yet applied"
+    )

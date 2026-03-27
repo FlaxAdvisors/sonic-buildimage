@@ -357,25 +357,6 @@ def do_sonic_platform_clean():
             print('{} is uninstalled'.format(PLATFORM_API2_WHL_FILE_PY3))
 
 
-def _request_led_init():
-    """Write syscpld_led_ctrl.set so bmc-daemon clears the ONIE rainbow.
-
-    ONIE leaves syscpld register 0x3c = 0xe0 (rainbow animation, BCM LEDUP
-    gated off).  bmc-daemon reads this .set file on its next 10 s cycle and
-    issues 'i2cset -f -y 12 0x31 0x3c 0x02' via the BMC TTY, then removes
-    the file.  Value 0x02 = th_led_en=1 (BCM LEDUP passthrough, all test
-    modes off).
-    """
-    set_path = '/run/wedge100s/syscpld_led_ctrl.set'
-    try:
-        os.makedirs('/run/wedge100s', exist_ok=True)
-        with open(set_path, 'w') as f:
-            f.write('0x02\n')
-        my_log("LED init requested: {} = 0x02 (bmc-daemon will apply)".format(set_path))
-    except Exception as e:
-        print("WARNING: _request_led_init: {}".format(e))
-
-
 def _configure_usb0():
     """Bring up usb0 (CDC-ECM link to BMC) to trigger IPv6 link-local auto-config.
 
@@ -397,6 +378,104 @@ def _configure_usb0():
         print("WARNING: _configure_usb0 exception: {}".format(e))
 
 
+def _bmc_led_init():
+    """Push SSH key to BMC, deploy clear_led_diag.sh, and run it.
+
+    Platform-init sequence per spec D1:
+      1. wedge100s-bmc-auth  — push key via /dev/ttyACM0 (10s TTY automation)
+      2. SSH probe           — gate; non-fatal if BMC unreachable
+      3. Deploy clear_led_diag.sh to BMC /usr/local/bin/ if absent/changed
+      4. Patch setup_board.sh inside board_rev>=2 block (once; idempotent)
+      5. Run clear_led_diag.sh immediately (every boot)
+    """
+    import syslog
+
+    BMC_HOST  = "root@fe80::ff:fe00:1%usb0"
+    BMC_KEY   = "/etc/sonic/wedge100s-bmc-key"
+    SSH_OPTS  = [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        "-i", BMC_KEY,
+    ]
+    LOCAL_SCRIPT = "/usr/bin/clear_led_diag.sh"
+    BMC_SCRIPT   = "/usr/local/bin/clear_led_diag.sh"
+    SETUP_BOARD  = "/etc/init.d/setup_board.sh"
+
+    # Step 1: push SSH key via TTY
+    try:
+        ret = subprocess.run(["/usr/bin/wedge100s-bmc-auth"],
+                             timeout=30).returncode
+    except (subprocess.TimeoutExpired, OSError) as e:
+        syslog.syslog(syslog.LOG_WARNING,
+                      "platform-init: wedge100s-bmc-auth failed: " + str(e))
+        return
+    if ret != 0:
+        syslog.syslog(syslog.LOG_WARNING,
+                      "platform-init: BMC key push failed (exit %d)" % ret)
+        return
+
+    # Step 2: SSH probe (gate for steps 3-5)
+    probe = subprocess.run(
+        ["ssh"] + SSH_OPTS + [BMC_HOST, "echo ok"],
+        capture_output=True, text=True, timeout=10
+    )
+    if probe.returncode != 0:
+        syslog.syslog(syslog.LOG_WARNING,
+                      "platform-init: BMC SSH probe failed — skipping LED init")
+        return
+
+    # Step 3: deploy clear_led_diag.sh if absent or changed.
+    # Use SSH stdin pipe (not scp): scp mishandles IPv6 link-local addresses
+    # with % scope-id (e.g. fe80::ff:fe00:1%usb0) on some OpenSSH versions.
+    try:
+        with open(LOCAL_SCRIPT, 'rb') as f:
+            deploy = subprocess.run(
+                ["ssh"] + SSH_OPTS + [BMC_HOST,
+                 "cat > %s && chmod +x %s" % (BMC_SCRIPT, BMC_SCRIPT)],
+                stdin=f, capture_output=True, timeout=15
+            )
+        if deploy.returncode != 0:
+            syslog.syslog(syslog.LOG_WARNING,
+                          "platform-init: clear_led_diag.sh deploy failed")
+            # Continue: script may be present from a prior boot
+    except OSError as e:
+        syslog.syslog(syslog.LOG_WARNING,
+                      "platform-init: clear_led_diag.sh open failed: " + str(e))
+
+    # Step 4: patch setup_board.sh once (idempotent grep guard)
+    check = subprocess.run(
+        ["ssh"] + SSH_OPTS + [BMC_HOST,
+         "grep -c 'clear_led_diag.sh' %s" % SETUP_BOARD],
+        capture_output=True, timeout=10
+    )
+    if check.returncode != 0:
+        # Insert "    clear_led_diag.sh" before the closing "fi" of the
+        # board_rev >= 2 block.  The block ends at the first bare "fi".
+        # BusyBox sed 1.24.1 does not support 'i\' inside address ranges, so
+        # use substitute to prepend the line before the lone bare "fi".
+        patch_cmd = (
+            r"sed -i 's/^fi$/    clear_led_diag.sh\nfi/' " + SETUP_BOARD
+        )
+        subprocess.run(
+            ["ssh"] + SSH_OPTS + [BMC_HOST, patch_cmd],
+            capture_output=True, timeout=10
+        )
+
+    # Step 5: run clear_led_diag.sh immediately (every boot)
+    result = subprocess.run(
+        ["ssh"] + SSH_OPTS + [BMC_HOST,
+         "chmod +x %s && %s" % (BMC_SCRIPT, BMC_SCRIPT)],
+        capture_output=True, text=True, timeout=10
+    )
+    if result.returncode == 0:
+        syslog.syslog(syslog.LOG_INFO,
+                      "platform-init: clear_led_diag.sh OK (th_led_en=1)")
+    else:
+        syslog.syslog(syslog.LOG_WARNING,
+                      "platform-init: clear_led_diag.sh failed: " + result.stderr.strip())
+
+
 def do_install():
     print("Checking system...")
     if not driver_check():
@@ -416,7 +495,7 @@ def do_install():
     _pin_bcm_irq()
     do_sonic_platform_install()
     _configure_usb0()
-    _request_led_init()
+    _bmc_led_init()
     print("Platform init complete.")
 
 

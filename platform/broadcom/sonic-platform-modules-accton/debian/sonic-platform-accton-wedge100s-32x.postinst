@@ -531,7 +531,7 @@ fi
 
 # Patch syncd.sh to inject LD_PRELOAD shim for flex sub-port counters.
 SYNCD_SH="/usr/bin/syncd.sh"
-if [ -f "$SYNCD_SH" ] && ! grep -q "wedge100s-stat-shim" "$SYNCD_SH"; then
+if [ -f "$SYNCD_SH" ] && ! grep -q "libsai-stat-shim" "$SYNCD_SH"; then
     python3 - <<'PYEOF'
 import sys
 SYNCD_SH = "/usr/bin/syncd.sh"
@@ -539,7 +539,7 @@ NEEDLE = '        --name=$DOCKERNAME \\\n'
 INSERT = (
     '        --env "LD_PRELOAD=/usr/share/sonic/platform/libsai-stat-shim.so" \\\n'
     '        --env "WEDGE100S_BCM_CONFIG=/usr/share/sonic/hwsku/'
-    'th-wedge100s-32x-flex.config.bcm" \\  # wedge100s-stat-shim\n'
+    'th-wedge100s-32x-flex.config.bcm" \\\n'
 )
 with open(SYNCD_SH) as fh:
     text = fh.read()

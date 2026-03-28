@@ -205,7 +205,7 @@ static int resolve_sdk_port(sai_object_id_t oid)
     if (!g_real_get_port_attr) return -1;
     if (g_real_get_port_attr(oid, 1, &attr) != SAI_STATUS_SUCCESS) return -1;
 
-    for (uint32_t i = 0; i < attr.value.u32list.count; i++) {
+    for (uint32_t i = 0; i < 8 && i < attr.value.u32list.count; i++) {
         int sp = sdk_port_for_lane(attr.value.u32list.list[i]);
         if (sp >= 0) return sp;
     }

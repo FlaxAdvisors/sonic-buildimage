@@ -75,6 +75,75 @@ ssh admin@192.168.88.12 "sudo docker exec syncd find /var/run /tmp -name '*.sock
 ssh admin@192.168.88.12 "sudo docker exec syncd ls /var/run/sswsyncd/ 2>/dev/null"
 ```
 
+## Why Not Replace libsai.so Entirely?
+
+This was considered and rejected on 2026-03-28. The reasoning is preserved here because
+it will come up again.
+
+### What libsai.so actually does
+
+`libsai.so.1.0` (506MB monolithic binary) implements the full SAI surface that syncd
+depends on. This is not just port stats — it is the entire hardware programming layer:
+
+- Switch init: BCM SDK bootstrap, `.config.bcm` loading, flex port programming, MMU init
+- Port create/delete/attributes/stats
+- FDB (MAC table management)
+- L3: routes, neighbors, nexthops, ECMP groups
+- ACLs — thousands of lines of spec alone
+- QoS: queues, schedulers, WRED, buffer profiles, priority groups
+- LAG, VLANs, tunnels (VXLAN), mirror sessions, BFD, STP, policers
+- Hostif: CPU packet I/O, kernel netdev integration (how SONiC receives packets)
+- And the stats path that is broken for flex sub-ports
+
+A drop-in replacement for syncd must implement all of this. That is years of work for a
+team, not a single-platform effort.
+
+### Why Cumulus/EOS don't help
+
+Cumulus Linux 3.7 worked on Wedge 100S and had correct breakout stats, but `switchd` is
+fully closed source. It bypasses SAI entirely and calls `bcm_stat_get()` directly
+against the BCM SDK it initialized internally. There is no open-source technique to
+borrow — the approach is simply "no SAI layer."
+
+Arista EOS on the peer device uses a completely different NOS architecture (AgentX/Sysdb)
+that predates SAI and never had this problem. Same conclusion.
+
+FBOSS (Facebook, also runs on Wedge 100S) similarly calls `bcm_stat_sync_multi_get()`
+directly from `BcmPort.cpp`, with BCM logical port IDs obtained at port creation time.
+No SAI. This is open source but requires the proprietary BCM SDK to run.
+
+### Why reverse-engineering libsai.so doesn't help
+
+The SAI API surface is already fully public — OCP publishes all headers. That is not the
+unknown. The unknown is the implementation detail of how `libsaibcm` maps flex sub-port
+OIDs to BCM logical port IDs on BCM56960. Reconstructing that from a 506MB binary is:
+(a) legally questionable under Broadcom's SDK license, and
+(b) irrelevant — we don't need to know how the broken code works, we need to route
+around it for the one narrow failure case.
+
+### Why the shim is the right scope
+
+The bug is narrow: `brcm_sai_get_port_stats()` returns non-SUCCESS for flex `.0`
+portmap sub-port OIDs. Everything else — routing, ACLs, QoS, FDB, hostif, port
+attributes — works correctly. A full libsai.so replacement fixes a one-function bug
+with the maximum possible blast radius.
+
+### Why bcmcmd over OpenNSL userspace library
+
+Direct `bcm_stat_get()` access via the OpenNSL/OpenBCM userspace library was considered
+as a cleaner alternative to bcmcmd text parsing. Rejected because:
+
+- `libsai.so` already initialized the BCM SDK. Loading a second userspace SDK instance
+  against the same kernel module (saibcm-modules) is undefined behavior — risk of
+  double-init corruption.
+- bcmcmd goes through the *already-running* SDK instance via its Unix socket — no
+  coexistence risk, no second init.
+
+**Known fragility of bcmcmd approach:** If Broadcom changes `show counters` output
+format in a future `libsaibcm` upgrade, the parser in `bcmcmd_client.c` breaks. This
+is a one-file fix scoped to the parser — acceptable maintenance cost for a permanent
+production component on a platform that is unlikely to receive further libsaibcm updates.
+
 ## Continuation Instructions
 
 To continue: invoke the `superpowers:writing-plans` skill, reference this file and the

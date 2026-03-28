@@ -1,4 +1,3 @@
-import re
 import time
 import pytest
 
@@ -88,13 +87,15 @@ def test_flex_ports_have_full_stats(ssh):
 
 def test_non_flex_ports_not_regressed(ssh):
     """Non-flex ports still have >= 60 SAI stat keys (passthrough not broken)."""
+    counts = {}
     for port in NON_FLEX_PORTS:
         n = _get_stat_key_count(ssh, port)
+        counts[port] = n
         assert n >= MIN_STAT_KEYS, (
             f"{port}: only {n} stat keys (expected ≥{MIN_STAT_KEYS}). "
             "Shim passthrough may be broken — check get_port_stats intercept."
         )
-    print(f"\nNon-flex stat counts: { {p: _get_stat_key_count(ssh, p) for p in NON_FLEX_PORTS} }")
+    print(f"\nNon-flex stat counts: {counts}")
 
 
 def test_flex_port_rx_bytes_nonzero(ssh):
@@ -145,7 +146,9 @@ def test_flex_port_tx_bytes_nonzero(ssh):
         val = int(val_out.strip() or "0")
         print(f"  {port} IF_OUT_OCTETS = {val:,}")
         assert val > 0, (
-            f"{port}: IF_OUT_OCTETS=0 even though link is up."
+            f"{port}: IF_OUT_OCTETS=0 even though link is up.\n"
+            "Check bcmcmd 'show counters' for this port.\n"
+            "Verify shim is connected: look for 'shim: bcmcmd connected' in syslog."
         )
 
 
@@ -168,4 +171,4 @@ def test_startup_zeros_succeed(ssh):
             f"{port}: SAI_PORT_STAT_IN_DROPPED_PKTS key is MISSING.\n"
             "This was working before the shim — shim may have broken get_port_stats_ext path."
         )
-    print("\nAll 12 flex ports: SAI_PORT_STAT_IN_DROPPED_PKTS key present ✓")
+    print("\nAll 12 flex ports: SAI_PORT_STAT_IN_DROPPED_PKTS key present")

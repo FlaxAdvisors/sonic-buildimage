@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+# Remove syncd.sh LD_PRELOAD shim patch (reverse of postinst patch).
+SYNCD_SH="/usr/bin/syncd.sh"
+if [ -f "$SYNCD_SH" ] && grep -q "wedge100s-stat-shim" "$SYNCD_SH"; then
+    python3 - <<'PYEOF'
+import sys, re
+SYNCD_SH = "/usr/bin/syncd.sh"
+with open(SYNCD_SH) as fh:
+    text = fh.read()
+text = re.sub(
+    r'        --env "LD_PRELOAD=[^"]*" \\\n'
+    r'        --env "WEDGE100S_BCM_CONFIG=[^"]*" \\[^\n]*wedge100s-stat-shim[^\n]*\n',
+    '', text
+)
+with open(SYNCD_SH, 'w') as fh:
+    fh.write(text)
+print("wedge100s prerm: removed shim LD_PRELOAD from " + SYNCD_SH)
+PYEOF
+fi
+
+exit 0

@@ -529,4 +529,28 @@ if command -v docker >/dev/null 2>&1; then
     fi
 fi
 
+# Patch syncd.sh to inject LD_PRELOAD shim for flex sub-port counters.
+SYNCD_SH="/usr/bin/syncd.sh"
+if [ -f "$SYNCD_SH" ] && ! grep -q "wedge100s-stat-shim" "$SYNCD_SH"; then
+    python3 - <<'PYEOF'
+import sys
+SYNCD_SH = "/usr/bin/syncd.sh"
+NEEDLE = '        --name=$DOCKERNAME \\\n'
+INSERT = (
+    '        --env "LD_PRELOAD=/usr/share/sonic/platform/libsai-stat-shim.so" \\\n'
+    '        --env "WEDGE100S_BCM_CONFIG=/usr/share/sonic/hwsku/'
+    'th-wedge100s-32x-flex.config.bcm" \\  # wedge100s-stat-shim\n'
+)
+with open(SYNCD_SH) as fh:
+    text = fh.read()
+if NEEDLE not in text:
+    print("wedge100s postinst: WARNING: needle not found in " + SYNCD_SH, file=sys.stderr)
+    sys.exit(0)
+text = text.replace(NEEDLE, INSERT + NEEDLE, 1)
+with open(SYNCD_SH, 'w') as fh:
+    fh.write(text)
+print("wedge100s postinst: patched " + SYNCD_SH + " — shim LD_PRELOAD added")
+PYEOF
+fi
+
 exit 0

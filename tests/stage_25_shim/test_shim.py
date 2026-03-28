@@ -23,8 +23,8 @@ def test_shim_library_present(ssh):
 
 def test_syncd_sh_patched(ssh):
     """syncd.sh contains the LD_PRELOAD injection line."""
-    out, err, rc = ssh.run("grep -c 'libsai-stat-shim' /usr/bin/syncd.sh || echo 0", timeout=5)
-    assert int(out.strip()) >= 1, (
+    out, err, rc = ssh.run("grep -c 'libsai-stat-shim' /usr/bin/syncd.sh 2>/dev/null || true", timeout=5)
+    assert int(out.strip() or "0") >= 1, (
         "syncd.sh has not been patched with the shim LD_PRELOAD.\n"
         "Run: sudo dpkg -i sonic-platform-accton-wedge100s-32x_1.1_amd64.deb"
     )

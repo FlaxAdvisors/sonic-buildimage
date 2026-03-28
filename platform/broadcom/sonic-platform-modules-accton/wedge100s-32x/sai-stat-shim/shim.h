@@ -15,8 +15,8 @@ typedef uint32_t sai_attr_id_t;
 typedef int32_t  sai_api_t;
 
 #define SAI_STATUS_SUCCESS     ((sai_status_t)0)
-#define SAI_API_PORT           ((sai_api_t)8)       /* from sai/sai.h */
-#define SAI_PORT_ATTR_HW_LANE_LIST ((sai_attr_id_t)9)  /* from sai/saiport.h v1.9+ */
+#define SAI_API_PORT           ((sai_api_t)2)       /* from sai/sai.h: SAI_API_PORT=2 */
+#define SAI_PORT_ATTR_HW_LANE_LIST ((sai_attr_id_t)30) /* from sai/saiport.h: 30th entry (0x1e) */
 
 /* SAI attribute value union — only the u32list field is used by the shim. */
 typedef struct { uint32_t count; uint32_t *list; } sai_u32_list_t;

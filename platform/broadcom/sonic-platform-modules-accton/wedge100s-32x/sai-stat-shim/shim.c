@@ -345,8 +345,7 @@ sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
         g_real_get_port_stats     = port_api->get_port_stats;
     if (port_api->get_port_stats_ext != shim_get_port_stats_ext)
         g_real_get_port_stats_ext = port_api->get_port_stats_ext;
-    if (port_api->get_port_attribute != NULL &&
-        port_api->get_port_attribute != (sai_get_port_attribute_fn)shim_get_port_stats)
+    if (port_api->get_port_attribute != NULL)
         g_real_get_port_attr      = port_api->get_port_attribute;
 
     /* Replace with shim functions.  The struct may live in a read-only page

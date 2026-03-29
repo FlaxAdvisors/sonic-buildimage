@@ -91,7 +91,11 @@ int bcmcmd_connect(const char *path, int timeout_ms)
 
     if (errno == EINPROGRESS) {
         struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        if (poll(&pfd, 1, timeout_ms) <= 0) { close(fd); return -1; }
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr <= 0) {
+            syslog(LOG_WARNING, "shim: bcmcmd connect poll timeout (pr=%d)", pr);
+            close(fd); return -1;
+        }
         int err = 0;
         socklen_t elen = sizeof(err);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
@@ -101,14 +105,19 @@ int bcmcmd_connect(const char *path, int timeout_ms)
     /* Restore blocking. */
     fcntl(fd, F_SETFL, flags);
 
-    /* Read and discard the initial banner/prompt. */
+    /* The drivshell prompt only appears after input is sent (dsserve buffers output
+     * before any client connects; any prompt emitted during SDK init is lost).
+     * Send a bare newline to prod the shell into re-issuing the prompt, then
+     * wait up to 3 seconds for "drivshell>" to appear. */
     char buf[READ_BUF_SIZE];
-    if (read_until_prompt(fd, buf, sizeof(buf), 2000) < 0) {
+    buf[0] = '\0';
+    write_all(fd, "\n");
+    int rc_banner = read_until_prompt(fd, buf, sizeof(buf), 3000);
+    if (rc_banner < 0) {
+        syslog(LOG_WARNING, "shim: bcmcmd banner timeout (got %d bytes): '%.120s'",
+               (int)strnlen(buf, READ_BUF_SIZE), buf);
         close(fd); return -1;
     }
-    /* Flush any pending output with a bare newline. */
-    write_all(fd, "\n");
-    read_until_prompt(fd, buf, sizeof(buf), 1000);  /* ignore errors here */
 
     return fd;
 }

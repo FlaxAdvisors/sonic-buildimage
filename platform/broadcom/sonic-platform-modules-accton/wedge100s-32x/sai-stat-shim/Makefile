@@ -3,7 +3,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -g -fPIC
 LDFLAGS = -lpthread
 
-OBJS = shim.o bcmcmd_client.o stat_map.o
+OBJS = shim.o bcmcmd_client.o stat_map.o compat.o
 
 libsai-stat-shim.so: $(OBJS)
 	$(CC) -shared -o $@ $(OBJS) -ldl $(LDFLAGS)

@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <sys/mman.h>
 
 /* ---- globals ---- */
 
@@ -295,6 +296,30 @@ static sai_status_t shim_get_port_stats_ext(
     return g_real_get_port_stats_ext(port_id, count, ids, mode, values);
 }
 
+/* ---- mprotect helper for patching read-only function pointer tables ---- */
+
+/* Write a void* value to *dst, temporarily making the page writable if needed.
+ * libsai.so maps its API struct tables with r-- protection; a plain write
+ * causes SIGSEGV (fault code 7 = write to non-writable page).  We use
+ * mprotect to add PROT_WRITE for the one page containing *dst, write, then
+ * restore to PROT_READ. */
+static int patch_fnptr(void **dst, void *val)
+{
+    long pgsz  = sysconf(_SC_PAGESIZE);
+    uintptr_t addr = (uintptr_t)dst;
+    uintptr_t page = addr & ~(uintptr_t)(pgsz - 1);
+
+    if (mprotect((void *)page, (size_t)pgsz, PROT_READ | PROT_WRITE) != 0) {
+        syslog(LOG_ERR, "shim: mprotect(PROT_READ|PROT_WRITE) failed at %p: %m",
+               (void *)page);
+        return -1;
+    }
+    *dst = val;
+    /* Restore read-only; ignore failure (mapping may span multiple perms). */
+    mprotect((void *)page, (size_t)pgsz, PROT_READ);
+    return 0;
+}
+
 /* ---- sai_api_query intercept ---- */
 
 /* Called once by syncd at startup, and again after each breakout change. */
@@ -311,14 +336,24 @@ sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
 
     sai_port_api_t *port_api = (sai_port_api_t *)*api_method_table;
 
-    /* Save the real function pointers (may change across calls). */
-    g_real_get_port_stats     = port_api->get_port_stats;
-    g_real_get_port_stats_ext = port_api->get_port_stats_ext;
-    g_real_get_port_attr      = port_api->get_port_attribute;
+    /* Save real function pointers only if they do not already point to our
+     * shim — on the second and subsequent sai_api_query calls (breakout
+     * reconfiguration) the struct may already be patched.  If we blindly
+     * copy a shim pointer into g_real_*, the shim will recurse into itself
+     * and stack-overflow. */
+    if (port_api->get_port_stats != shim_get_port_stats)
+        g_real_get_port_stats     = port_api->get_port_stats;
+    if (port_api->get_port_stats_ext != shim_get_port_stats_ext)
+        g_real_get_port_stats_ext = port_api->get_port_stats_ext;
+    if (port_api->get_port_attribute != NULL &&
+        port_api->get_port_attribute != (sai_get_port_attribute_fn)shim_get_port_stats)
+        g_real_get_port_attr      = port_api->get_port_attribute;
 
-    /* Replace with shim functions. */
-    port_api->get_port_stats     = shim_get_port_stats;
-    port_api->get_port_stats_ext = shim_get_port_stats_ext;
+    /* Replace with shim functions.  The struct may live in a read-only page
+     * (libsai.so r-- mapping); use patch_fnptr to temporarily grant write
+     * permission via mprotect before modifying. */
+    patch_fnptr((void **)&port_api->get_port_stats,     shim_get_port_stats);
+    patch_fnptr((void **)&port_api->get_port_stats_ext, shim_get_port_stats_ext);
 
     /* Invalidate OID cache — breakout may have changed port layout. */
     pthread_mutex_lock(&g_oids.lock);

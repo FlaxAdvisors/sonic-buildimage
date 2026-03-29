@@ -1,44 +1,49 @@
-"""Stage 12 — Interface Counters & Statistics.
+"""Stage 24 — Post-throughput counter verification.
 
-Verifies that syncd flex counter infrastructure is working and that all 32
-QSFP ports have counter OIDs in COUNTERS_DB.
+Runs after stage_23 iperf throughput tests so that connected ports have
+accumulated substantial RX/TX traffic.  No FEC setup or IP assignment needed
+here — links are already up and iperf has already generated traffic.
 
-Hardware context (verified 2026-03-02):
-  - COUNTERS_PORT_NAME_MAP populated with OIDs for all 32 ports
-  - All SAI_PORT_STAT_* counters present in COUNTERS_DB
-  - Flex counter polling: PORT_STAT 1000ms, enabled
-  - Counters increment with live traffic (verified with LLDP traffic)
-  - sonic-clear counters works correctly
-
-Phase reference: Phase 12 (Interface Counters & Statistics).
+Tests:
+  test_flex_counter_port_stat_enabled      PORT_STAT flex counter enabled
+  test_counters_port_name_map_all_ports    all 32 ports have OIDs in COUNTERS_DB
+  test_counters_db_oid_has_stat_entries    SAI_PORT_STAT_* entries present
+  test_counters_key_fields_present         all expected RX/TX stat fields present
+  test_show_interfaces_counters_exits_zero CLI exits 0
+  test_show_interfaces_counters_columns    expected column headers present
+  test_show_interfaces_counters_port_rows  >= 32 Ethernet rows in output
+  test_counters_link_up_ports_show_U       link-up ports show STATE=U
+  test_counters_link_up_ports_have_rx_traffic non-zero RX_OK on link-up ports
+  test_sonic_clear_counters                sonic-clear counters resets display
 """
 
-import json
 import re
 import time
 import pytest
 
 NUM_PORTS = 32
-# Ports known to be admin-up and link-up (connected to rabbit-lorax)
+# Ports known to be admin-up and link-up (connected to rabbit-lorax / EOS peer)
 LINK_UP_PORTS = ["Ethernet16", "Ethernet32", "Ethernet48", "Ethernet112"]
 
 
 @pytest.fixture(scope="session", autouse=True)
-def stage12_fec_setup(ssh):
-    """Configure RS-FEC on connected ports so counters stage has live traffic."""
+def stage24_fec_setup(ssh):
+    """Ensure RS-FEC is configured on connected ports and wait for links.
+
+    Idempotent: if FEC is already RS (e.g. stage_13 ran earlier in the suite),
+    the config calls are no-ops.  No teardown — FEC should remain RS.
+    """
     for port in LINK_UP_PORTS:
         ssh.run(f"sudo config interface fec {port} rs", timeout=15)
-    # Wait for links to come up
     deadline = time.time() + 45
     while time.time() < deadline:
-        out, _, rc = ssh.run("show interfaces status 2>&1", timeout=15)
-        up_ports = [l for l in out.splitlines() if any(p in l for p in LINK_UP_PORTS) and " up " in l]
+        out, _, _ = ssh.run("show interfaces status 2>&1", timeout=15)
+        up_ports = [l for l in out.splitlines()
+                    if any(p in l for p in LINK_UP_PORTS) and " up " in l]
         if len(up_ports) >= 2:
             break
         time.sleep(5)
     yield
-    for port in LINK_UP_PORTS:
-        ssh.run(f"sudo config interface fec {port} none", timeout=15)
 
 
 # ------------------------------------------------------------------
@@ -50,7 +55,6 @@ def test_flex_counter_port_stat_enabled(ssh):
     out, err, rc = ssh.run("counterpoll show", timeout=30)
     assert rc == 0, f"counterpoll show failed (rc={rc}): {err}"
     print(f"\ncounterpoll show:\n{out}")
-    # Find the PORT_STAT line
     port_stat_line = next(
         (l for l in out.splitlines() if "PORT_STAT" in l and "BUFFER" not in l), None
     )
@@ -62,7 +66,6 @@ def test_flex_counter_port_stat_enabled(ssh):
         f"PORT_STAT is not enabled: {port_stat_line!r}\n"
         "Run: counterpoll port enable"
     )
-    # Extract interval (should be numeric ms)
     interval_match = re.search(r"(\d+)\s*ms", port_stat_line, re.IGNORECASE)
     if interval_match:
         interval_ms = int(interval_match.group(1))
@@ -77,7 +80,6 @@ def test_counters_port_name_map_all_ports(ssh):
     out, err, rc = ssh.run("redis-cli -n 2 hgetall COUNTERS_PORT_NAME_MAP", timeout=30)
     assert rc == 0, f"redis-cli failed (rc={rc}): {err}"
     lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
-    # redis-cli hgetall output alternates field/value
     eth_names = {lines[i] for i in range(0, len(lines), 2) if "Ethernet" in lines[i]}
     print(f"\nEthernet ports in COUNTERS_PORT_NAME_MAP: {len(eth_names)}")
     assert len(eth_names) >= NUM_PORTS, (
@@ -87,8 +89,7 @@ def test_counters_port_name_map_all_ports(ssh):
 
 
 def test_counters_db_oid_has_stat_entries(ssh):
-    """At least one port's COUNTERS:oid:... key has SAI_PORT_STAT_* entries."""
-    # Get OID for first port
+    """At least one port's COUNTERS:oid has SAI_PORT_STAT_* entries."""
     out, err, rc = ssh.run(
         "redis-cli -n 2 hget COUNTERS_PORT_NAME_MAP Ethernet0", timeout=10
     )
@@ -123,8 +124,6 @@ def test_counters_key_fields_present(ssh):
         "SAI_PORT_STAT_IF_OUT_ERRORS",
         "SAI_PORT_STAT_IF_OUT_DISCARDS",
     ]
-    # Ethernet16 is a non-breakout 100G port with the full SAI counter set.
-    # Breakout sub-ports (e.g. Ethernet0) only have IN/OUT_DROPPED_PKTS on this SAI.
     out, err, rc = ssh.run(
         "redis-cli -n 2 hget COUNTERS_PORT_NAME_MAP Ethernet16", timeout=10
     )
@@ -177,31 +176,26 @@ def test_show_interfaces_counters_port_rows(ssh):
 
 
 def test_counters_link_up_ports_show_U(ssh):
-    """Ports with links up show STATE=U in counters output.
-
-    Requires RS-FEC configured and peer connected (verified 2026-03-02).
-    """
+    """Ports with links up show STATE=U in counters output."""
     out, err, rc = ssh.run("show interfaces counters", timeout=30)
     assert rc == 0, f"Command failed: {err}"
     for port in LINK_UP_PORTS:
         matching = [l for l in out.splitlines() if port in l]
         if not matching:
-            pytest.skip(f"{port} not found in counters output — may need RS-FEC config")
+            pytest.skip(f"{port} not found in counters output")
         row = matching[0]
-        # STATE column should show U (Up)
         fields = row.split()
         if len(fields) < 2:
             continue
         state = fields[1]
         print(f"  {port}: STATE={state}")
         assert state == "U", (
-            f"{port}: Expected STATE=U (link up), got {state!r}\n"
-            "Ensure RS-FEC is configured: config interface fec {port} rs"
+            f"{port}: Expected STATE=U (link up), got {state!r}"
         )
 
 
 def test_counters_link_up_ports_have_rx_traffic(ssh):
-    """Ports with links up show non-zero RX_OK (LLDP traffic is always present)."""
+    """Ports with links up show non-zero RX_OK after iperf throughput tests."""
     out, err, rc = ssh.run("show interfaces counters", timeout=30)
     assert rc == 0, f"Command failed: {err}"
     for port in LINK_UP_PORTS:
@@ -218,10 +212,10 @@ def test_counters_link_up_ports_have_rx_traffic(ssh):
             rx_ok = int(rx_ok_raw)
         except ValueError:
             continue
-        print(f"  {port}: RX_OK={rx_ok}")
+        print(f"  {port}: RX_OK={rx_ok:,}")
         assert rx_ok > 0, (
             f"{port}: RX_OK=0 even though link is up. "
-            "LLDP packets should be incrementing this counter continuously."
+            "Expected traffic from iperf stage_23 or LLDP."
         )
 
 
@@ -229,13 +223,11 @@ def test_sonic_clear_counters(ssh):
     """sonic-clear counters resets displayed counter values."""
     out, _, rc = ssh.run("sonic-clear counters", timeout=15)
     assert rc == 0, f"sonic-clear counters failed (rc={rc})"
-    assert "Cleared" in out or rc == 0, f"Unexpected output: {out!r}"
     print(f"\nsonic-clear counters: {out.strip()!r}")
-    # After clear, RX_OK for link-up ports should be near zero
-    import time
+    # After clear, RX_OK for link-up ports should be near zero (only LLDP in < 1s)
     out2, _, rc2 = ssh.run("show interfaces counters", timeout=30)
     assert rc2 == 0
-    for port in LINK_UP_PORTS[:1]:  # Check just first port
+    for port in LINK_UP_PORTS[:1]:
         matching = [l for l in out2.splitlines() if port in l]
         if not matching:
             continue
@@ -246,7 +238,6 @@ def test_sonic_clear_counters(ssh):
         try:
             rx_ok = int(rx_ok_raw)
             print(f"  {port} RX_OK after clear: {rx_ok}")
-            # Should be small (< 100 — just a few LLDP frames since clear)
             assert rx_ok < 100, (
                 f"{port}: RX_OK={rx_ok} after clear — expected < 100 (LLDP only)"
             )

@@ -6,6 +6,7 @@ assertions in stage_XX/test_*.py are entirely separate.
 """
 
 import json
+import os
 import re
 import sys
 
@@ -602,17 +603,137 @@ def report_transceiver(ssh):
 
 
 # ---------------------------------------------------------------------------
-# Stage 12 — Interface counters
+# Stage 12 — SFP Inventory
+# ---------------------------------------------------------------------------
+
+def _sfp_parse_pm(pm_text):
+    """Parse 'show interfaces transceiver pm' output into a compact dict.
+
+    Returns {'temp': str, 'voltage': str, 'lanes': [(rx_pwr, tx_bias, tx_pwr), ...]}
+    All values may be 'N/A' for passive DAC cables.
+    """
+    temp    = re.search(r'Temperature:\s*(\S+)',         pm_text)
+    voltage = re.search(r'Voltage:\s*(\S+)',              pm_text)
+    lanes   = re.findall(r'^\s+\d+\s+(\S+)\s+(\S+)\s+(\S+)', pm_text, re.MULTILINE)
+    return {
+        'temp':    temp.group(1)    if temp    else 'N/A',
+        'voltage': voltage.group(1) if voltage else 'N/A',
+        'lanes':   lanes,
+    }
+
+
+def report_sfp_inventory(ssh):
+    """Stage 12 — SFP/QSFP inventory: vendor identity and PM data per physical port.
+
+    For breakout configurations (4x25G, 2x50G), only the primary sub-port
+    (alias ending /1) is shown — all sub-ports share one physical transceiver.
+    """
+    # --- collect all port aliases from CONFIG_DB ---
+    keys_out, _, _ = ssh.run(
+        "redis-cli -n 4 KEYS 'PORT|Ethernet*' 2>/dev/null | sort -V", timeout=20
+    )
+    alias_map = {}
+    for key in keys_out.strip().splitlines():
+        if '|' not in key:
+            continue
+        port = key.split('|', 1)[1].strip()
+        alias_out, _, _ = ssh.run(
+            f"redis-cli -n 4 HGET '{key}' alias 2>/dev/null", timeout=5
+        )
+        alias_map[port] = alias_out.strip()
+
+    # --- presence ---
+    presence_out, _, _ = ssh.run(
+        "show interfaces transceiver presence 2>/dev/null", timeout=30
+    )
+    present = set()
+    for line in presence_out.splitlines():
+        m = re.match(r'\s*(Ethernet\d+)\s+Present\b', line)
+        if m:
+            present.add(m.group(1))
+
+    def _eth_key(name):
+        m = re.search(r'(\d+)', name)
+        return int(m.group(1)) if m else 0
+
+    # physical primary ports = present AND alias ends with /1
+    physical = [
+        p for p in sorted(present, key=_eth_key)
+        if alias_map.get(p, '').endswith('/1')
+    ]
+
+    if not physical:
+        print("\n  No present physical ports found")
+        return
+
+    # --- per-port collection ---
+    rows_id  = []   # for identity table
+    rows_pm  = []   # for PM table
+    for port in physical:
+        alias = alias_map.get(port, '?')
+
+        eeprom_out, _, _ = ssh.run(
+            f"show interfaces transceiver eeprom {port} 2>/dev/null", timeout=30
+        )
+        pm_out, _, _ = ssh.run(
+            f"show interfaces transceiver pm {port} 2>/dev/null", timeout=30
+        )
+
+        def _field(pattern, text):
+            m = re.search(pattern, text)
+            return m.group(1).strip() if m else '—'
+
+        vendor = _field(r'Vendor Name:\s*(.+)',  eeprom_out)
+        pn     = _field(r'Vendor PN:\s*(.+)',    eeprom_out)
+        sn     = _field(r'Vendor SN:\s*(.+)',    eeprom_out)
+        rows_id.append((port, alias, vendor, pn, sn))
+
+        pm = _sfp_parse_pm(pm_out)
+        rows_pm.append((port, alias, pm['temp'], pm['voltage'], pm['lanes']))
+
+    _table(
+        ["Port", "Alias", "Vendor", "Part Number", "Serial"],
+        rows_id,
+        title=f"SFP/QSFP Inventory ({len(physical)} physical ports)",
+    )
+
+    # PM: one row per lane so all bias/power values are visible
+    pad = "  "
+    print(f"\n{pad}Transceiver PM  (N/A = DAC cable or no DOM electronics):")
+    headers = ["Port", "Alias", "Temp(C)", "Volt(V)", "Ln", "RxPwr(dBm)", "TxBias(mA)", "TxPwr(dBm)"]
+    widths  = [14, 14, 8, 8, 4, 12, 12, 12]
+    header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    sep_line    = "  ".join("-" * w for w in widths)
+    print(f"{pad}{header_line}")
+    print(f"{pad}{sep_line}")
+    for port, alias, temp, voltage, lanes in rows_pm:
+        if not lanes:
+            cells = [port, alias, temp, voltage, "—", "", "", ""]
+            print(f"{pad}" + "  ".join(str(cells[i]).ljust(widths[i]) for i in range(len(headers))))
+            continue
+        for i, (rx_pwr, tx_bias, tx_pwr) in enumerate(lanes):
+            cells = [
+                port  if i == 0 else "",
+                alias if i == 0 else "",
+                temp  if i == 0 else "",
+                voltage if i == 0 else "",
+                str(i + 1), rx_pwr, tx_bias, tx_pwr,
+            ]
+            print(f"{pad}" + "  ".join(str(cells[j]).ljust(widths[j]) for j in range(len(headers))))
+
+
+# ---------------------------------------------------------------------------
+# Stage 24 — Interface counters (link-up ports)
 # ---------------------------------------------------------------------------
 
 def report_counters(ssh):
-    """Stage 12 — RX/TX packets and errors for link-up ports."""
+    """Stage 24 — RX/TX packets and errors for link-up ports."""
     status_out, _, _ = ssh.run("show interfaces status 2>/dev/null", timeout=30)
-    up_ports = []
+    up_ports = set()
     for line in status_out.splitlines():
         m = re.match(r'\s*(Ethernet\d+)\s+', line)
         if m and ' up ' in line:
-            up_ports.append(m.group(1))
+            up_ports.add(m.group(1))
 
     if not up_ports:
         print("\n  No link-up ports")
@@ -788,12 +909,140 @@ def report_lpmode(ssh):
 
 
 # ---------------------------------------------------------------------------
-# Stage 23 — Throughput (placeholder)
+# Stage 23 — Throughput
 # ---------------------------------------------------------------------------
 
+_TOPO_PATH_REL = os.path.join(os.path.dirname(__file__), '..', '..', 'tools', 'topology.json')
+_TARGET_CFG_REL = os.path.join(os.path.dirname(__file__), '..', 'target.cfg')
+
+_REPORT_IPERF_DURATION = 10  # seconds — brief spot-check for report mode
+
+# (server_port, client_port, speed_label, threshold_gbps, round_label)
+_THROUGHPUT_ROUNDS = [
+    [
+        ("Ethernet0",  "Ethernet80", "25G cross-QSFP", 20.0),
+        ("Ethernet66", "Ethernet67", "10G same-QSFP",   8.0),
+    ],
+    [
+        ("Ethernet80", "Ethernet81", "25G same-QSFP",  20.0),
+        ("Ethernet66", "Ethernet0",  "10G×25G cross",   8.0),
+    ],
+]
+
+
+def _report_iperf_pair(host_a, host_b, creds, duration):
+    """Run iperf3: server on host_a bound to test_ip, client from host_b bound to its test_ip.
+
+    Both endpoints bind to 10.0.10.x (-B) so traffic routes through switch VLAN 10.
+    Returns bits_per_second (float) or raises on failure.
+    """
+    import paramiko, time as _time, json as _json
+
+    def _connect(ip):
+        c = paramiko.SSHClient()
+        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        kw = {"hostname": ip, "username": creds["ssh_user"], "timeout": 10}
+        if creds.get("key_file"):
+            kw["key_filename"] = os.path.expanduser(creds["key_file"])
+        c.connect(**kw)
+        return c
+
+    def _run(c, cmd, timeout=30):
+        _, stdout, stderr = c.exec_command(cmd, timeout=timeout)
+        out = stdout.read().decode()
+        err = stderr.read().decode()
+        rc  = stdout.channel.recv_exit_status()
+        return out, err, rc
+
+    srv = _connect(host_a["mgmt_ip"])
+    cli = _connect(host_b["mgmt_ip"])
+    try:
+        _run(srv, "pkill -f 'iperf3 -s' 2>/dev/null || true")
+        _run(srv, f"nohup iperf3 -s -1 -B {host_a['test_ip']} -D 2>/dev/null &", timeout=5)
+        _time.sleep(1)
+        out, err, rc = _run(
+            cli,
+            f"iperf3 -c {host_a['test_ip']} -B {host_b['test_ip']} -t {duration} --json",
+            timeout=duration + 15,
+        )
+        if rc != 0:
+            raise RuntimeError(f"iperf3 client failed: {err.strip()[:120]}")
+        data = _json.loads(out)
+        return data["end"]["sum_received"]["bits_per_second"]
+    finally:
+        _run(srv, "pkill -f 'iperf3 -s' 2>/dev/null || true")
+        srv.close()
+        cli.close()
+
+
 def report_throughput(ssh):
-    """Stage 23 — Throughput placeholder."""
-    print("\n  Run: pytest tests/stage_23_throughput -v  for live throughput results")
+    """Stage 23 — Live iperf3 throughput: 2 parallel rounds (host-to-host via VLAN 10)."""
+    import json as _json
+    import configparser as _cp
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Load topology
+    try:
+        with open(_TOPO_PATH_REL) as f:
+            topo = _json.load(f)
+    except Exception as exc:
+        print(f"\n  Cannot load topology.json: {exc}")
+        return
+    host_map = {h["port"]: h for h in topo.get("hosts", [])}
+
+    # Load SSH credentials for test hosts
+    cfg = _cp.ConfigParser()
+    cfg.read(_TARGET_CFG_REL)
+    creds = {
+        "ssh_user": cfg.get("hosts", "ssh_user", fallback="flax"),
+        "key_file":  cfg.get("hosts", "key_file",  fallback="~/.ssh/id_rsa"),
+    }
+
+    all_rows = []
+
+    for round_num, pairs in enumerate(_THROUGHPUT_ROUNDS, start=1):
+        round_results = {}
+        # Run both pairs in the round concurrently
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures = {}
+            for port_a, port_b, label, thresh in pairs:
+                ha = host_map.get(port_a)
+                hb = host_map.get(port_b)
+                key = (port_a, port_b, label, thresh)
+                if not ha or not hb:
+                    round_results[key] = ("SKIP", None, "hosts not in topology")
+                else:
+                    futures[ex.submit(_report_iperf_pair, ha, hb, creds,
+                                      _REPORT_IPERF_DURATION)] = key
+            for fut in as_completed(futures):
+                key = futures[fut]
+                try:
+                    bps = fut.result()
+                    round_results[key] = ("OK", bps, "")
+                except Exception as exc:
+                    round_results[key] = ("ERR", None, str(exc)[:60])
+
+        for port_a, port_b, label, thresh in pairs:
+            key = (port_a, port_b, label, thresh)
+            status_code, bps, note = round_results.get(key, ("ERR", None, "future missing"))
+            if status_code == "SKIP":
+                all_rows.append((f"R{round_num}: {port_a}↔{port_b}", label, "—", "SKIP", note))
+            elif status_code == "ERR":
+                all_rows.append((f"R{round_num}: {port_a}↔{port_b}", label, "—", "ERROR", note))
+            else:
+                gbps   = bps / 1e9
+                result = "PASS" if gbps >= thresh else "FAIL"
+                all_rows.append((
+                    f"R{round_num}: {port_a}↔{port_b}", label,
+                    f"{gbps:.2f} Gbps", result,
+                    f"threshold {thresh:.0f} Gbps",
+                ))
+
+    _table(
+        ["Pair", "Link", "Measured", "Result", "Note"],
+        all_rows,
+        title=f"Host-to-host throughput ({_REPORT_IPERF_DURATION}s iperf3, 2 rounds × 2 concurrent)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -811,9 +1060,9 @@ REPORTERS = {
     "stage_08_led":         report_led,
     "stage_09_cpld":        report_cpld,
     "stage_10_daemon":      report_daemon,
-    "stage_11_transceiver": report_transceiver,
-    "stage_12_counters":    report_counters,
-    "stage_13_link":        report_link,
+    "stage_11_transceiver":    report_transceiver,
+    "stage_12_sfp_inventory":  report_sfp_inventory,
+    "stage_13_link":           report_link,
     "stage_14_breakout":    report_breakout,
     "stage_15_autoneg_fec": report_autoneg_fec,
     "stage_16_portchannel": report_portchannel,
@@ -821,4 +1070,5 @@ REPORTERS = {
     "stage_20_traffic":     report_traffic,
     "stage_21_lpmode":      report_lpmode,
     "stage_23_throughput":  report_throughput,
+    "stage_24_counters":    report_counters,
 }

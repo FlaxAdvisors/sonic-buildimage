@@ -96,16 +96,51 @@ def stage20_setup(ssh):
     ssh.run(f"sudo config interface ip add {PORTCHANNEL} {LAG_IP_HARE}", timeout=15)
     ssh.run(f"sudo config interface ip add {STANDALONE_PORT} {STANDALONE_IP_HARE}", timeout=15)
 
-    # Add static ARP for peer IP — EOS PortChannel is L2-only (no IP), so ARP will not
-    # resolve dynamically.  Use the peer's chassis MAC from LLDP to allow unicast TX.
+    # Wait for PortChannel1 to reach LOWER_UP (LACP converged, carrier present on the bond).
+    # Slow-mode LACP PDU interval is 30 s; initial convergence requires at least one full
+    # exchange per member and can take up to 60 s.  A bond without LOWER_UP queues kernel
+    # TX packets indefinitely — flood-pinging before this causes the test to hang.
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        out, _, _ = ssh.run("ip link show PortChannel1 2>/dev/null", timeout=5)
+        if "LOWER_UP" in out:
+            break
+        time.sleep(5)
+    else:
+        raise RuntimeError(
+            "PortChannel1 did not reach LOWER_UP within 90 s.\n"
+            "Check LACP state: show interfaces portchannel"
+        )
+
+    # Add static ARP AFTER the bond is confirmed UP.  The kernel rebuilds the neighbor
+    # table when the bond transitions to LOWER_UP, so any entry added earlier is flushed.
+    # EOS PortChannel is L2-only (no IP), so ARP will never resolve dynamically.
     peer_mac = _get_lldp_peer_mac(ssh, LAG_PORTS[0])
+    if not peer_mac:
+        # LLDP may not have fired yet after link-up; poll for up to 35 s.
+        lldp_deadline = time.time() + 35
+        while time.time() < lldp_deadline:
+            peer_mac = _get_lldp_peer_mac(ssh, LAG_PORTS[0])
+            if peer_mac:
+                break
+            time.sleep(5)
+
     if peer_mac:
         ssh.run(
             f"sudo ip neigh replace {PEER_IP} lladdr {peer_mac} dev {PORTCHANNEL}",
             timeout=10,
         )
-
-    time.sleep(40)  # LACP convergence: slow-mode interval is 30 s; allow 40 s
+        # Verify the entry is in the neighbor cache; ip neigh replace can silently fail
+        # if the device is still transitioning.
+        neigh_out, _, _ = ssh.run(
+            f"ip neigh show {PEER_IP} dev {PORTCHANNEL} 2>/dev/null", timeout=5
+        )
+        if PEER_IP not in neigh_out:
+            ssh.run(f"sudo ip neigh flush dev {PORTCHANNEL} 2>/dev/null", timeout=5)
+            ssh.run(
+                f"sudo ip neigh add {PEER_IP} lladdr {peer_mac} dev {PORTCHANNEL}",
+                timeout=10,
+            )
 
     yield
 
@@ -215,7 +250,7 @@ def test_fec_error_rate_100g(ssh):
     """Correctable FEC error rate < 1e-6/s on connected ports under traffic load."""
     ports = LAG_PORTS + [STANDALONE_PORT]
     before = {p: _get_counter(ssh, p, "SAI_PORT_STAT_IF_IN_FEC_CORRECTABLE_FRAMES") for p in ports}
-    ssh.run(f"sudo ping -f -c 5000 {PEER_IP} -W 2 > /dev/null 2>&1", timeout=30)
+    ssh.run(f"sudo ping -f -c 5000 {PEER_IP} -W 2 > /dev/null 2>&1", timeout=60)
     time.sleep(1)
     after = {p: _get_counter(ssh, p, "SAI_PORT_STAT_IF_IN_FEC_CORRECTABLE_FRAMES") for p in ports}
     elapsed = 6.0

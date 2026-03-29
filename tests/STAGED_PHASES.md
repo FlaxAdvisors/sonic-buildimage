@@ -103,13 +103,9 @@ Status as of 2026-03-21. Phases 00–22 + nn are COMPLETE (22 partial). Phase 23
 - xcvr API factory returns QSFP28 object for installed modules
 
 ## Phase 12: Counters / Flex Counter
-**Status: COMPLETE**
-- Flex counter FLEX_COUNTER_TABLE|PORT_STAT_COUNTER_POLL enabled
-- COUNTERS_PORT_NAME_MAP has all 32 ports
-- COUNTERS:{oid} has stat entries for each port
-- `show interfaces counters` reports U (up) for link-up ports
-- RX traffic visible on connected ports (Ethernet16, Ethernet32, etc.)
-- `sonic-clear counters` works correctly
+**Status: SUPERSEDED by Phase 24**
+- Infrastructure tests moved to stage_24_counters (runs post-iperf)
+- stage_12_counters retained but no longer part of primary test flow
 
 ## Phase 13: Link / FEC
 **Status: COMPLETE**
@@ -224,20 +220,33 @@ Status as of 2026-03-21. Phases 00–22 + nn are COMPLETE (22 partial). Phase 23
 
 ## Phase 23: Host Traffic Throughput
 **Status: COMPLETE (tests implemented 2026-03-22; hardware run pending)**
-- 6 tests, all skip when iperf3/hosts absent (graceful skip, not fail)
-- Test pairs: Ethernet66↔Ethernet67 (≥8 Gbps), Ethernet80↔Ethernet81 (≥20 Gbps),
-  Ethernet0↔Ethernet1 (≥20 Gbps, expected skip — Ethernet1 dark lane),
-  Ethernet66↔Ethernet80 cross-QSFP (≥8 Gbps),
-  Ethernet48↔EOS Et15/1 100G (≥90 Gbps), Ethernet112↔EOS Et16/1 100G (≥90 Gbps)
+- 4 tests: 2 parallel rounds + 2 standalone 100G switch-to-switch tests
+- All tests skip when iperf3/hosts absent (graceful skip, not fail)
+- Round 1 (concurrent): Ethernet0↔Ethernet80 (25G cross-QSFP, ≥20 Gbps) ∥ Ethernet66↔Ethernet67 (10G same-QSFP, ≥8 Gbps)
+- Round 2 (concurrent): Ethernet80↔Ethernet81 (25G same-QSFP, ≥20 Gbps) ∥ Ethernet66↔Ethernet0 (10G↔25G cross-QSFP, ≥8 Gbps)
+- Standalone: Ethernet48↔EOS Et15/1 100G (≥90 Gbps), Ethernet112↔EOS Et16/1 100G (≥90 Gbps)
 - Tool: iperf3 via paramiko SSH; JSON output parsed for sum_received bits_per_second
+- Binding: both server (-B server_test_ip) and client (-B client_test_ip) bind to 10.0.10.x
+  to guarantee traffic routes through switch VLAN 10, not 192.168.88.x mgmt network
 - Prerequisites: tools/deploy.py run; topology.json hosts entries with mgmt_ip/test_ip/port;
-  target.cfg [hosts] ssh_user + key_file; iperf3 installed on test hosts
+  target.cfg [hosts] ssh_user + key_file; iperf3 installed on test hosts (auto-installed by prereqs)
 - 100G tests use temp /30 IPs (10.99.48.x, 10.99.112.x) assigned/removed via fixture teardown
 - EOS SSH: direct to 192.168.88.14 (no jump host needed when Po1 carries no IP)
+- ASIC counter instrumentation: SAI_PORT_STAT_IF_IN/OUT_OCTETS captured before/after each
+  iperf run and printed as ΔRX/ΔTX; correlates iperf-measured Gbps with COUNTERS_DB
+
+## Phase 24: Post-Throughput Counter Verification
+**Status: COMPLETE (implemented 2026-03-27)**
+- Runs after stage_23 iperf tests — no FEC setup or IP assignment needed
+- All connected ports (Ethernet16, Ethernet32, Ethernet48, Ethernet112) have accumulated
+  traffic from prior iperf runs
+- Tests: flex counter infra, COUNTERS_PORT_NAME_MAP, SAI stat entries, CLI format/columns/rows,
+  STATE=U for link-up ports, non-zero RX_OK, sonic-clear counters
+- Supersedes stage_12_counters for traffic-dependent counter verification
 
 ---
 
-## Overall Status: PHASES 00–23 COMPLETE (22 partial, 23 hardware-run pending)
+## Overall Status: PHASES 00–24 COMPLETE (22 partial, 23/24 hardware-run pending)
 ## Deploy tool: tools/deploy.py — idempotent L2 platform setup required before test suite
 ## Deploy tool always saves config after any apply (including --task runs)
 

@@ -1,4 +1,6 @@
 ctr_evict_enable=0x0
+bcm_stat_interval=2000000
+sai_stats_support_mask=0x1
 l2_mem_entries=0x8000
 l3_intf_vlan_split_egress=0x1
 l3_mem_entries=0x4000

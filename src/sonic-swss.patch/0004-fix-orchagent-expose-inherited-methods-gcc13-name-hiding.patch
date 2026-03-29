@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000004 Mon Sep 17 00:00:00 2001
+From: wedge100s-port <wedge100s@local>
+Date: 2026-03-28
+Subject: [PATCH] fix: orchagent expose inherited methods via using-declarations (GCC 13)
+
+GCC 13 enforces stricter name-hiding rules for overloaded inherited
+methods.  Three orchagent headers trigger -Woverloaded-virtual or
+compilation errors when a derived class declares a method with the same
+name as a base class overload without re-exposing the base overloads:
+
+  flex_counter_manager.h — FlexCounterCachedManager hides
+    FlexCounterManager::setCounterIdList() and ::clearCounterIdList();
+    add using-declarations in the protected section.
+
+  routeorch.h — RouteOrch declares attach(Observer*, IpAddress, oid)
+    and detach(...) overloads that hide Subject::attach() /
+    Subject::detach(); add using Subject::attach; using Subject::detach.
+
+  zmqorch.h — ZmqOrch::doTask(Consumer&) hides Orch::doTask overloads;
+    add using Orch::doTask alongside the existing vxlanorch fix (0003).
+
+All three follow the same pattern already applied to vxlanorch.h in
+patch 0003.
+---
+ orchagent/flex_counter/flex_counter_manager.h | 3 +++
+ orchagent/routeorch.h                         | 2 ++
+ orchagent/zmqorch.h                           | 1 +
+ 3 files changed, 6 insertions(+)
+
+diff --git a/orchagent/flex_counter/flex_counter_manager.h b/orchagent/flex_counter/flex_counter_manager.h
+index 4ae61e2f..dd4a36b6 100644
+--- a/orchagent/flex_counter/flex_counter_manager.h
++++ b/orchagent/flex_counter/flex_counter_manager.h
+@@ -228,6 +228,9 @@ class FlexCounterCachedManager : public FlexCounterManager
+         }
+
+     protected:
++        using FlexCounterManager::setCounterIdList;
++        using FlexCounterManager::clearCounterIdList;
++
+         void flush(const std::string &group_name, struct CachedObjects &cached_objects)
+         {
+             cached_objects.flush(group_name);
+diff --git a/orchagent/routeorch.h b/orchagent/routeorch.h
+index 5fdb5b8e..33f6047f 100644
+--- a/orchagent/routeorch.h
++++ b/orchagent/routeorch.h
+@@ -220,6 +220,8 @@ public:
+     bool hasNextHopGroup(const NextHopGroupKey&) const;
+     sai_object_id_t getNextHopGroupId(const NextHopGroupKey&);
+
++    using Subject::attach;
++    using Subject::detach;
+     void attach(Observer *, const IpAddress&, sai_object_id_t vrf_id = gVirtualRouterId);
+     void detach(Observer *, const IpAddress&, sai_object_id_t vrf_id = gVirtualRouterId);
+
+diff --git a/orchagent/zmqorch.h b/orchagent/zmqorch.h
+index 264611ef..ad7022cf 100644
+--- a/orchagent/zmqorch.h
++++ b/orchagent/zmqorch.h
+@@ -28,6 +28,7 @@ public:
+     ZmqOrch(swss::DBConnector *db, const std::vector<std::string> &tableNames, swss::ZmqServer *zmqServer);
+     ZmqOrch(swss::DBConnector *db, const std::vector<table_name_with_pri_t> &tableNames_with_pri, swss::ZmqServer *zmqServer);
+
++    using Orch::doTask;
+     virtual void doTask(ConsumerBase &consumer) { };
+     void doTask(Consumer &consumer) override;

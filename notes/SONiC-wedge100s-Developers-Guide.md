@@ -920,6 +920,57 @@ ssh admin@<nos-ip> 'redis-cli -n 1 hgetall "PORT_TABLE:Ethernet0"'
 docker exec -it swss redis-cli -s /var/run/redis/redis.sock -n 1 keys "*"
 ```
 
+### 7.7 Deploy a full image without ONIE (sonic-installer)
+
+When the switch is already running SONiC, use `sonic-installer` to install a new
+`.bin` image — no ONIE boot required. The new image becomes the next-boot option;
+a normal `reboot` activates it.
+
+```bash
+scp target/sonic-broadcom.bin admin@192.168.88.12:~
+ssh admin@192.168.88.12 sudo sonic-installer install ~/sonic-broadcom.bin
+ssh admin@192.168.88.12 sudo reboot
+```
+
+Image management:
+
+```bash
+sudo sonic-installer list               # show installed images and which boots next
+sudo sonic-installer set-next <image>   # change next-boot image
+sudo sonic-installer remove <image>     # remove an old image to free space
+```
+
+The switch holds two images (current + one other). Roll back by setting the
+previous image as next-boot and rebooting.
+
+### Expected exception during install (harmless)
+
+`sonic-installer` will print a `DockerException` / `SonicRuntimeException` traceback
+during the `migrate_sonic_packages` step. This is expected and harmless on this platform.
+
+**What the migration does:** After writing the new image, the installer chroots into
+it, starts a temporary dockerd, and copies any add-on SONiC packages
+(`/etc/sonic/packages.json`) into the new image's Docker storage so they survive
+the upgrade.
+
+**Why it's safe to ignore here:** The wedge100s port has no add-on packages — only
+the base services baked into `dockerfs.tar.gz` inside the `.bin`. The migration is
+a no-op in terms of content; it just fails noisily when it can't start dockerd
+inside the chroot.
+
+Verify the install succeeded despite the exception:
+
+```bash
+sudo sonic-installer list
+# New image should appear under "Next:" — if so, safe to reboot
+```
+
+If the new image is missing from the list, retry with:
+
+```bash
+sudo sonic-installer install --skip-migration ~/sonic-broadcom.bin
+```
+
 ---
 
 ## 8. Platform-Specific Services (Outside Containers)

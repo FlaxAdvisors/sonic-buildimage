@@ -31,7 +31,7 @@
 
 #define PROMPT        "drivshell>"
 #define PROMPT_LEN    10
-#define READ_BUF_SIZE 65536
+#define READ_BUF_SIZE 262144
 #define SEND_TIMEOUT_MS 2000
 #define RECV_TIMEOUT_MS 3000
 
@@ -212,13 +212,22 @@ static port_row_t *cache_row(counter_cache_t *cache, const char *port_name)
     return row;
 }
 
-/* Parse 'show counters' output and fill cache.
+/* Parse 'show counters' output and accumulate into cache.
  * Line format: "COUNTER.port_name\t\t:\t\tvalue\t[+delta]"
  * where value has comma thousands-separators.
- * Only non-zero entries are emitted by bcmcmd. */
+ * Only non-zero entries are emitted by bcmcmd.
+ *
+ * bcmcmd 'show counters' returns per-call delta values, not absolute totals.
+ * We accumulate these deltas into val[] to build a monotonically increasing
+ * running total (matching what COUNTERS_DB expects).  n_raw[] is reset each
+ * call so raw_lookup() in the second pass uses only the current-call deltas. */
 static int parse_counters(const char *buf, counter_cache_t *cache)
 {
-    cache->n_rows = 0;  /* reset rows; rebuild from output */
+    /* Reset n_raw on existing rows so raw[] holds current-call deltas only
+     * (used by second-pass name2 lookups).  Do NOT reset val[] — we
+     * accumulate deltas into val[] across calls. */
+    for (int i = 0; i < cache->n_rows; i++)
+        cache->rows[i].n_raw = 0;
 
     const char *p = buf;
     while (*p) {

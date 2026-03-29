@@ -110,9 +110,8 @@ def test_counters_db_oid_has_stat_entries(ssh):
 def test_counters_key_fields_present(ssh):
     """COUNTERS_DB has all expected RX and TX stat fields for a non-breakout 100G port.
 
-    Breakout sub-ports (Ethernet0-3 etc.) only expose SAI_PORT_STAT_IN/OUT_DROPPED_PKTS
-    on this Tomahawk SAI.  The full IF counter set is only available on non-breakout
-    100G ports such as Ethernet16.
+    Tested on Ethernet16 (non-breakout 100G).  Flex sub-ports (Ethernet0-3 etc.)
+    also have the full IF counter set via the SAI stat shim (libsai-stat-shim.so).
     """
     EXPECTED_STATS = [
         "SAI_PORT_STAT_IF_IN_OCTETS",

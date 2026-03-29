@@ -53,6 +53,6 @@
     {"port": "Ethernet66", "mgmt_ip": "192.168.88.237", "test_ip": "10.0.10.237"},
     {"port": "Ethernet67", "mgmt_ip": "192.168.88.242", "test_ip": "10.0.10.242"},
     {"port": "Ethernet80", "mgmt_ip": "192.168.88.225", "test_ip": "10.0.10.225"},
-    {"port": "Ethernet81", "mgmt_ip": "192.168.88.241", "test_ip": "10.0.10.241"}
+    {"port": "Ethernet81", "mgmt_ip": "192.168.88.230", "test_ip": "10.0.10.241"}
   ]
 }

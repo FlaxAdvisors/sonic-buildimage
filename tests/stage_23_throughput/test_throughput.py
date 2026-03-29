@@ -1,16 +1,24 @@
 """Stage 23 — Throughput verification via iperf3.
 
 Tests:
-  test_throughput_round1        Round 1 parallel:
-                                  Ethernet0  ↔ Ethernet80  ≥ 20 Gbps  (25G, cross-QSFP)
-                                  Ethernet66 ↔ Ethernet67  ≥  8 Gbps  (10G, same QSFP)
-  test_throughput_round2        Round 2 parallel:
-                                  Ethernet80 ↔ Ethernet81  ≥ 20 Gbps  (25G, same QSFP)
-                                  Ethernet66 ↔ Ethernet0   ≥  8 Gbps  (10G↔25G, cross-QSFP)
-  test_throughput_100g_eth48    Ethernet48  ↔ EOS Et15/1  ≥ 90 Gbps
-  test_throughput_100g_eth112   Ethernet112 ↔ EOS Et16/1  ≥ 90 Gbps
+  test_throughput_round1         Round 1 parallel:
+                                   Ethernet0  → Ethernet80  ≥ 20 Gbps  (25G, cross-QSFP)
+                                   Ethernet66 → Ethernet67  ≥  8 Gbps  (10G, same QSFP)
+  test_throughput_round1_reverse Round 1 reversed — validates OUT counters on Eth0/Eth66:
+                                   Ethernet80 → Ethernet0   ≥ 20 Gbps
+                                   Ethernet67 → Ethernet66  ≥  8 Gbps
+  test_throughput_round2         Round 2 parallel:
+                                   Ethernet80 → Ethernet81  ≥ 20 Gbps  (25G, same QSFP)
+                                   Ethernet66 → Ethernet0   ≥  8 Gbps  (10G↔25G, cross-QSFP)
+  test_throughput_round2_reverse Round 2 reversed — validates OUT counters on Eth80/Eth66:
+                                   Ethernet81 → Ethernet80  ≥ 20 Gbps
+                                   Ethernet0  → Ethernet66  ≥  8 Gbps
+  test_throughput_100g_eth48     Ethernet48  ↔ EOS Et15/1  ≥ 90 Gbps
+  test_throughput_100g_eth112    Ethernet112 ↔ EOS Et16/1  ≥ 90 Gbps
 
 Each test pair runs simultaneously within a round; no host is reused within a round.
+Rounds 1+1_reverse and 2+2_reverse together exercise both IF_IN_OCTETS and IF_OUT_OCTETS
+on every flex sub-port, ensuring the SAI stat shim accumulates counters in both directions.
 
 All tests skip (not fail) when: iperf3 absent, host SSH unreachable, EOS iperf3 absent.
 
@@ -270,6 +278,105 @@ def test_throughput_round2(ssh, host_by_port, host_ssh_creds):
 
     if errors:
         pytest.fail("Round 2 pair failures:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items()))
+
+
+def test_throughput_round1_reverse(ssh, host_by_port, host_ssh_creds):
+    """Round 1 reverse — same pairs as round 1 with server and client swapped.
+
+    Validates OUT counters on the ports that were servers in round 1 (Ethernet0,
+    Ethernet66) and IN counters on the ports that were clients (Ethernet80, Ethernet67).
+    Together with round 1, every port exercises both IF_IN_OCTETS and IF_OUT_OCTETS.
+      Ethernet80 → Ethernet0  (25G, cross-QSFP) ≥ 20 Gbps
+      Ethernet67 → Ethernet66 (10G, same QSFP)  ≥  8 Gbps
+    """
+    hosts = _require_hosts(host_by_port, host_ssh_creds,
+                           "Ethernet0", "Ethernet80", "Ethernet66", "Ethernet67")
+    h0, h80, h66, h67 = (hosts[p] for p in ("Ethernet0", "Ethernet80", "Ethernet66", "Ethernet67"))
+
+    ports = ["Ethernet0", "Ethernet80", "Ethernet66", "Ethernet67"]
+    before = _counters_snapshot(ssh, ports)
+
+    results = {}
+    errors  = {}
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {
+            ex.submit(_run_iperf3_pair,
+                      "Eth80→Eth0(25G×QSFP rev)",
+                      h80["test_ip"], h80["mgmt_ip"],
+                      h0["test_ip"],  h0["mgmt_ip"],
+                      host_ssh_creds, THRESH_25G): "Eth80→Eth0",
+            ex.submit(_run_iperf3_pair,
+                      "Eth67→Eth66(10G rev)",
+                      h67["test_ip"], h67["mgmt_ip"],
+                      h66["test_ip"], h66["mgmt_ip"],
+                      host_ssh_creds, THRESH_10G): "Eth67→Eth66",
+        }
+        for fut in as_completed(futures):
+            key = futures[fut]
+            try:
+                label, bps = fut.result()
+                results[key] = bps
+            except Exception as exc:
+                errors[key] = str(exc)
+
+    after = _counters_snapshot(ssh, ports)
+    print("\n  Round 1 reverse results:")
+    for key, bps in results.items():
+        print(f"    {key}: {bps/1e9:.2f} Gbps")
+    _print_counter_delta(before, after)
+
+    if errors:
+        pytest.fail("Round 1 reverse pair failures:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items()))
+
+
+def test_throughput_round2_reverse(ssh, host_by_port, host_ssh_creds):
+    """Round 2 reverse — same pairs as round 2 with server and client swapped.
+
+    Validates OUT counters on the ports that were servers in round 2 (Ethernet80,
+    Ethernet66) and IN counters on ports that were clients (Ethernet81, Ethernet0).
+      Ethernet81 → Ethernet80 (25G, same QSFP)     ≥ 20 Gbps
+      Ethernet0  → Ethernet66 (25G↔10G, cross-QSFP) ≥  8 Gbps
+    """
+    hosts = _require_hosts(host_by_port, host_ssh_creds,
+                           "Ethernet80", "Ethernet81", "Ethernet66", "Ethernet0")
+    h80, h81, h66, h0 = (hosts[p] for p in ("Ethernet80", "Ethernet81", "Ethernet66", "Ethernet0"))
+
+    ports = ["Ethernet80", "Ethernet81", "Ethernet66", "Ethernet0"]
+    before = _counters_snapshot(ssh, ports)
+
+    results = {}
+    errors  = {}
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {
+            ex.submit(_run_iperf3_pair,
+                      "Eth81→Eth80(25G same-QSFP rev)",
+                      h81["test_ip"], h81["mgmt_ip"],
+                      h80["test_ip"], h80["mgmt_ip"],
+                      host_ssh_creds, THRESH_25G): "Eth81→Eth80",
+            ex.submit(_run_iperf3_pair,
+                      "Eth0→Eth66(25G×10G×QSFP rev)",
+                      h0["test_ip"],  h0["mgmt_ip"],
+                      h66["test_ip"], h66["mgmt_ip"],
+                      host_ssh_creds, THRESH_10G): "Eth0→Eth66",
+        }
+        for fut in as_completed(futures):
+            key = futures[fut]
+            try:
+                label, bps = fut.result()
+                results[key] = bps
+            except Exception as exc:
+                errors[key] = str(exc)
+
+    after = _counters_snapshot(ssh, ports)
+    print("\n  Round 2 reverse results:")
+    for key, bps in results.items():
+        print(f"    {key}: {bps/1e9:.2f} Gbps")
+    _print_counter_delta(before, after)
+
+    if errors:
+        pytest.fail("Round 2 reverse pair failures:\n" + "\n".join(f"  {k}: {v}" for k, v in errors.items()))
 
 
 # ── 100G switch-to-switch tests ─────────────────────────────────────────────

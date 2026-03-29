@@ -72,14 +72,9 @@ class SystemTuningTask(ConfigTask):
             ))
 
         # 2. systemd drop-in: restart ssh after networking restarts
-        out, _, rc = self.ssh.run(f"cat {SYSTEMD_DROPIN_PATH} 2>/dev/null", timeout=10)
-        if "restart ssh" not in out or "pkill" not in out:
-            changes.append(Change(
-                item="networking.service drop-in restart-ssh",
-                current=out.strip() or "missing",
-                desired="ExecStartPost=-/bin/systemctl restart ssh",
-                cmd="_write_systemd_dropin",
-            ))
+        # Disabled — only needed when mgmt VRF is active (sshd must re-bind to
+        # VRF socket after networking tears it down).  MgmtVrfTask is not in
+        # TASK_ORDER so this drop-in is a no-op and causes unnecessary churn.
 
         return changes
 
@@ -94,13 +89,7 @@ class SystemTuningTask(ConfigTask):
                 self.ssh.run(f"sudo rm -f {DHCP_HOOK_PATH}", timeout=5)
                 print("  [system_tuning] noop-renew hook removed", flush=True)
 
-            elif change.cmd == "_write_systemd_dropin":
-                self.ssh.run(
-                    f"sudo mkdir -p $(dirname {SYSTEMD_DROPIN_PATH})", timeout=5
-                )
-                self._write_file(SYSTEMD_DROPIN_PATH, SYSTEMD_DROPIN_CONTENT)
-                self.ssh.run("sudo systemctl daemon-reload", timeout=15)
-                print("  [system_tuning] networking→ssh drop-in installed", flush=True)
+
 
     def verify(self) -> bool:
         remaining = self.check()

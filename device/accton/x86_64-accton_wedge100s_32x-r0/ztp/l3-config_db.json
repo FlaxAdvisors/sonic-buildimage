@@ -42,18 +42,18 @@
 
     "BREAKOUT_CFG": {
         "_comment": "P5-10 (E16-E36) and P23-28 (E88-E108) break to 4x25G for server-facing ports",
-        "Ethernet16":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet20":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet24":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet28":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet32":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet36":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet88":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet92":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet96":  { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet100": { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet104": { "brkout_mode": "4x25G[10G,1G]" },
-        "Ethernet108": { "brkout_mode": "4x25G[10G,1G]" }
+        "Ethernet16":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet20":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet24":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet28":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet32":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet36":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet88":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet92":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet96":  { "brkout_mode": "4x25G[10G]" },
+        "Ethernet100": { "brkout_mode": "4x25G[10G]" },
+        "Ethernet104": { "brkout_mode": "4x25G[10G]" },
+        "Ethernet108": { "brkout_mode": "4x25G[10G]" }
     },
 
     "INTERFACE": {

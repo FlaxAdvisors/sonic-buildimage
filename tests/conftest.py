@@ -25,6 +25,12 @@ def pytest_addoption(parser):
         default=TARGET_CFG_DEFAULT,
         help="Path to target.cfg (default: tests/target.cfg)",
     )
+    parser.addoption(
+        "--skip-infra-prechecks",
+        action="store_true",
+        default=False,
+        help="Skip breakout/PortChannel/VLAN pre-checks (use for L3-only test runs).",
+    )
 
 
 class _DurationPlugin:
@@ -99,6 +105,9 @@ def pytest_sessionstart(session):
     # ── Assertive pre-checks ──────────────────────────────────────────────
     # These fail fast before any test collects, directing the user to
     # run tools/deploy.py if the switch is not in operational state.
+    # Pass --skip-infra-prechecks to bypass checks 3-5 for L3-only runs.
+
+    skip_infra = session.config.getoption("--skip-infra-prechecks", default=False)
 
     # 1. pmon running
     out, _, rc = client.run("sudo systemctl is-active pmon 2>&1", timeout=15)
@@ -112,48 +121,49 @@ def pytest_sessionstart(session):
 
     # 2. mgmt VRF — check removed: VRF disabled to avoid oob-mgmt issues.
 
-    # 3. Breakout sub-ports in COUNTERS_PORT_NAME_MAP (ASIC_DB DB2)
-    _EXPECTED_SUBPORTS = [
-        "Ethernet0","Ethernet1","Ethernet2","Ethernet3",
-        "Ethernet64","Ethernet65","Ethernet66","Ethernet67",
-        "Ethernet80","Ethernet81","Ethernet82","Ethernet83",
-    ]
-    out, _, _ = client.run(
-        "redis-cli -n 2 HGETALL COUNTERS_PORT_NAME_MAP", timeout=15
-    )
-    missing_subports = [p for p in _EXPECTED_SUBPORTS if p not in out.split()]
-    if missing_subports:
-        client.close()
-        pytest.exit(
-            f"\n[target] breakout sub-ports missing: {missing_subports}\n"
-            "Run: tools/deploy.py --task breakout\n",
-            returncode=3,
+    if not skip_infra:
+        # 3. Breakout sub-ports in COUNTERS_PORT_NAME_MAP (ASIC_DB DB2)
+        _EXPECTED_SUBPORTS = [
+            "Ethernet0","Ethernet1","Ethernet2","Ethernet3",
+            "Ethernet64","Ethernet65","Ethernet66","Ethernet67",
+            "Ethernet80","Ethernet81","Ethernet82","Ethernet83",
+        ]
+        out, _, _ = client.run(
+            "redis-cli -n 2 HGETALL COUNTERS_PORT_NAME_MAP", timeout=15
         )
+        missing_subports = [p for p in _EXPECTED_SUBPORTS if p not in out.split()]
+        if missing_subports:
+            client.close()
+            pytest.exit(
+                f"\n[target] breakout sub-ports missing: {missing_subports}\n"
+                "Run: tools/deploy.py --task breakout\n",
+                returncode=3,
+            )
 
-    # 4. PortChannel1 present in CONFIG_DB
-    out, _, _ = client.run(
-        r"redis-cli -n 4 EXISTS 'PORTCHANNEL|PortChannel1'", timeout=10
-    )
-    if out.strip() != "1":
-        client.close()
-        pytest.exit(
-            "\n[target] PortChannel1 missing — run: tools/deploy.py\n",
-            returncode=3,
+        # 4. PortChannel1 present in CONFIG_DB
+        out, _, _ = client.run(
+            r"redis-cli -n 4 EXISTS 'PORTCHANNEL|PortChannel1'", timeout=10
         )
+        if out.strip() != "1":
+            client.close()
+            pytest.exit(
+                "\n[target] PortChannel1 missing — run: tools/deploy.py\n",
+                returncode=3,
+            )
 
-    # 5. VLAN 10 and VLAN 999 present in CONFIG_DB
-    out10, _, _ = client.run(
-        r"redis-cli -n 4 EXISTS 'VLAN|Vlan10'", timeout=10
-    )
-    out999, _, _ = client.run(
-        r"redis-cli -n 4 EXISTS 'VLAN|Vlan999'", timeout=10
-    )
-    if out10.strip() != "1" or out999.strip() != "1":
-        client.close()
-        pytest.exit(
-            "\n[target] VLANs missing (need Vlan10 and Vlan999) — run: tools/deploy.py\n",
-            returncode=3,
+        # 5. VLAN 10 and VLAN 999 present in CONFIG_DB
+        out10, _, _ = client.run(
+            r"redis-cli -n 4 EXISTS 'VLAN|Vlan10'", timeout=10
         )
+        out999, _, _ = client.run(
+            r"redis-cli -n 4 EXISTS 'VLAN|Vlan999'", timeout=10
+        )
+        if out10.strip() != "1" or out999.strip() != "1":
+            client.close()
+            pytest.exit(
+                "\n[target] VLANs missing (need Vlan10 and Vlan999) — run: tools/deploy.py\n",
+                returncode=3,
+            )
 
     # Pre-checks passed — no banner; failures above already call pytest.exit()
 

@@ -135,7 +135,7 @@ def generate_config(switch, hostname, mac, mgmt_ip, mgmt_gw,
     # ── BREAKOUT_CFG ─────────────────────────────────────────────────────────
     breakout = {}
     for p in _LEFT_PARENTS + _RIGHT_PARENTS:
-        breakout[f'Ethernet{p}'] = {'brkout_mode': '4x25G[10G,1G]'}
+        breakout[f'Ethernet{p}'] = {'brkout_mode': '4x25G[10G]'}
     for p in _HUNDRED_G_PARENTS:
         breakout[f'Ethernet{p}'] = {'brkout_mode': '1x100G[40G]'}
     cfg['BREAKOUT_CFG'] = breakout

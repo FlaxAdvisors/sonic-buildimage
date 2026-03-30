@@ -119,8 +119,8 @@ def test_breakout_ports():
         'Ethernet88', 'Ethernet92', 'Ethernet96', 'Ethernet100', 'Ethernet104', 'Ethernet108',
     ]
     for eth in expected:
-        assert cfg['BREAKOUT_CFG'][eth]['brkout_mode'] == '4x25G[10G,1G]', \
-            f'{eth} must be 4x25G[10G,1G]'
+        assert cfg['BREAKOUT_CFG'][eth]['brkout_mode'] == '4x25G[10G]', \
+            f'{eth} must be 4x25G[10G]'
 
 
 def test_non_server_ports_unchanged():

@@ -28,7 +28,7 @@ class BreakoutTask(ConfigTask):
             desired_mode = bp["mode"]
             out, _, _ = self.ssh.run(
                 f"redis-cli -n 4 hget 'BREAKOUT_CFG|{parent}' brkout_mode",
-                timeout=10,
+                timeout=30,
             )
             current_mode = out.strip()
             if current_mode != desired_mode:
@@ -51,14 +51,14 @@ class BreakoutTask(ConfigTask):
             for port in subports:
                 # Skip if port doesn't exist in CONFIG_DB yet
                 exists, _, _ = self.ssh.run(
-                    f"redis-cli -n 4 exists 'PORT|{port}'", timeout=10
+                    f"redis-cli -n 4 exists 'PORT|{port}'", timeout=30
                 )
                 if exists.strip() != "1":
                     continue
 
                 if "admin_status" in sc:
                     out, _, _ = self.ssh.run(
-                        f"redis-cli -n 4 hget 'PORT|{port}' admin_status", timeout=10
+                        f"redis-cli -n 4 hget 'PORT|{port}' admin_status", timeout=30
                     )
                     current = out.strip() or "down"
                     desired = sc["admin_status"]
@@ -73,7 +73,7 @@ class BreakoutTask(ConfigTask):
 
                 if "speed" in sc:
                     out, _, _ = self.ssh.run(
-                        f"redis-cli -n 4 hget 'PORT|{port}' speed", timeout=10
+                        f"redis-cli -n 4 hget 'PORT|{port}' speed", timeout=30
                     )
                     current = out.strip()
                     desired = sc["speed"]
@@ -87,7 +87,7 @@ class BreakoutTask(ConfigTask):
 
                 if "fec" in sc:
                     out, _, _ = self.ssh.run(
-                        f"redis-cli -n 4 hget 'PORT|{port}' fec", timeout=10
+                        f"redis-cli -n 4 hget 'PORT|{port}' fec", timeout=30
                     )
                     current = out.strip()
                     desired = sc["fec"]
@@ -105,6 +105,34 @@ class BreakoutTask(ConfigTask):
         # Apply mode changes first so sub-ports exist before config changes
         mode_changes = [c for c in changes if c.item.startswith("breakout ")]
         config_changes = [c for c in changes if not c.item.startswith("breakout ")]
+
+        # Seed BREAKOUT_CFG if absent — port_breakout_config_db.json only has PORT
+        # entries; 'config interface breakout' hard-aborts without this table.
+        # Read hwsku.json (has default_brkout_mode per parent port) and load via
+        # redis-cli pipeline — faster and more reliable than sonic-cfggen.
+        if mode_changes:
+            out, _, _ = self.ssh.run(
+                "redis-cli -n 4 keys 'BREAKOUT_CFG|*' | head -1", timeout=30
+            )
+            if not out.strip():
+                hwsku_json = (
+                    "/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0"
+                    "/Accton-WEDGE100S-32X/hwsku.json"
+                )
+                # Use list-form subprocess to avoid shell interpreting '|' in key names.
+                seed_cmd = (
+                    f"python3 -c \""
+                    f"import json, subprocess; "
+                    f"d=json.load(open('{hwsku_json}')); "
+                    f"[subprocess.run(['redis-cli','-n','4','HSET','BREAKOUT_CFG|'+p,'brkout_mode',v['default_brkout_mode']]) "
+                    f" for p,v in d['interfaces'].items()]"
+                    f"\""
+                )
+                _, err, rc = self.ssh.run(seed_cmd, timeout=30)
+                if rc != 0:
+                    print(f"  [breakout] WARN: failed to seed BREAKOUT_CFG: {err.strip()}")
+                else:
+                    print("  [breakout] seeded BREAKOUT_CFG from hwsku.json", flush=True)
 
         for change in mode_changes:
             out, err, rc = self.ssh.run(change.cmd, timeout=60)
@@ -131,11 +159,13 @@ class BreakoutTask(ConfigTask):
             config_changes = fresh
 
         for change in config_changes:
-            out, err, rc = self.ssh.run(change.cmd, timeout=30)
+            out, err, rc = self.ssh.run(change.cmd, timeout=90)
             if rc != 0:
                 print(f"  [warn] {change.cmd!r} rc={rc}: {err.strip()}")
 
     def verify(self) -> bool:
+        # Give orchagent time to settle after DPB + subport config before verifying.
+        time.sleep(10)
         remaining = self.check()
         if remaining:
             for c in remaining:

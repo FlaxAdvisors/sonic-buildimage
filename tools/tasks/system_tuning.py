@@ -9,9 +9,9 @@ Tuning applied
    tcp_syn_retries=2   — reconnect after BCM IRQ storm in ≤7 s (not ≤127 s)
    tcp_retries2=5      — give up stalled established connections after ~6 s
 
-2. /etc/systemd/system/networking.service.d/restart-ssh.conf
-   Restarts sshd after every networking restart so sshd re-binds to the
-   mgmt VRF socket (which is recreated when networking tears down the VRF).
+2. BGP feature disabled — bgp container consumes significant CPU on a switch
+   with no BGP peers, saturating the control plane.  Disabled permanently via
+   CONFIG_DB FEATURE|bgp state=disabled so it does not restart on reboot.
 
 NOTE: noop-renew dhclient hook was removed.  dhclient-enter-hooks are
 sourced (not exec'd), so "exit 0" exits dhclient-script itself — it was
@@ -71,10 +71,18 @@ class SystemTuningTask(ConfigTask):
                 cmd="_remove_dhcp_hook",
             ))
 
-        # 2. systemd drop-in: restart ssh after networking restarts
-        # Disabled — only needed when mgmt VRF is active (sshd must re-bind to
-        # VRF socket after networking tears it down).  MgmtVrfTask is not in
-        # TASK_ORDER so this drop-in is a no-op and causes unnecessary churn.
+        # 2. BGP feature state — disable permanently; no BGP peers on this lab
+        # switch and the container saturates control-plane CPU when running.
+        out, _, _ = self.ssh.run(
+            "redis-cli -n 4 hget 'FEATURE|bgp' state", timeout=10
+        )
+        if out.strip() != "disabled":
+            changes.append(Change(
+                item="bgp feature state",
+                current=out.strip() or "enabled",
+                desired="disabled",
+                cmd="_disable_bgp",
+            ))
 
         return changes
 
@@ -89,6 +97,10 @@ class SystemTuningTask(ConfigTask):
                 self.ssh.run(f"sudo rm -f {DHCP_HOOK_PATH}", timeout=5)
                 print("  [system_tuning] noop-renew hook removed", flush=True)
 
+            elif change.cmd == "_disable_bgp":
+                self.ssh.run("sudo config feature state bgp disabled", timeout=15)
+                self.ssh.run("docker stop bgp 2>/dev/null || true", timeout=15)
+                print("  [system_tuning] bgp disabled", flush=True)
 
 
     def verify(self) -> bool:

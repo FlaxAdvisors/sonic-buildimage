@@ -7,10 +7,3 @@ CONSOLE_SPEED=57600
 #   (~150 IRQ/s on IRQ 16) that stalls sshd on this platform.
 # crashkernel=256M: reserve memory for kdump crash capture kernel.
 ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="nopat intel_iommu=off noapic crashkernel=256M"
-
-# Override DEFAULT_GRUB_CMDLINE_LINUX (which includes 'quiet') for this platform.
-# The ${GRUB_CMDLINE_LINUX:-$DEFAULT} assignment in default_platform.conf respects
-# this export if set before bootloader_menu_config() is called.
-# CSTATES are hard-coded here (Intel Xeon D-1548 on Wedge 100S is always Intel).
-GRUB_CMDLINE_LINUX="console=tty0 console=ttyS${CONSOLE_DEV},${CONSOLE_SPEED}n8 processor.max_cstate=1 intel_idle.max_cstate=0"
-export GRUB_CMDLINE_LINUX

@@ -3,10 +3,16 @@
         "01-configdb-json": {
             "dynamic-url": {
                 "source": {
-                    "prefix": "http://192.0.2.1/ztp/",
+                    "prefix": "http://REPLACE-WITH-ZTP-SERVER/ztp/",
                     "identifier": "hostname",
                     "suffix": "_l3_config_db.json"
                 }
+            }
+        },
+        "02-breakout-apply": {
+            "plugin": {
+                "name": "sonic-cfggen",
+                "args": "-d --write-to-db"
             }
         }
     }

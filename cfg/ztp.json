@@ -1,0 +1,11 @@
+{
+    "ztp": {
+        "01-configdb-json": {
+            "url": {
+                "source": "http://192.168.88.238:8080/config_db.json"
+            },
+            "clear-config": true,
+            "save-config": true
+        }
+    }
+}

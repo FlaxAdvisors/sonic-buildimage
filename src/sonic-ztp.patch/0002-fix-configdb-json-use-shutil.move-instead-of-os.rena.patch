@@ -1,0 +1,44 @@
+From e105b476b3747601c05141fcd1be4aa559662e9b Mon Sep 17 00:00:00 2001
+From: db-at-work <22159364+db-at-work@users.noreply.github.com>
+Date: Sun, 29 Mar 2026 17:54:33 -0700
+Subject: [PATCH] fix(configdb-json): use shutil.move instead of os.rename for
+ cross-device move
+
+os.rename() fails with EXDEV (errno 18) when source and destination are on
+different filesystems (e.g. /tmp tmpfs -> /etc/sonic ext4 overlay).
+shutil.move() handles cross-device moves transparently via copy+unlink.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+---
+ src/usr/lib/ztp/plugins/configdb-json | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/usr/lib/ztp/plugins/configdb-json b/src/usr/lib/ztp/plugins/configdb-json
+index a527fbb..feb3930 100755
+--- a/src/usr/lib/ztp/plugins/configdb-json
++++ b/src/usr/lib/ztp/plugins/configdb-json
+@@ -18,6 +18,7 @@ limitations under the License.
+ 
+ import sys
+ import os
++import shutil
+ import fcntl
+ import select
+ import time
+@@ -224,9 +225,11 @@ class ConfigDBJson:
+                 logger.info('configdb-json: Copying downloaded config_db.json to startup configuration.')
+                 final_dest_file = '/etc/sonic/config_db.json'
+ 
+-            # Move staged config file to requested destination file
++            # Move staged config file to requested destination file.
++            # shutil.move() is used instead of os.rename() to handle cross-device
++            # moves (e.g. /tmp on tmpfs → /etc/sonic on ext4).
+             if final_dest_file is not None:
+-                os.rename(dest_file, final_dest_file)
++                shutil.move(dest_file, final_dest_file)
+             else:
+                 os.remove(dest_file)
+ 
+-- 
+2.25.1
+

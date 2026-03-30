@@ -1,0 +1,20 @@
+"Implement Phase R27 per STAGED_PHASES.md"
+"Implement Phase R26 per STAGED_PHASES.md — start by reading the AS7712 reference modules"
+
+
+make target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb-clean && BLDENV=trixie make SONIC_BUILD_JOBS=40 target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb
+
+rm target/debs/trixie/sonic-device-data_1.0-1_all.deb && BLDENV=trixie make SONIC_BUILD_JOBS=40 target/debs/trixie/sonic-device-data_1.0-1_all.deb
+
+make target/sonic-broadcom.bin-clean && BLDENV=trixie make SONIC_BUILD_JOBS=40 BUILD_SKIP_TEST=y target/sonic-broadcom.bin
+
+
+# Deploy via ONIE (switch must be in ONIE rescue mode)
+# OR via SCP+installer if SONiC already running:
+scp target/sonic-broadcom.bin admin@192.168.88.12:~
+ssh admin@192.168.88.12 'sudo sonic_installer install ~/sonic-broadcom.bin && sudo reboot'
+
+scp config_db.json.bak admin@192.168.88.12:/tmp/config_db.json
+ssh admin@192.168.88.12 sudo mv /tmp/config_db.json /etc/sonic/.
+ssh admin@192.168.88.12 sudo config reload -y
+

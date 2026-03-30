@@ -563,9 +563,9 @@ EOF
 echo "wedge100s postinst: installed var-log.mount drop-in (Before=docker.service)"
 
 # Enable pre-shutdown service for clean /var/log loop unmount at reboot.
+systemctl daemon-reload
 systemctl enable wedge100s-pre-shutdown.service
 systemctl start wedge100s-pre-shutdown.service || true
-systemctl daemon-reload
 echo "wedge100s postinst: enabled wedge100s-pre-shutdown.service"
 
 exit 0

@@ -601,4 +601,34 @@ if [ ! -e /boot/grub ]; then
     echo "wedge100s postinst: created /boot/grub -> /host/grub symlink"
 fi
 
+# Install sonic-reboot-onie: one-shot helper to reboot into ONIE install mode.
+# Sets next_entry=ONIE in the SONiC grubenv and onie_mode=install in the
+# ONIE-BOOT partition grubenv (/dev/sda2), then reboots.
+# ONIE reads onie_mode to select the "Install OS" menu entry automatically.
+cat > /usr/local/sbin/sonic-reboot-onie <<'EOF'
+#!/bin/sh
+# sonic-reboot-onie: reboot into ONIE install mode.
+# Sets next_entry=ONIE in /host/grub/grubenv (SONiC GRUB picks ONIE entry)
+# and onie_mode=install in /dev/sda2 (ONIE-BOOT grubenv), then reboots.
+set -e
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: must be run as root" >&2
+    exit 1
+fi
+
+grub-editenv /host/grub/grubenv set next_entry=ONIE
+
+ONIE_MOUNT=/mnt/onie-boot
+mkdir -p "$ONIE_MOUNT"
+mount /dev/sda2 "$ONIE_MOUNT"
+grub-editenv "$ONIE_MOUNT/grub/grubenv" set onie_mode=install
+umount "$ONIE_MOUNT"
+
+echo "Configured for ONIE install mode. Rebooting..."
+reboot
+EOF
+chmod +x /usr/local/sbin/sonic-reboot-onie
+echo "wedge100s postinst: installed /usr/local/sbin/sonic-reboot-onie"
+
 exit 0

@@ -235,9 +235,9 @@ by default once SONiC is installed.
 **Method 1 — From a running SONiC image:**
 
 ```bash
-# This reboots into ONIE installer mode
-sudo grub-reboot ONIE
-sudo reboot
+# Sets next_entry=ONIE in SONiC grubenv AND onie_mode=install in the
+# ONIE-BOOT partition grubenv, then reboots. Installed by platform deb.
+sudo sonic-reboot-onie
 ```
 
 **Method 2 — From the console during boot:**
@@ -260,24 +260,24 @@ ssh root@<bmc-ip> 'wedge_power.sh reset'
 
 #### Step 1 — Place the image where ONIE can reach it
 
+The image filename ONIE uses for auto-discovery on this platform is:
+
+```
+onie-installer-x86_64-accton_wedge100s_32x-r0.bin
+```
+
+Copy it to your HTTP server's document root under that exact name.
 ONIE discovers installation images via:
-- **DHCP option 67** (boot file name): ONIE fetches the URL from your DHCP server
+- **DHCP option 67** (boot file name): ONIE fetches the URL from your DHCP server — auto-discovery uses the filename above
 - **Static URL**: manually typed at the ONIE shell
 - **USB drive** mounted at `/mnt/usb/`
 
 #### Step 2 — Install from a URL (most common method)
 
-At the ONIE shell:
+At the ONIE shell (if not auto-discovered via DHCP):
 
 ```bash
-# Method A: HTTP/TFTP server
-onie-nos-install http://192.168.88.100/sonic-broadcom.bin
-
-# Method B: TFTP
-onie-nos-install tftp://192.168.88.100/sonic-broadcom.bin
-
-# Method C: SCP (if ONIE supports it)
-onie-nos-install scp://user@192.168.88.100/path/to/sonic-broadcom.bin
+onie-nos-install http://<server>/onie-installer-x86_64-accton_wedge100s_32x-r0.bin
 ```
 
 ONIE downloads the image, verifies it, and installs it to the eMMC. The
@@ -298,7 +298,7 @@ If you need to reinstall from scratch (e.g., to test a fresh-boot ZTP flow):
 # From a running SONiC image — uninstall and reboot into ONIE
 sudo sonic-installer remove <image-name>
 # Or to immediately boot into ONIE for reinstall:
-sudo grub-reboot ONIE && sudo reboot
+sudo sonic-reboot-onie
 ```
 
 From the ONIE shell, to uninstall the current SONiC image without immediately

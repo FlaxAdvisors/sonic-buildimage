@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SONiC Wedge 100S-32X L2 Setup Guide</title>
+<style>
+/* ============================================================
+   Cisco IOS Configuration Guide — Inspired stylesheet
+   Target renderer: wkhtmltopdf / Chrome headless
+   ============================================================ */
+
+/* System font stack — no external font fetch needed */
+
+/* ---------- Page setup ---------- */
+@page {
+    size: letter;
+    margin: 0.85in 0.85in 1in 0.85in;
+
+    @top-left {
+        content: "SONiC Wedge 100S-32X Initial Setup Guide";
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 8pt;
+        color: #6b7280;
+        border-bottom: 1px solid #d1d5db;
+        padding-bottom: 4pt;
+    }
+    @top-right {
+        content: string(chapter-title);
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 8pt;
+        color: #6b7280;
+        border-bottom: 1px solid #d1d5db;
+        padding-bottom: 4pt;
+    }
+    @bottom-center {
+        content: counter(page);
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 9pt;
+        color: #6b7280;
+    }
+    @bottom-right {
+        content: "Flax Advisors, LLC / wedge100s-2026.04.20";
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 7.5pt;
+        color: #9ca3af;
+    }
+}
+
+@page :first {
+    margin-top: 0;
+    @top-left { content: none; }
+    @top-right { content: none; }
+    @bottom-center { content: none; }
+    @bottom-right { content: none; }
+}
+
+/* ---------- Cover page ---------- */
+#cover {
+    page: cover;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+}
+
+/* ---------- Base typography ---------- */
+* { box-sizing: border-box; }
+
+html, body {
+    font-family: 'DejaVu Sans', Arial, Helvetica, sans-serif;
+    font-size: 10pt;
+    line-height: 1.55;
+    color: #1f2937;
+    background: #ffffff;
+    margin: 0;
+    padding: 0;
+}
+
+/* ---------- Headings ---------- */
+h1 {
+    font-size: 22pt;
+    font-weight: 700;
+    color: #003087;           /* Cisco dark blue */
+    border-bottom: 3px solid #049fd9;   /* Cisco accent blue */
+    padding-bottom: 6pt;
+    margin-top: 0;
+    margin-bottom: 14pt;
+    page-break-before: always;
+    string-set: chapter-title content();
+}
+
+h1:first-of-type {
+    page-break-before: avoid;
+}
+
+/* "Chapter N —" prefix: render chapter number large */
+h1 .chapter-num {
+    display: block;
+    font-size: 9pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #049fd9;
+    margin-bottom: 2pt;
+}
+
+h2 {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #1e3a5f;
+    border-bottom: 1px solid #bfdbfe;
+    padding-bottom: 3pt;
+    margin-top: 18pt;
+    margin-bottom: 8pt;
+}
+
+h3 {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #1e40af;
+    margin-top: 14pt;
+    margin-bottom: 6pt;
+}
+
+h4 {
+    font-size: 10pt;
+    font-weight: 700;
+    color: #374151;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+/* ---------- Body text ---------- */
+p {
+    margin: 0 0 8pt 0;
+    orphans: 3;
+    widows: 3;
+}
+
+a { color: #1d4ed8; text-decoration: none; }
+
+strong { font-weight: 700; color: #111827; }
+
+/* ---------- Code blocks ---------- */
+pre {
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-left: 4px solid #049fd9;
+    border-radius: 3px;
+    padding: 9pt 11pt;
+    margin: 8pt 0 12pt 0;
+    font-family: 'DejaVu Sans Mono', 'Courier New', Courier, monospace;
+    font-size: 8.5pt;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    page-break-inside: avoid;
+}
+
+code {
+    font-family: 'DejaVu Sans Mono', 'Courier New', Courier, monospace;
+    font-size: 8.5pt;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 2px;
+    padding: 1pt 4pt;
+    color: #0f172a;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    color: inherit;
+}
+
+/* ---------- Tables ---------- */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 8pt 0 14pt 0;
+    font-size: 9pt;
+    page-break-inside: avoid;
+}
+
+thead tr {
+    background: #1e3a5f;
+    color: #ffffff;
+}
+
+thead th {
+    padding: 6pt 9pt;
+    text-align: left;
+    font-weight: 600;
+    font-size: 8.5pt;
+    letter-spacing: 0.03em;
+    border: 1px solid #1e3a5f;
+}
+
+tbody tr:nth-child(even) {
+    background: #f0f7ff;
+}
+
+tbody tr:nth-child(odd) {
+    background: #ffffff;
+}
+
+tbody td {
+    padding: 5pt 9pt;
+    border: 1px solid #d1d5db;
+    vertical-align: top;
+    line-height: 1.4;
+}
+
+/* ---------- Blockquotes → Note / Warning / Caution ---------- */
+blockquote {
+    margin: 10pt 0 12pt 0;
+    padding: 8pt 12pt 8pt 14pt;
+    border-radius: 3px;
+    page-break-inside: avoid;
+}
+
+/* Default blockquote — Note style (blue) */
+blockquote {
+    background: #eff6ff;
+    border-left: 4px solid #3b82f6;
+    color: #1e3a5f;
+}
+
+blockquote p:first-child::before {
+    content: "Note  ";
+    font-weight: 700;
+    color: #1d4ed8;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Warning — red */
+blockquote.warning,
+blockquote p strong:first-child:contains("Warning") {
+    background: #fef2f2;
+    border-left: 4px solid #dc2626;
+    color: #7f1d1d;
+}
+
+/* Caution — amber */
+blockquote.caution {
+    background: #fffbeb;
+    border-left: 4px solid #d97706;
+    color: #78350f;
+}
+
+blockquote p { margin: 0 0 4pt 0; }
+blockquote p:last-child { margin-bottom: 0; }
+
+/* ---------- Lists ---------- */
+ul, ol {
+    margin: 4pt 0 8pt 0;
+    padding-left: 18pt;
+}
+
+li {
+    margin-bottom: 3pt;
+    line-height: 1.5;
+}
+
+li > ul, li > ol {
+    margin: 2pt 0 2pt 0;
+}
+
+/* ---------- Horizontal rules ---------- */
+hr {
+    border: none;
+    border-top: 1px solid #e5e7eb;
+    margin: 16pt 0;
+}
+
+/* ---------- Cover page (first page only) ---------- */
+.cover-page {
+    page-break-after: always;
+}
+
+.cover-banner {
+    background: linear-gradient(135deg, #003087 0%, #049fd9 100%);
+    padding: 40pt 40pt 32pt 40pt;
+    color: white;
+}
+
+.cover-cisco-wordmark {
+    font-size: 28pt;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: white;
+    margin-bottom: 6pt;
+}
+
+.cover-cisco-tagline {
+    font-size: 9pt;
+    color: rgba(255,255,255,0.75);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 28pt;
+}
+
+.cover-title {
+    font-size: 24pt;
+    font-weight: 700;
+    line-height: 1.2;
+    color: white;
+    margin-bottom: 8pt;
+}
+
+.cover-subtitle {
+    font-size: 13pt;
+    color: rgba(255,255,255,0.85);
+    margin-bottom: 0;
+}
+
+.cover-body {
+    padding: 28pt 40pt 24pt 40pt;
+    flex: 1;
+    background: #ffffff;
+}
+
+.cover-meta {
+    border-left: 4px solid #049fd9;
+    padding-left: 12pt;
+    margin-bottom: 20pt;
+}
+
+.cover-meta p {
+    margin: 2pt 0;
+    font-size: 9.5pt;
+    color: #374151;
+    line-height: 1.5;
+}
+
+.cover-meta .label {
+    font-weight: 700;
+    color: #003087;
+    display: inline-block;
+    width: 100pt;
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.cover-abstract {
+    font-size: 10pt;
+    color: #374151;
+    line-height: 1.6;
+    margin-bottom: 28pt;
+    max-width: 500pt;
+}
+
+.cover-footer {
+    margin-top: auto;
+    padding: 16pt 40pt;
+    background: #f9fafb;
+    border-top: 2px solid #e5e7eb;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.cover-footer-left {
+    font-size: 8pt;
+    color: #9ca3af;
+}
+
+.cover-footer-right {
+    font-size: 8pt;
+    color: #9ca3af;
+    text-align: right;
+}
+
+/* ---------- TOC ---------- */
+.toc-section {
+    page-break-after: always;
+}
+
+.toc-section h1 {
+    page-break-before: avoid;
+    border-bottom: 3px solid #049fd9;
+    color: #003087;
+}
+
+.toc-entry-h1 {
+    display: flex;
+    align-items: baseline;
+    margin: 6pt 0 2pt 0;
+    font-weight: 700;
+    font-size: 10pt;
+    color: #1e3a5f;
+}
+
+.toc-entry-h2 {
+    display: flex;
+    align-items: baseline;
+    margin: 2pt 0 1pt 14pt;
+    font-size: 9pt;
+    color: #374151;
+}
+
+.toc-entry-h3 {
+    display: flex;
+    align-items: baseline;
+    margin: 1pt 0 1pt 28pt;
+    font-size: 8.5pt;
+    color: #6b7280;
+}
+
+.toc-dots {
+    flex: 1;
+    border-bottom: 1px dotted #9ca3af;
+    margin: 0 5pt;
+    height: 9pt;
+}
+
+.toc-page {
+    font-size: 8.5pt;
+    color: #6b7280;
+    font-variant-numeric: tabular-nums;
+    min-width: 20pt;
+    text-align: right;
+}
+
+/* ---------- Chapter opening styling ---------- */
+.chapter-header {
+    margin-bottom: 20pt;
+}
+
+.chapter-label {
+    font-size: 9pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: #049fd9;
+    margin-bottom: 4pt;
+}
+
+/* ---------- Misc ---------- */
+.page-break { page-break-after: always; }
+img { max-width: 100%; }
+
+/* Appendix headers */
+h1.appendix {
+    color: #374151;
+    border-bottom-color: #9ca3af;
+}
+
+
+/* Override @top-left with per-guide title */
+@page { @top-left { content: "SONiC Wedge 100S-32X L2 Setup Guide"; } }
+
+/* TOC link styling */
+a.toc-link {
+    color: inherit;
+    text-decoration: none;
+}
+a.toc-link:hover {
+    text-decoration: underline;
+}
+</style>
+</head>
+<body>
+
+<div class="cover-page">
+  <div class="cover-banner">
+    <img src="data:image/png;base64,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" alt="Flax Advisors, LLC" style="height:54pt;display:block;margin-bottom:18pt">
+    <div class="cover-cisco-wordmark">&#9632; SONiC</div>
+    <div class="cover-cisco-tagline">Open Network Operating System &nbsp;&middot;&nbsp; Wedge 100S-32X</div>
+    <div class="cover-title">Layer-2 Switch Setup Guide</div>
+    <div class="cover-subtitle">Accton Wedge 100S-32X &nbsp;&middot;&nbsp; L2 / ToR Deployment</div>
+  </div>
+  <div class="cover-body">
+    <div class="cover-meta">
+      <p><span class="label">Release</span>wedge100s-2026.04.20</p>
+      <p><span class="label">Platform</span>x86_64-accton_wedge100s_32x-r0</p>
+      <p><span class="label">HwSKU</span>Accton-WEDGE100S-32X</p>
+      <p><span class="label">ASIC</span>Broadcom BCM56960 Tomahawk &nbsp;&middot;&nbsp; 32 &times; QSFP28 100G</p>
+      <p><span class="label">Revised</span>March 30, 2026</p>
+    </div>
+    <p class="cover-abstract">How to configure the Accton Wedge 100S-32X as a pure Layer-2 switch under SONiC. Covers VLAN configuration, spanning tree, management VRF, and restoring L3 config.</p>
+  </div>
+  <div class="cover-footer">
+    <span class="cover-footer-left">Flax Advisors, LLC &nbsp;&middot;&nbsp; For internal use</span>
+    <span class="cover-footer-right">Verified on hardware &nbsp;&middot;&nbsp; March 30, 2026</span>
+  </div>
+</div>
+
+<div class="toc-section">
+<h1 id="contents" style="page-break-before:avoid">Contents</h1>
+<div class="toc-entry-h1"><a class="toc-link" href="#sonic-wedge100s-layer-2-switch-setup-guide">SONiC Wedge100S — Layer-2 Switch Setup Guide</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#background">Background</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#what-changes">What Changes</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#step-1-back-up-the-existing-config">Step 1 — Back up the existing config</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#step-2-generate-the-new-config-dbjson">Step 2 — Generate the new config_db.json</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#step-3-install-and-reload">Step 3 — Install and reload</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#step-4-fix-management-vrf-persistence-required">Step 4 — Fix management VRF persistence (required)</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#the-problem">The problem</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#the-fix">The fix</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#verification">Verification</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#resulting-configuration-summary">Resulting configuration summary</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#step-5-spanning-tree-loop-protection">Step 5 — Spanning Tree (loop protection)</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#background-1">Background</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#enable-linux-bridge-stp-8021d">Enable Linux bridge STP (802.1D)</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#what-stp-does-in-this-topology">What STP does in this topology</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#limitation-8021d-vs-mstp">Limitation: 802.1D vs MSTP</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#building-sonic-with-docker-stp">Building SONiC with docker-stp</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#enable-in-the-build">Enable in the build</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#how-it-hooks-into-the-build">How it hooks into the build</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h3"><a class="toc-link" href="#after-building">After building</a><span class="toc-dots"></span></div>
+<div class="toc-entry-h2"><a class="toc-link" href="#restoring-l3-leafrouter-config">Restoring L3 / LeafRouter config</a><span class="toc-dots"></span></div>
+</div>
+
+<div id="content">
+<p><img src="data:image/png;base64,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" alt="Flax Advisors, LLC" height="52" style="display:block;margin-bottom:12px"></p><h1 id="sonic-wedge100s-layer-2-switch-setup-guide">SONiC Wedge100S — Layer-2 Switch Setup Guide</h1><p>How to configure the Accton Wedge100S-32X as a pure Layer-2 switch under SONiC. Intended for development/testing phases where no routing is needed and management access must stay isolated and reliable.</p><p>(verified on hardware 2026-03-19, SONiC hare-lorax, kernel 6.1.0-29-2-amd64)</p><hr /><h2 id="background">Background</h2><p>A freshly installed SONiC image on the Wedge100S comes up as a <code>LeafRouter</code> with: - 32 data-plane ports each with a <code>10.0.0.x/31</code> IP address - 32 BGP neighbours configured - A <code>Loopback0</code> at <code>10.1.0.1/32</code> - <code>PortChannel1</code> (Ethernet16 + Ethernet32) also with an IP</p><p>For platform bring-up and driver testing none of this L3 config is needed. This guide strips it to a flat L2 switch with one VLAN, matching SONiC’s documented <code>ToRRouter</code> (T0) topology pattern from <code>doc/configuration/examples/config_db_t0.json</code>.</p><hr /><h2 id="what-changes">What Changes</h2><table><thead><tr class="header"><th>Table</th><th>Before</th><th>After</th></tr></thead><tbody><tr class="odd"><td><code>DEVICE_METADATA.type</code></td><td><code>LeafRouter</code></td><td><code>ToRRouter</code></td></tr><tr class="even"><td><code>DEVICE_METADATA.default_bgp_status</code></td><td><code>up</code></td><td><code>down</code></td></tr><tr class="odd"><td><code>DEVICE_METADATA.bgp_asn</code></td><td><code>65100</code></td><td><em>(removed)</em></td></tr><tr class="even"><td><code>INTERFACE</code></td><td>54 entries (L3 IPs)</td><td>empty <code>{}</code></td></tr><tr class="odd"><td><code>BGP_NEIGHBOR</code></td><td>32 entries</td><td><em>(removed)</em></td></tr><tr class="even"><td><code>LOOPBACK_INTERFACE</code></td><td><code>Loopback0 10.1.0.1/32</code></td><td><em>(removed)</em></td></tr><tr class="odd"><td><code>PORTCHANNEL</code></td><td><code>PortChannel1</code></td><td><em>(removed)</em></td></tr><tr class="even"><td><code>PORTCHANNEL_MEMBER</code></td><td>Ethernet16, Ethernet32</td><td><em>(removed)</em></td></tr><tr class="odd"><td><code>VLAN</code></td><td><code>Vlan999</code></td><td><code>Vlan1</code></td></tr><tr class="even"><td><code>VLAN_MEMBER</code></td><td>1 port</td><td>all 41 ports, untagged</td></tr></tbody></table><p>All other tables (<code>PORT</code>, <code>FEATURE</code>, <code>MGMT_PORT</code>, <code>MGMT_VRF_CONFIG</code>, <code>NTP</code>, <code>LOGGER</code>, etc.) are preserved unchanged.</p><hr /><h2 id="step-1-back-up-the-existing-config">Step 1 — Back up the existing config</h2><pre class="bash"><code>ssh admin@192.168.88.12 &#39;sudo cp /etc/sonic/config_db.json /etc/sonic/config_db.json.pre-l2&#39;</code></pre><hr /><h2 id="step-2-generate-the-new-config_db.json">Step 2 — Generate the new config_db.json</h2><p>Run this on the development host (requires the current config fetched via <code>sonic-cfggen</code>):</p><pre class="bash"><code>ssh admin@192.168.88.12 &#39;sudo sonic-cfggen -d --print-data 2&gt;/dev/null&#39; \
+  &gt; /tmp/current_config_db.json
+
+python3 - &lt;&lt;&#39;EOF&#39;
+import json
+
+with open(&#39;/tmp/current_config_db.json&#39;) as f:
+    d = json.load(f)
+
+KEEP = {
+    &#39;AUTO_TECHSUPPORT&#39;, &#39;AUTO_TECHSUPPORT_FEATURE&#39;,
+    &#39;BANNER_MESSAGE&#39;, &#39;BGP_DEVICE_GLOBAL&#39;, &#39;BREAKOUT_CFG&#39;, &#39;CRM&#39;,
+    &#39;FEATURE&#39;, &#39;FLEX_COUNTER_TABLE&#39;,
+    &#39;KDUMP&#39;, &#39;LOGGER&#39;, &#39;MGMT_PORT&#39;, &#39;MGMT_VRF_CONFIG&#39;,
+    &#39;NTP&#39;, &#39;PASSW_HARDENING&#39;, &#39;PORT&#39;,
+    &#39;SNMP&#39;, &#39;SNMP_COMMUNITY&#39;, &#39;SYSLOG_CONFIG&#39;, &#39;SYSLOG_CONFIG_FEATURE&#39;,
+    &#39;SYSTEM_DEFAULTS&#39;, &#39;VERSIONS&#39;,
+}
+
+new = {}
+for k in KEEP:
+    if k in d:
+        new[k] = d[k]
+
+# Fix DEVICE_METADATA
+meta = dict(d[&#39;DEVICE_METADATA&#39;][&#39;localhost&#39;])
+meta[&#39;type&#39;] = &#39;ToRRouter&#39;
+meta[&#39;default_bgp_status&#39;] = &#39;down&#39;
+meta.pop(&#39;bgp_asn&#39;, None)
+new[&#39;DEVICE_METADATA&#39;] = {&#39;localhost&#39;: meta}
+
+# Empty INTERFACE (documented T0 pattern — no L3 on data-plane ports)
+new[&#39;INTERFACE&#39;] = {}
+
+# Single flat VLAN
+new[&#39;VLAN&#39;] = {&#39;Vlan1&#39;: {&#39;vlanid&#39;: &#39;1&#39;}}
+
+# All data-plane ports untagged in Vlan1
+new[&#39;VLAN_MEMBER&#39;] = {
+    f&#39;Vlan1|{port}&#39;: {&#39;tagging_mode&#39;: &#39;untagged&#39;}
+    for port in sorted(d[&#39;PORT&#39;].keys())
+}
+
+with open(&#39;/tmp/new_config_db.json&#39;, &#39;w&#39;) as f:
+    json.dump(new, f, indent=4, sort_keys=True)
+
+print(f&quot;VLAN_MEMBER: {len(new[&#39;VLAN_MEMBER&#39;])} ports&quot;)
+print(f&quot;type: {new[&#39;DEVICE_METADATA&#39;][&#39;localhost&#39;][&#39;type&#39;]}&quot;)
+print(&quot;Written to /tmp/new_config_db.json&quot;)
+EOF</code></pre><hr /><h2 id="step-3-install-and-reload">Step 3 — Install and reload</h2><pre class="bash"><code>scp /tmp/new_config_db.json admin@192.168.88.12:/tmp/new_config_db.json
+ssh admin@192.168.88.12 &#39;sudo cp /tmp/new_config_db.json /etc/sonic/config_db.json&#39;
+ssh admin@192.168.88.12 &#39;sudo config reload -y&#39;</code></pre><p><code>config reload</code> takes ~50 seconds. SSH drops and returns automatically once the management VRF drop-in (Step 4) is in place.</p><hr /><h2 id="step-4-fix-management-vrf-persistence-required">Step 4 — Fix management VRF persistence (required)</h2><h3 id="the-problem">The problem</h3><p>SONiC’s <code>interfaces-config.service</code> restarts the <code>networking</code> service during <code>config reload</code>, which tears down and recreates the <code>mgmt</code> VRF device. Two things break:</p><ol type="1"><li><p><strong>eth0 loses its <code>master mgmt</code> enslavement</strong> — <code>ifupdown2</code> should re-apply <code>vrf mgmt</code> from <code>/etc/network/interfaces</code>, but the <code>lo-m</code> dummy interface already exists, causing the <code>iface mgmt</code> stanza’s <code>up ip link add lo-m</code> to fail silently, which leaves eth0 unmastered.</p></li><li><p><strong>sshd has a stale socket</strong> — the <code>mgmt</code> VRF device gets a new kernel interface index on each reload. sshd (started with <code>ip vrf exec mgmt</code>) keeps its socket bound to the old index. Until sshd is restarted it cannot accept new connections, producing “Connection refused” even though sshd is running.</p></li></ol><h3 id="the-fix">The fix</h3><p>Two systemd drop-ins, applied once and persistent across reboots:</p><p><strong>A) Re-enslave eth0, restart sshd, and re-enable STP after every interfaces-config run:</strong></p><pre class="bash"><code>sudo mkdir -p /etc/systemd/system/interfaces-config.service.d
+sudo tee /etc/systemd/system/interfaces-config.service.d/mgmt-vrf-eth0.conf &lt;&lt;&#39;EOF&#39;
+[Service]
+ExecStartPost=-/bin/ip link set eth0 master mgmt
+ExecStartPost=-/bin/systemctl restart ssh
+ExecStartPost=-/sbin/brctl stp Bridge on
+EOF
+sudo systemctl daemon-reload</code></pre><p><strong>B) Run sshd inside the management VRF</strong> (so outbound connections from sshd — e.g. ProxyJump — use the mgmt routing table):</p><pre class="bash"><code>sudo tee /etc/systemd/system/ssh.service.d/override.conf &lt;&lt;&#39;EOF&#39;
+[Service]
+ExecStartPre=
+ExecStartPre=/usr/local/bin/host-ssh-keygen.sh
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=
+ExecStart=/usr/bin/ip vrf exec mgmt /usr/sbin/sshd -D $SSHD_OPTS
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ssh</code></pre><p>After applying both drop-ins, <code>config reload</code> is fully self-healing: SSH recovers automatically ~50 seconds after reload starts.</p><h3 id="verification">Verification</h3><pre class="bash"><code># eth0 enslaved to mgmt
+ip link show eth0 | grep &quot;master mgmt&quot;
+
+# sshd bound to mgmt VRF
+sudo ss -tlnp | grep sshd
+# Expected: 0.0.0.0%mgmt:22
+
+# mgmt routing table intact
+ip route show table mgmt
+# Expected: default via 192.168.88.2 dev eth0
+#           192.168.88.0/24 dev eth0 ...
+
+# No L3 on data-plane ports
+ip route show table main | grep -v docker0
+# Expected: empty (only docker0 line)</code></pre><hr /><h2 id="resulting-configuration-summary">Resulting configuration summary</h2><pre><code>Management:
+  eth0  192.168.88.12/24  master mgmt  (DHCP, mgmt VRF table 5000)
+  sshd  0.0.0.0%mgmt:22  (ip vrf exec mgmt)
+
+Data plane:
+  Vlan1  — all 41 Ethernet ports, untagged access
+  No IPs, no routing, no BGP, no PortChannels
+
+Routing tables:
+  main:  docker0 only
+  mgmt:  default via 192.168.88.2, 192.168.88.0/24 dev eth0</code></pre><hr /><h2 id="step-5-spanning-tree-loop-protection">Step 5 — Spanning Tree (loop protection)</h2><h3 id="background-1">Background</h3><p>The Wedge100S has 4 x 100G DAC ports connected to the same EOS peer (rabbit-lorax):</p><table><thead><tr class="header"><th>SONiC Port</th><th>EOS Port</th><th>Role</th></tr></thead><tbody><tr class="odd"><td>Ethernet16</td><td>Et13/1</td><td>(was PortChannel1 member)</td></tr><tr class="even"><td>Ethernet32</td><td>Et14/1</td><td>(was PortChannel1 member)</td></tr><tr class="odd"><td>Ethernet48</td><td>Et15/1</td><td>standalone</td></tr><tr class="even"><td>Ethernet112</td><td>Et16/1</td><td>standalone</td></tr></tbody></table><p>All four are in Vlan1 with no STP. Without loop protection, a broadcast on Vlan1 can circulate indefinitely between them.</p><p>EOS uses <code>spanning-tree mode mstp</code>. SONiC does not have an STP container in this build (see below for how to add one). In the meantime the Linux bridge’s built-in 802.1D STP provides basic loop protection.</p><h3 id="enable-linux-bridge-stp-802.1d">Enable Linux bridge STP (802.1D)</h3><pre class="bash"><code>sudo brctl stp Bridge on</code></pre><p>This is already included in the interfaces-config drop-in from Step 4, so it re-applies automatically after every <code>config reload</code>.</p><h3 id="what-stp-does-in-this-topology">What STP does in this topology</h3><p>hare-lorax becomes the <strong>root bridge</strong> (no other STP-speaking switch on the management network). All active ports go to <code>forwarding</code> state immediately since the switch is root — no ports need to be blocked. If a loop is ever introduced (e.g. a cable connecting two of the EOS-peered ports back-to-back), STP will detect it and block the redundant port within ~30 seconds.</p><pre class="bash"><code># View port STP states
+sudo brctl showstp Bridge | grep -A1 &quot;^Ethernet&quot;
+
+# Quick summary: forwarding ports only
+sudo bridge link show | grep -v NO-CARRIER | grep forwarding</code></pre><p>Active forwarding ports on hare-lorax as of 2026-03-19:</p><table><thead><tr class="header"><th>Port</th><th>Connected to</th><th>State</th></tr></thead><tbody><tr class="odd"><td>Ethernet0</td><td>Unknown device (DAC 25G breakout)</td><td>forwarding</td></tr><tr class="even"><td>Ethernet16</td><td>rabbit-lorax Et13/1 (100G DAC)</td><td>forwarding</td></tr><tr class="odd"><td>Ethernet32</td><td>rabbit-lorax Et14/1 (100G DAC)</td><td>forwarding</td></tr><tr class="even"><td>Ethernet48</td><td>rabbit-lorax Et15/1 (100G DAC)</td><td>forwarding</td></tr><tr class="odd"><td>Ethernet66</td><td>Server ens1f1np1 (10G breakout lane)</td><td>forwarding</td></tr><tr class="even"><td>Ethernet67</td><td>Server ens1f1np1 (10G breakout lane)</td><td>forwarding</td></tr><tr class="odd"><td>Ethernet80</td><td>localhost lan0 (25G breakout lane)</td><td>forwarding</td></tr><tr class="even"><td>Ethernet81</td><td>localhost lan0 (25G breakout lane)</td><td>forwarding</td></tr><tr class="odd"><td>Ethernet112</td><td>rabbit-lorax Et16/1 (100G DAC)</td><td>forwarding</td></tr></tbody></table><h3 id="limitation-802.1d-vs-mstp">Limitation: 802.1D vs MSTP</h3><p>The Linux bridge STP is classic 802.1D — single instance, 30-second convergence on topology change. EOS uses MSTP (802.1s) which supports multiple spanning-tree instances and fast RSTP convergence. The two protocols are not directly interoperable for topology negotiation; each switch runs its own instance independently. For development and testing this is acceptable.</p><p>For production or multi-VLAN topologies, replace the bridge STP with <code>docker-stp</code> (see next section).</p><hr /><h2 id="building-sonic-with-docker-stp">Building SONiC with docker-stp</h2><p>The SONiC STP container (<code>docker-stp</code>) provides proper PVST/RPVST support through the <code>stpd</code> daemon and <code>stpctl</code> CLI. The submodule is present at <code>src/sonic-stp</code> but the container is excluded from the default build.</p><h3 id="enable-in-the-build">Enable in the build</h3><p>Add to <code>rules/config.user</code> (gitignored, local overrides only):</p><pre class="makefile"><code># Enable STP container
+SONIC_INCLUDE_STP = y</code></pre><p>Or pass on the make command line:</p><pre class="bash"><code>BLDENV=trixie SONIC_INCLUDE_STP=y make \
+  target/debs/trixie/sonic-platform-accton-wedge100s-32x_1.1_amd64.deb</code></pre><h3 id="how-it-hooks-into-the-build">How it hooks into the build</h3><table><thead><tr class="header"><th>File</th><th>Role</th></tr></thead><tbody><tr class="odd"><td><code>rules/sonic-stp.mk</code></td><td>Builds <code>stp_1.0.0_amd64.deb</code> from <code>src/sonic-stp</code></td></tr><tr class="even"><td><code>rules/docker-stp.mk</code></td><td>Builds <code>docker-stp.gz</code>; gated on <code>INCLUDE_STP = y</code></td></tr><tr class="odd"><td><code>slave.mk</code> line 248</td><td>Sets <code>INCLUDE_STP = y</code> when <code>SONIC_INCLUDE_STP = y</code></td></tr></tbody></table><p>The container depends on <code>$(STP)</code> (the deb), <code>$(SWSS)</code>, and <code>$(SONIC_RSYSLOG_PLUGIN)</code>. It uses <code>$(DOCKER_CONFIG_ENGINE_BOOKWORM)</code> as its base (bookworm container on a trixie host — this is normal for SONiC).</p><h3 id="after-building">After building</h3><p>Once the image includes <code>docker-stp</code>, enable the feature and configure MSTP-style RPVST on Vlan1:</p><pre class="bash"><code># Enable the stp container
+sudo config feature state stp enabled
+
+# Set mode to PVST (SONiC supports pvst/rpvst, not mstp directly)
+sudo config spanning-tree mode pvst
+
+# Enable on Vlan1
+sudo config spanning-tree vlan add 1
+
+# Verify
+show spanning-tree</code></pre><p>The <code>docker-stp</code> container replaces <code>brctl stp Bridge on</code> — remove the <code>ExecStartPost</code> line from the interfaces-config drop-in once <code>docker-stp</code> is running.</p><hr /><h2 id="restoring-l3-leafrouter-config">Restoring L3 / LeafRouter config</h2><p>The original config is preserved at <code>/etc/sonic/config_db.json.pre-l2</code>.</p><pre class="bash"><code>ssh admin@192.168.88.12 &#39;
+  sudo cp /etc/sonic/config_db.json.pre-l2 /etc/sonic/config_db.json
+  sudo config reload -y
+&#39;</code></pre><p>The mgmt VRF drop-ins (Step 4) are harmless with the L3 config — leave them in place.</p>
+
+</div>
+</body>
+</html>

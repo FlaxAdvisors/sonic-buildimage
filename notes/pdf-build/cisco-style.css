@@ -1,0 +1,447 @@
+/* ============================================================
+   Cisco IOS Configuration Guide — Inspired stylesheet
+   Target renderer: wkhtmltopdf / Chrome headless
+   ============================================================ */
+
+/* System font stack — no external font fetch needed */
+
+/* ---------- Page setup ---------- */
+@page {
+    size: letter;
+    margin: 0.85in 0.85in 1in 0.85in;
+
+    @top-left {
+        content: "SONiC Wedge 100S-32X Initial Setup Guide";
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 8pt;
+        color: #6b7280;
+        border-bottom: 1px solid #d1d5db;
+        padding-bottom: 4pt;
+    }
+    @top-right {
+        content: string(chapter-title);
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 8pt;
+        color: #6b7280;
+        border-bottom: 1px solid #d1d5db;
+        padding-bottom: 4pt;
+    }
+    @bottom-center {
+        content: counter(page);
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 9pt;
+        color: #6b7280;
+    }
+    @bottom-right {
+        content: "Flax Advisors, LLC / wedge100s-2026.04.20";
+        font-family: 'DejaVu Sans', Arial, sans-serif;
+        font-size: 7.5pt;
+        color: #9ca3af;
+    }
+}
+
+@page :first {
+    margin-top: 0;
+    @top-left { content: none; }
+    @top-right { content: none; }
+    @bottom-center { content: none; }
+    @bottom-right { content: none; }
+}
+
+/* ---------- Cover page ---------- */
+#cover {
+    page: cover;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+}
+
+/* ---------- Base typography ---------- */
+* { box-sizing: border-box; }
+
+html, body {
+    font-family: 'DejaVu Sans', Arial, Helvetica, sans-serif;
+    font-size: 10pt;
+    line-height: 1.55;
+    color: #1f2937;
+    background: #ffffff;
+    margin: 0;
+    padding: 0;
+}
+
+/* ---------- Headings ---------- */
+h1 {
+    font-size: 22pt;
+    font-weight: 700;
+    color: #003087;           /* Cisco dark blue */
+    border-bottom: 3px solid #049fd9;   /* Cisco accent blue */
+    padding-bottom: 6pt;
+    margin-top: 0;
+    margin-bottom: 14pt;
+    page-break-before: always;
+    string-set: chapter-title content();
+}
+
+h1:first-of-type {
+    page-break-before: avoid;
+}
+
+/* "Chapter N —" prefix: render chapter number large */
+h1 .chapter-num {
+    display: block;
+    font-size: 9pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #049fd9;
+    margin-bottom: 2pt;
+}
+
+h2 {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #1e3a5f;
+    border-bottom: 1px solid #bfdbfe;
+    padding-bottom: 3pt;
+    margin-top: 18pt;
+    margin-bottom: 8pt;
+}
+
+h3 {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #1e40af;
+    margin-top: 14pt;
+    margin-bottom: 6pt;
+}
+
+h4 {
+    font-size: 10pt;
+    font-weight: 700;
+    color: #374151;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+/* ---------- Body text ---------- */
+p {
+    margin: 0 0 8pt 0;
+    orphans: 3;
+    widows: 3;
+}
+
+a { color: #1d4ed8; text-decoration: none; }
+
+strong { font-weight: 700; color: #111827; }
+
+/* ---------- Code blocks ---------- */
+pre {
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-left: 4px solid #049fd9;
+    border-radius: 3px;
+    padding: 9pt 11pt;
+    margin: 8pt 0 12pt 0;
+    font-family: 'DejaVu Sans Mono', 'Courier New', Courier, monospace;
+    font-size: 8.5pt;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    page-break-inside: avoid;
+}
+
+code {
+    font-family: 'DejaVu Sans Mono', 'Courier New', Courier, monospace;
+    font-size: 8.5pt;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 2px;
+    padding: 1pt 4pt;
+    color: #0f172a;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    color: inherit;
+}
+
+/* ---------- Tables ---------- */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 8pt 0 14pt 0;
+    font-size: 9pt;
+    page-break-inside: avoid;
+}
+
+thead tr {
+    background: #1e3a5f;
+    color: #ffffff;
+}
+
+thead th {
+    padding: 6pt 9pt;
+    text-align: left;
+    font-weight: 600;
+    font-size: 8.5pt;
+    letter-spacing: 0.03em;
+    border: 1px solid #1e3a5f;
+}
+
+tbody tr:nth-child(even) {
+    background: #f0f7ff;
+}
+
+tbody tr:nth-child(odd) {
+    background: #ffffff;
+}
+
+tbody td {
+    padding: 5pt 9pt;
+    border: 1px solid #d1d5db;
+    vertical-align: top;
+    line-height: 1.4;
+}
+
+/* ---------- Blockquotes → Note / Warning / Caution ---------- */
+blockquote {
+    margin: 10pt 0 12pt 0;
+    padding: 8pt 12pt 8pt 14pt;
+    border-radius: 3px;
+    page-break-inside: avoid;
+}
+
+/* Default blockquote — Note style (blue) */
+blockquote {
+    background: #eff6ff;
+    border-left: 4px solid #3b82f6;
+    color: #1e3a5f;
+}
+
+blockquote p:first-child::before {
+    content: "Note  ";
+    font-weight: 700;
+    color: #1d4ed8;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Warning — red */
+blockquote.warning,
+blockquote p strong:first-child:contains("Warning") {
+    background: #fef2f2;
+    border-left: 4px solid #dc2626;
+    color: #7f1d1d;
+}
+
+/* Caution — amber */
+blockquote.caution {
+    background: #fffbeb;
+    border-left: 4px solid #d97706;
+    color: #78350f;
+}
+
+blockquote p { margin: 0 0 4pt 0; }
+blockquote p:last-child { margin-bottom: 0; }
+
+/* ---------- Lists ---------- */
+ul, ol {
+    margin: 4pt 0 8pt 0;
+    padding-left: 18pt;
+}
+
+li {
+    margin-bottom: 3pt;
+    line-height: 1.5;
+}
+
+li > ul, li > ol {
+    margin: 2pt 0 2pt 0;
+}
+
+/* ---------- Horizontal rules ---------- */
+hr {
+    border: none;
+    border-top: 1px solid #e5e7eb;
+    margin: 16pt 0;
+}
+
+/* ---------- Cover page (first page only) ---------- */
+.cover-page {
+    page-break-after: always;
+}
+
+.cover-banner {
+    background: linear-gradient(135deg, #003087 0%, #049fd9 100%);
+    padding: 40pt 40pt 32pt 40pt;
+    color: white;
+}
+
+.cover-cisco-wordmark {
+    font-size: 28pt;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: white;
+    margin-bottom: 6pt;
+}
+
+.cover-cisco-tagline {
+    font-size: 9pt;
+    color: rgba(255,255,255,0.75);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 28pt;
+}
+
+.cover-title {
+    font-size: 24pt;
+    font-weight: 700;
+    line-height: 1.2;
+    color: white;
+    margin-bottom: 8pt;
+}
+
+.cover-subtitle {
+    font-size: 13pt;
+    color: rgba(255,255,255,0.85);
+    margin-bottom: 0;
+}
+
+.cover-body {
+    padding: 28pt 40pt 24pt 40pt;
+    flex: 1;
+    background: #ffffff;
+}
+
+.cover-meta {
+    border-left: 4px solid #049fd9;
+    padding-left: 12pt;
+    margin-bottom: 20pt;
+}
+
+.cover-meta p {
+    margin: 2pt 0;
+    font-size: 9.5pt;
+    color: #374151;
+    line-height: 1.5;
+}
+
+.cover-meta .label {
+    font-weight: 700;
+    color: #003087;
+    display: inline-block;
+    width: 100pt;
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.cover-abstract {
+    font-size: 10pt;
+    color: #374151;
+    line-height: 1.6;
+    margin-bottom: 28pt;
+    max-width: 500pt;
+}
+
+.cover-footer {
+    margin-top: auto;
+    padding: 16pt 40pt;
+    background: #f9fafb;
+    border-top: 2px solid #e5e7eb;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.cover-footer-left {
+    font-size: 8pt;
+    color: #9ca3af;
+}
+
+.cover-footer-right {
+    font-size: 8pt;
+    color: #9ca3af;
+    text-align: right;
+}
+
+/* ---------- TOC ---------- */
+.toc-section {
+    page-break-after: always;
+}
+
+.toc-section h1 {
+    page-break-before: avoid;
+    border-bottom: 3px solid #049fd9;
+    color: #003087;
+}
+
+.toc-entry-h1 {
+    display: flex;
+    align-items: baseline;
+    margin: 6pt 0 2pt 0;
+    font-weight: 700;
+    font-size: 10pt;
+    color: #1e3a5f;
+}
+
+.toc-entry-h2 {
+    display: flex;
+    align-items: baseline;
+    margin: 2pt 0 1pt 14pt;
+    font-size: 9pt;
+    color: #374151;
+}
+
+.toc-entry-h3 {
+    display: flex;
+    align-items: baseline;
+    margin: 1pt 0 1pt 28pt;
+    font-size: 8.5pt;
+    color: #6b7280;
+}
+
+.toc-dots {
+    flex: 1;
+    border-bottom: 1px dotted #9ca3af;
+    margin: 0 5pt;
+    height: 9pt;
+}
+
+.toc-page {
+    font-size: 8.5pt;
+    color: #6b7280;
+    font-variant-numeric: tabular-nums;
+    min-width: 20pt;
+    text-align: right;
+}
+
+/* ---------- Chapter opening styling ---------- */
+.chapter-header {
+    margin-bottom: 20pt;
+}
+
+.chapter-label {
+    font-size: 9pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: #049fd9;
+    margin-bottom: 4pt;
+}
+
+/* ---------- Misc ---------- */
+.page-break { page-break-after: always; }
+img { max-width: 100%; }
+
+/* Appendix headers */
+h1.appendix {
+    color: #374151;
+    border-bottom-color: #9ca3af;
+}

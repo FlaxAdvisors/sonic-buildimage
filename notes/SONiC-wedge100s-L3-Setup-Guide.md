@@ -176,6 +176,47 @@ ssh admin@wedge-a "sudo ip vrf exec default ping -c 3 10.0.48.1"
 
 ---
 
+## Route Policy Hardening (Known Gap)
+
+**SONiC hare-lorax limitation:** `bgpcfgd` does not process `prefix_list_in`/`prefix_list_out`
+fields in `BGP_NEIGHBOR_AF` for `LeafRouter` type. These fields are silently ignored —
+prefix policy enforcement must be applied as vtysh commands.
+
+**Current risk is low:** Calico only advertises pod CIDRs (`10.244.n.0/24`) — nodes are
+well-behaved and route leakage is unlikely. For production hardening, apply the following
+after each BGP container start:
+
+```bash
+ssh admin@<wedge-ip> "docker exec bgp vtysh" <<'EOF'
+configure terminal
+
+! Accept only pod CIDRs from nodes; advertise default to nodes
+ip prefix-list ACCEPT-POD-CIDR seq 10 permit 10.244.0.0/16 le 24
+ip prefix-list SEND-DEFAULT seq 10 permit 0.0.0.0/0
+
+! For inter-switch BGP (exchange pod CIDRs only)
+! ACCEPT-POD-CIDR reused (same list)
+
+! For upstream BGP (case A only)
+ip prefix-list ACCEPT-DEFAULT seq 10 permit 0.0.0.0/0
+ip prefix-list ACCEPT-NOTHING seq 10 deny 0.0.0.0/0 le 32
+
+router bgp 65000
+  neighbor NODES prefix-list ACCEPT-POD-CIDR in
+  neighbor NODES prefix-list SEND-DEFAULT out
+  neighbor SWITCHES prefix-list ACCEPT-POD-CIDR in
+  neighbor SWITCHES prefix-list ACCEPT-POD-CIDR out
+end
+write memory
+EOF
+```
+
+**Persistence caveat:** These commands survive until the `bgp` container restarts. A permanent
+fix requires patching `bgpd.main.conf.j2` in the `sonic-frr` submodule to render prefix list
+and `neighbor ... prefix-list` stanzas for `LeafRouter` type — tracked as a future task.
+
+---
+
 ## Upgrading to Case A (full BGP upstream)
 
 When your upstream router supports BGP — two changes only:

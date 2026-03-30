@@ -307,13 +307,16 @@ The submodules relevant to Wedge 100S-32X are marked **Active**. Others are pres
 
 ## 3. Build System — Detailed Reference
 
-**Do not set `NOTRIXIE=1`** — the top-level `Makefile` defaults to
-`NOTRIXIE ?= 1`, which skips the trixie pass and the `.bin` is never assembled.
-Leave it at the default `0` or explicitly pass `NOTRIXIE=0`.
+**Default distro pass matrix** (do not override for full image builds):
 
-**Do not set `NOBOOKWORM=1`** for full image builds — the bookworm pass builds
-37 Docker service images required by the installer. `NOBOOKWORM=1` is only safe
-for isolated deb-only builds with `BLDENV=trixie` set explicitly.
+| Variable | Default | Effect |
+|---|---|---|
+| `NOSTRETCH`, `NOBUSTER`, `NOBULLSEYE` | `1` | Skipped — not needed |
+| `NOBOOKWORM` | `0` | Bookworm pass runs — builds ~37 Docker service images |
+| `NOTRIXIE` | `0` | Trixie pass runs — builds `.deb` packages + final `.bin` |
+
+Do not set `NOBOOKWORM=1` for full image builds — Docker service images are built in the bookworm pass and are required by the installer.
+Do not set `NOTRIXIE=1` — the trixie pass assembles the final `.bin`; without it nothing is produced.
 
 Build System File Map
 
@@ -376,7 +379,7 @@ Makefile (host)
             └─ rules/*.mk + platform/broadcom/rules.mk
 ```
 
-1. **`Makefile` (host)** — thin wrapper; delegates all targets to `Makefile.work` with `BLDENV=trixie` (or bookworm for cleanup).
+1. **`Makefile` (host)** — thin wrapper that sequences multi-distro passes. Default: skips jessie/stretch/buster/bullseye (all `NO*=1`), runs bookworm pass (builds Docker service images) then trixie pass (builds the `.bin`). Both `NOBOOKWORM` and `NOTRIXIE` default to `0` — do not override them for full image builds.
 
 2. **`Makefile.work` (host, Docker orchestrator)** — builds/pulls a `sonic-slave-trixie-<user>:<hash>` Docker image from `sonic-slave-trixie/Dockerfile.j2`, then runs `docker run --privileged` with the repo bind-mounted at `/sonic`. All compilation happens inside this container.
 
@@ -460,15 +463,17 @@ The RFS is slow to build (15–30 min) because it runs `debootstrap` and install
 `build_image.sh` packs the squashfs and all docker image `.gz` files into a self-extracting ONIE installer payload.
 
 ```bash
-# Full image build (requires stages 1–3 complete)
-make target/sonic-broadcom.bin
-
-# Skip tests (recommended for dev builds)
-BLDENV=trixie BUILD_SKIP_TEST=y make target/sonic-broadcom.bin
-
-# Parallel build
-BLDENV=trixie BUILD_SKIP_TEST=y SONIC_BUILD_JOBS=40 make target/sonic-broadcom.bin
+# Full image build — runs bookworm pass (Docker images) then trixie pass (.bin)
+make BUILD_SKIP_TEST=y SONIC_BUILD_JOBS=40 target/sonic-broadcom.bin
 ```
+
+> **Do not prefix with `BLDENV=trixie`** for full image builds — that skips the
+> bookworm pass and omits the Docker service images required by the installer.
+>
+> **After `rm -rf target/`** you must re-run `make configure PLATFORM=broadcom`
+> before building. The bookworm/trixie passes need `target/debs/<distro>/` to
+> exist before they can write `.flags` dependency-tracking files; `configure`
+> creates that directory tree.
 
 ### 3.5 Selective builds for Wedge 100S development
 

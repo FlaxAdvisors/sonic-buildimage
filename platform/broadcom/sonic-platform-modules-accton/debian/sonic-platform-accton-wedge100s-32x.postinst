@@ -553,6 +553,18 @@ print("wedge100s postinst: patched " + SYNCD_SH + " — shim LD_PRELOAD added")
 PYEOF
 fi
 
+# system-health (healthd) blocks on a Redis wait when it receives SIGTERM during
+# shutdown — Redis is already stopped by that point.  healthd has no signal handler
+# that interrupts the blocking DB call, so it hangs for the full DefaultTimeoutStopSec
+# (90s).  It is a monitoring service; SIGKILL after 5s is safe and correct.
+SYSHEALTH_DROPIN_DIR="/etc/systemd/system/system-health.service.d"
+mkdir -p "$SYSHEALTH_DROPIN_DIR"
+cat > "$SYSHEALTH_DROPIN_DIR/wedge100s-stop-timeout.conf" <<'EOF'
+[Service]
+TimeoutStopSec=5
+EOF
+echo "wedge100s postinst: installed system-health.service drop-in (TimeoutStopSec=5)"
+
 # Fix serial console lockup: agetty probes terminal type via VT220 escape sequences
 # (DECRQCPO \033[6n, etc.) when TERM is unset or xterm in systemd's environment.
 # On a raw UART serial console via mTerm/microcom there is no terminal emulator to

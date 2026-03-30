@@ -40,7 +40,12 @@ line 260. The `${:-}` at line 499 respects the already-exported variable.
 CSTATES are hard-coded (Intel Xeon D-1548 on Wedge 100S is always Intel; no
 runtime `/proc/cpuinfo` check needed for a single-platform file).
 
-Committed: `8fe59134f` — "installer: fix Wedge 100S kernel cmdline — remove quiet, add crashkernel=256M"
+Committed: `41345a0f0` — "installer: fix Wedge 100S kernel cmdline in installer.conf (authoritative source)"
+
+**Important**: `build_image.sh` regenerates `installer/platforms/` from
+`device/accton/x86_64-accton_wedge100s_32x-r0/installer.conf` on every build.
+The authoritative source is `installer.conf`, NOT `installer/platforms/`.
+Edits to `installer/platforms/` are overwritten by each build.
 
 ---
 

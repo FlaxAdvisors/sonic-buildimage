@@ -3,7 +3,7 @@ Description=Pre-shutdown: unmount /var/log loop device cleanly
 # After=var-log.mount: our ExecStop runs before var-log.mount is unmounted (reversed stop ordering)
 # Before=docker/rsyslog/auditd: those services are stopped before our ExecStop runs
 After=var-log.mount
-Before=docker.service rsyslog.service auditd.service
+Before=docker.service rsyslog.service
 
 [Service]
 Type=oneshot

@@ -568,4 +568,12 @@ systemctl enable wedge100s-pre-shutdown.service
 systemctl start wedge100s-pre-shutdown.service || true
 echo "wedge100s postinst: enabled wedge100s-pre-shutdown.service"
 
+# Create /boot/grub -> /host/grub symlink so standard grub-reboot works.
+# SONiC's grub environment lives at /host/grub/grubenv (ext4 partition), not
+# /boot/grub/grubenv, so grub-probe and grub-editenv fail without this symlink.
+if [ ! -e /boot/grub ]; then
+    ln -s /host/grub /boot/grub
+    echo "wedge100s postinst: created /boot/grub -> /host/grub symlink"
+fi
+
 exit 0

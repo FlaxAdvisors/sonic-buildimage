@@ -1,0 +1,18 @@
+[Unit]
+Description=Pre-shutdown: unmount /var/log loop device cleanly
+# After=var-log.mount: our ExecStop runs before var-log.mount is unmounted (reversed stop ordering)
+# Before=docker/rsyslog/auditd: those services are stopped before our ExecStop runs
+After=var-log.mount
+Before=docker.service rsyslog.service auditd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/bin/wedge100s-pre-shutdown.sh
+TimeoutStopSec=15
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -137,5 +137,5 @@ database-chassis.service
 CLAUDE.md
 *.local.md
 *~
-notes/*.pdf
-notes/*.html
+guides/*.pdf
+guides/*.html

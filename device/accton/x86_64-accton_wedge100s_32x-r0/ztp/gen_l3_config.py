@@ -9,7 +9,7 @@ Port allocation (per switch):
   P13-20 (E48-E76)      reserved     — 1x100G, no IP
   P21-22 (E80,E84)      storage C/D  — 1x100G routed
   P23-28 (E88-E108)     right nodes  — 4x25G breakout → sub-ports E88-E111
-  P29-32 (E112-E124)    uplinks      — 1x100G (E112 active, E116 active)
+  P29-32 (E112-E124)    uplinks      — 1x100G (only E112/P29 provisioned; E116/P30 deferred)
 
 IP scheme:
   Node n NIC0 → Wedge A: 10.0.n.0/31  (A=.0, node=.1)

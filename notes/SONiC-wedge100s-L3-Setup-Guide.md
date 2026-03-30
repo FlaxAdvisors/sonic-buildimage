@@ -6,7 +6,7 @@ How to configure the dual-Wedge100S ToR complex for a 48-node Kubernetes cluster
 with Calico BGP. Covers port breakout, BGP container enablement, config generation,
 and ZTP deployment.
 
-(verified on hardware REPLACE-WITH-DATE, SONiC hare-lorax, kernel 6.1.0-29-2-amd64)
+(verified on hardware 2026-03-30, SONiC hare-lorax, kernel 6.1.0-29-2-amd64)
 
 ---
 
@@ -171,7 +171,7 @@ ssh admin@<wedge-ip> "show bgp summary"
 ssh admin@<wedge-ip> "show ip route bgp"
 
 # Cross-switch reachability (node on Wedge B visible from Wedge A)
-ssh admin@wedge-a "ping 10.0.48.1 count 3"
+ssh admin@wedge-a "sudo ip vrf exec default ping -c 3 10.0.48.1"
 ```
 
 ---

@@ -202,18 +202,18 @@ traffic behind its own node IP before it leaves the NIC. NAT state is distribute
 
 ```json
 "BREAKOUT_CFG": {
-    "Ethernet16": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet20": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet24": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet28": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet32": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet36": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet88": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet92": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet96": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet100": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet104": { "brkout_mode": "4x25G[10G,1G]" },
-    "Ethernet108": { "brkout_mode": "4x25G[10G,1G]" }
+    "Ethernet16": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet20": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet24": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet28": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet32": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet36": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet88": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet92": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet96": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet100": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet104": { "brkout_mode": "4x25G[10G]" },
+    "Ethernet108": { "brkout_mode": "4x25G[10G]" }
 }
 ```
 

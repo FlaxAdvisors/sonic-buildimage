@@ -17,7 +17,8 @@ class TestBGPContainer:
                              "sonic-db-cli CONFIG_DB hget 'FEATURE|bgp' state",
                              timeout=15)
         assert rc == 0
-        assert out.strip() == 'enabled' or 'enabled' in out
+        assert out.strip() == 'enabled' or '"enabled"' in out, \
+            f'BGP feature not enabled: {out!r}'
 
     def test_bgp_container_running(self, ssh):
         """docker-fpm-frr container must be Up."""

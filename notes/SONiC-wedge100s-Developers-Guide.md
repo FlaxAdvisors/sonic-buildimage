@@ -1,3 +1,5 @@
+<img src="flaxlogo_SD_Blue.png" alt="Flax Advisors, LLC" height="52" style="display:block;margin-bottom:12px">
+
 # SONiC Wedge 100S-32X Developer's Guide
 
 Platform: Accton Wedge 100S-32X (Facebook Wedge 100S-32X, Broadcom Tomahawk BCM56960)
@@ -1034,4 +1036,3 @@ ssh admin@<nos-ip> docker exec pmon supervisorctl tail xcvrd stderr
 ssh admin@<nos-ip> tail -f /var/log/swss/sairedis.rec
 ssh admin@<nos-ip> tail -f /var/log/swss/swss.rec
 ```
-

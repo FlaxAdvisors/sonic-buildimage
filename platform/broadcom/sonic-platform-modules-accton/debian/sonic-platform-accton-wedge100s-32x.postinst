@@ -553,6 +553,19 @@ print("wedge100s postinst: patched " + SYNCD_SH + " — shim LD_PRELOAD added")
 PYEOF
 fi
 
+# Fix serial console lockup: agetty probes terminal type via VT220 escape sequences
+# (DECRQCPO \033[6n, etc.) when TERM is unset or xterm in systemd's environment.
+# On a raw UART serial console via mTerm/microcom there is no terminal emulator to
+# respond; agetty waits for cursor-position replies that never arrive, freezing the
+# console.  Force TERM=linux to skip capability probing entirely.
+SERIAL_GETTY_DROPIN_DIR="/etc/systemd/system/serial-getty@ttyS0.service.d"
+mkdir -p "$SERIAL_GETTY_DROPIN_DIR"
+cat > "$SERIAL_GETTY_DROPIN_DIR/wedge100s-term.conf" <<'EOF'
+[Service]
+Environment=TERM=linux
+EOF
+echo "wedge100s postinst: installed serial-getty@ttyS0 drop-in (TERM=linux)"
+
 # Install var-log.mount drop-in so Docker is fully stopped before /var/log unmount attempt.
 VAR_LOG_DROPIN_DIR="/etc/systemd/system/var-log.mount.d"
 mkdir -p "$VAR_LOG_DROPIN_DIR"

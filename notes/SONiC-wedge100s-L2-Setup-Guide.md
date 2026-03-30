@@ -1,3 +1,5 @@
+<img src="flaxlogo_SD_Blue.png" alt="Flax Advisors, LLC" height="52" style="display:block;margin-bottom:12px">
+
 # SONiC Wedge100S — Layer-2 Switch Setup Guide
 
 How to configure the Accton Wedge100S-32X as a pure Layer-2 switch under SONiC.

@@ -1,3 +1,5 @@
+<img src="flaxlogo_SD_Blue.png" alt="Flax Advisors, LLC" height="52" style="display:block;margin-bottom:12px">
+
 # SONiC Wedge 100S-32X — OpenBMC Communications Guide
 
 **Date:** 2026-03-23

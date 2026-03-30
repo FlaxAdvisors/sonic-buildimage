@@ -1,3 +1,5 @@
+<img src="flaxlogo_SD_Blue.png" alt="Flax Advisors, LLC" height="52" style="display:block;margin-bottom:12px">
+
 # SONiC Wedge100S-32X — Optical Port Operator Reference
 
 (verified on hardware 2026-03-20)

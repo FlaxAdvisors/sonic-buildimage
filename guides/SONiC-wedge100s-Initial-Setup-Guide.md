@@ -22,197 +22,146 @@ out explicitly.
 > Configuration is stored in a Redis database (`CONFIG_DB`) and persisted as
 > `/etc/sonic/config_db.json`. There is no `write memory` — changes made with
 > `sudo config` commands take effect immediately and persist across reboots
-> automatically.
+> automatically. Except for some commands that require `sudo config save`.
 
 ---
 
 ## Chapter 1 — Hardware Access: Console and BMC
 
-### 1.1 Port Naming and Interface Aliases
+### 1.1 BMC Serial Console
 
-The Wedge 100S-32X has 32 front-panel QSFP28 100G ports. SONiC names them
-`Ethernet0`, `Ethernet4`, `Ethernet8`, ... `Ethernet124` (incrementing by 4,
-because each port uses 4 SerDes lanes on the Tomahawk ASIC).
+The Wedge 100S-32X has an independent BMC (Aspeed AST2400) running OpenBMC.
+The BMC controls fans, PSUs, and thermal sensors, and provides remote power
+control and serial console access to the x86 host.
 
-This naming is non-intuitive for IOS/EOS operators. **We strongly recommend
-enabling alias mode for all CLI sessions.** Alias mode displays ports as
-`Ethernet1/1` through `Ethernet32/1`, matching the physical panel numbering
-printed on the chassis.
-
-#### Enable Alias Mode — Persistent for Your Session
-
-```bash
-# Add to ~/.bashrc so alias mode is always active:
-echo 'export SONIC_CLI_IFACE_MODE=alias' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Once set, all `show` commands display friendly aliases automatically:
-
-```bash
-show interfaces status
-#  Interface     Lanes    Speed  ...  Alias       Vlan  Oper  Admin
-# -----------  -------  -------  ...  ----------  ----  ----  -----
-#  Ethernet1/1   ...     100G   ...  Ethernet1/1   ...   up    up
-#  Ethernet2/1   ...     100G   ...  Ethernet2/1   ...  down   up
-
-show lldp neighbors
-# LocalPort      Capability    PortID        TTL
-# -----------    ----------    ----------    ---
-# Ethernet5/1    BR, R         Ethernet13/1  120
-```
-
-#### Using Aliases in config Commands
-
-When alias mode is active, `config` commands also accept the alias form:
-
-```bash
-# These are equivalent when SONIC_CLI_IFACE_MODE=alias:
-sudo config interface shutdown Ethernet5/1
-sudo config interface fec Ethernet5/1 rs
-show interfaces transceiver presence Ethernet5/1
-```
-
-> **Note:** If alias mode is not set, you must use the internal SONiC name.
-> The conversion is: `EthernetN` where `N = (panel_port_number - 1) × 4`.
-> Panel port 5 → `Ethernet16`, panel port 13 → `Ethernet48`, etc.
-> See Appendix A for the complete mapping.
-
-The alias-to-SONiC name mapping for quick reference:
-
-| Panel Port | SONiC Name  | Alias (this guide uses) |
-|------------|-------------|-------------------------|
-| 1          | Ethernet0   | Ethernet1/1             |
-| 2          | Ethernet4   | Ethernet2/1             |
-| 3          | Ethernet8   | Ethernet3/1             |
-| 4          | Ethernet12  | Ethernet4/1             |
-| 5          | Ethernet16  | Ethernet5/1             |
-| ...        | ...         | ...                     |
-| 32         | Ethernet124 | Ethernet32/1            |
-
-**The remainder of this guide uses alias names (`Ethernet1/1` style) in all
-command examples.** Set `SONIC_CLI_IFACE_MODE=alias` before following them.
-
----
-
-### 1.2 Host Serial Console
-
-The switch CPU presents a standard RS-232 console port. Access it from any
+The BMC presents a standard RS-232 console port. Access it from any
 terminal server or laptop serial adapter:
 
 | Parameter | Value |
 |-----------|-------|
-| Device    | ttyS0 (console port on chassis rear) |
+| Device    | ttyS1 (console port, rj45 on front panel) |
 | Speed     | **57600** baud |
 | Data bits | 8 |
 | Parity    | None |
 | Stop bits | 1 |
 | Flow ctrl | None |
 
+Using an rj45 to usb serial adapter cable that gets discovered by your laptop 
+as ttyUSB0, for example, you can attach to the console via:
+
 ```
 ! Typical minicom or screen invocation:
-screen /dev/ttyUSB0 57600
-minicom -D /dev/ttyUSB0 -b 57600
+sudo screen /dev/ttyUSB0 57600
+# or
+sudo minicom -D /dev/ttyUSB0 -b 57600
 ```
 
 > **Note:** GRUB uses the same 57600 baud rate. Boot messages and kernel output
 > appear at 57600. If you connect at 9600 you will see garbled output during boot.
 
-When the system is running, pressing Enter at the serial console produces:
+When the system is running, pressing Enter at the serial console should produce
+a login prompt for 0penBmc:
 
 ```
-Debian GNU/Linux 12 sonic ttyS0
+OpenBMC Release wedge100-f1cf221
 
-sonic login:
+bmc login:
 ```
 
-Login: `admin` / Password: see §3.3.
+Login: `root` / Password: `0penBmc`
 
----
-
-### 1.3 OpenBMC Access
-
-The Wedge 100S-32X has an independent BMC (Aspeed AST2400) running OpenBMC.
-The BMC controls fans, PSUs, and thermal sensors, and provides remote power
-control and serial console access to the x86 host.
-
-**Direct SSH to BMC:**
+You can find the DHCP IP address and/or the eth0 MAC for IPv6LL using
 
 ```bash
-ssh root@<bmc-ip>
-# Password: 0penBmc
-```
-
-**BMC via USB from a running SONiC switch** (does not require network):
-
-```bash
-# The BMC presents a USB CDC-ACM serial device and a USB Ethernet interface
-# to the x86 host. IPv6 link-local addressing is auto-configured.
-ssh -i /etc/sonic/wedge100s-bmc-key root@fe80::ff:fe00:1%usb0
-```
-
-> **Note:** After every BMC reboot, `authorized_keys` is cleared from BMC RAM.
-> If SSH key authentication fails after a BMC reboot:
-> ```bash
-> sshpass -p '0penBmc' ssh-copy-id -o StrictHostKeyChecking=no root@<bmc-ip>
-> ```
-
-**Fallback — Serial console to BMC from the switch:**
-
-```bash
-# /dev/ttyACM0 is the BMC ACM serial device (USB CDC-ACM)
-# Speed: 57600 8N1, Login: root / 0penBmc
-screen /dev/ttyACM0 57600
+ip address show eth0
+# If there is no IPv4 address and you know there is 
+# a DHCP server, you can get an address lease with:
+ifdown eth0 && ifup eth0
 ```
 
 ---
 
-### 1.4 wedge_power.sh — Remote Power Control
+### 1.2 wedge_power.sh — Remote Power Control
+
+Both the BMC and the host power on when the PSUs are plugged in. There is no
+external power switch. 
 
 `wedge_power.sh` runs on the BMC and controls power to the x86 CPU complex.
 It is the standard Facebook Wedge power management tool.
 
 ```bash
 # Check power status
-ssh root@<bmc-ip> 'wedge_power.sh status'
+wedge_power.sh status
 
-# Power on the x86 CPU (microserver)
-ssh root@<bmc-ip> 'wedge_power.sh on'
+# Power on the switch host x86 CPU (microserver)
+wedge_power.sh on
 
-# Power off the x86 CPU ungracefully (hard power cut)
-ssh root@<bmc-ip> 'wedge_power.sh off'
+# Power off the switch host x86 CPU ungracefully (hard power cut)
+wedge_power.sh off
 
-# Reset (cold reboot) the x86 CPU
-ssh root@<bmc-ip> 'wedge_power.sh reset'
+# Reset (cold reboot) the switch host x86 CPU
+wedge_power.sh reset
 
 # Reset the entire system including BMC and ASIC (use with caution)
-ssh root@<bmc-ip> 'wedge_power.sh reset -s'
+wedge_power.sh reset -s
 ```
 
-> **Caution:** `wedge_power.sh off` is an ungraceful power cut — equivalent to
-> pulling the power cord. Use `sudo reboot` from the SONiC CLI for a clean shutdown
-> when SONiC is running. Reserve `wedge_power.sh` for recovery situations.
+> **Caution:** `wedge_power.sh off` and `wedge_power.sh reset [-s]` do an 
+> ungraceful power cut — equivalent to pulling the power cord. Use 
+> `sudo reboot` from the SONiC CLI for a clean shutdown when SONiC is running. 
+> Reserve `wedge_power.sh` for recovery situations.
 
 ---
 
-### 1.5 sol.sh — Serial Over LAN Console
+### 1.3 Host Serial Console
 
 `sol.sh` provides a serial console session to the x86 CPU from the BMC,
 without requiring a physical cable to the console port. This is particularly
 useful for accessing GRUB during boot or diagnosing a hung SONiC instance.
 
+Use a serial adapter as described earlier, or the <bmc-ip> address to ssh to
+the BMC:
+
 ```bash
 # Open a SOL session to the switch CPU
-ssh root@<bmc-ip> 'sol.sh'
+ssh root@<bmc-ip> 
+# enter the login credentials described earlier
+```
 
-# Exit the SOL session
+Either serial or LAN method allows a serial connection to the wedge100s host 
+serial console using:
+
+```bash
+root@bmc:~# sol.sh
+```
+
+```bash
+# When you are ready to exit the SOL session
 Ctrl-X
+# or, depending on the BMC FW version
+Ctrl-l x
 ```
 
 The SOL session connects at 57600 baud matching the console port speed.
 It shares the physical serial port — if you have a physical cable attached to
 the console port, SOL and the physical cable will fight for the same bytes.
 Use one or the other, not both simultaneously.
+
+If you hit enter a few times and see nothing on the sol.sh console it may be 
+booted but without an OS installed. You can use `wedge_power.sh reset` and 
+immediately follow that up with `sol.sh` to watch the POST and get into the 
+BIOS menu, and check things, PXE boot to install ONIE, or boot ONIE to install
+a switch OS.
+
+### 1.4 First SONiC Login
+
+Once you have connected to to the SONiC host you should see a login prompt:
+
+```bash
+sonic login: 
+```
+
+Login: `admin` / Password: `YourPaSsWoRd`
 
 ---
 
@@ -321,7 +270,7 @@ onie-nos-remove
 ### 3.1 Management Interface — Default Behavior
 
 After a fresh install, the Wedge 100S-32X obtains its management IP address
-via DHCP on `eth0`. The management interface is placed in a separate routing
+via DHCP on `eth0`. The management interface can be placed in a separate routing
 VRF named `mgmt` (see §7 for VRF details).
 
 ```bash
@@ -331,16 +280,16 @@ show management_interface address
 ip -br addr show eth0
 ```
 
-Expected output after DHCP assignment:
+Expected example output after DHCP assignment:
 
 ```
-eth0             UP             192.168.88.12/24
+eth0             UP             192.168.88.100/24
 ```
 
 The system is then reachable via SSH:
 
 ```bash
-ssh admin@192.168.88.12
+ssh admin@192.168.88.100
 ```
 
 ---
@@ -491,10 +440,65 @@ sudo reboot
 
 ### 4.5 ZTP Profile Format
 
-ZTP profiles are JSON files served via HTTP/TFTP from your provisioning server.
-The DHCP server points to the profile via option 67.
+ZTP uses a **two-level fetch**. The DHCP server returns a URL (option 67) that
+points to a ZTP *profile* JSON file on your provisioning server. That profile
+then tells ZTP what else to fetch — including the per-switch `config_db.json`.
 
-**Minimal example — apply a config_db.json at provisioning time:**
+```
+DHCP option 67 → ZTP profile JSON
+                      └─ configdb-json plugin → per-switch config_db.json
+```
+
+**Step 1 — DHCP server: point option 67 at the ZTP profile**
+
+The URL in option 67 must point to the ZTP profile JSON file. Example for
+ISC DHCP (`/etc/dhcp/dhcpd.conf`):
+
+```
+subnet 192.0.2.0 netmask 255.255.255.0 {
+    option routers 192.0.2.1;
+    option domain-name-servers 192.0.2.1;
+    option bootfile-name "http://192.0.2.1/ztp/ztp-l2-profile.json";
+}
+```
+
+For `dnsmasq`:
+```
+dhcp-option=67,"http://192.0.2.1/ztp/ztp-l2-profile.json"
+```
+
+**Step 2 — Provisioning server: layout**
+
+Serve files over HTTP (nginx, Apache, or `python3 -m http.server`). The
+profile and per-switch config files can live in the same directory:
+
+```
+/var/www/html/ztp/
+├── ztp-l2-profile.json          # ZTP profile (pointed to by DHCP option 67)
+├── 00:1a:2b:3c:4d:5e_config_db.json   # per-switch config, keyed by system MAC
+├── 00:1a:2b:3c:4d:60_config_db.json
+└── ...
+```
+
+**Step 3 — ZTP profile: choosing the right identifier**
+
+The profile's `dynamic-url` builds a per-switch URL by combining a prefix,
+an identifier sourced from the switch itself, and a suffix.
+
+Available `identifier` values:
+
+| Identifier | Value on fresh SONiC install | Notes |
+|------------|------------------------------|-------|
+| `hostname` | `sonic` | **Same for every switch** — do not use for per-switch configs |
+| `system_mac` | e.g. `00:1a:2b:3c:4d:5e` | Unique per switch; read from syseeprom at ZTP time |
+| `serial_number` | from syseeprom | Unique, but requires syseeprom to be programmed |
+| `sonic_version` | e.g. `SONiC-OS-4.x.x` | Useful for version-specific configs, not per-switch |
+
+> **Warning:** On a fresh SONiC install the hostname is always `sonic` —
+> not a MAC-derived name. Using `"identifier": "hostname"` means every
+> switch requests the same filename. Use `system_mac` for per-switch configs.
+
+**Recommended ZTP profile using `system_mac`:**
 
 ```json
 {
@@ -502,8 +506,8 @@ The DHCP server points to the profile via option 67.
         "01-configdb-json": {
             "dynamic-url": {
                 "source": {
-                    "prefix": "http://provisioning-server.example.com/ztp/",
-                    "identifier": "hostname",
+                    "prefix": "http://192.0.2.1/ztp/",
+                    "identifier": "system_mac",
                     "suffix": "_config_db.json"
                 }
             }
@@ -512,23 +516,24 @@ The DHCP server points to the profile via option 67.
 }
 ```
 
-This tells ZTP to fetch `http://provisioning-server.example.com/ztp/<hostname>_config_db.json`
-where `<hostname>` is the switch's current hostname (typically the ONIE hostname
-derived from the management MAC address). The downloaded file is then applied
-as the new `config_db.json`.
+This fetches `http://192.0.2.1/ztp/00:1a:2b:3c:4d:5e_config_db.json` where
+`00:1a:2b:3c:4d:5e` is the switch's system MAC read from its syseeprom. The
+filename used to look up the config has no relationship to the hostname inside
+the config — the `hostname` field in the downloaded `config_db.json` sets
+what the switch will call itself after provisioning.
 
 **Reference profiles** (shipped with this image) are located on the switch at:
 
 ```
 /usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/ztp/
-├── ztp-l2-sample.json      # L2 deployment profile
+├── ztp-l2-sample.json      # L2 deployment profile (uses system_mac identifier)
 ├── l2-config_db.json       # L2 config template
 ├── ztp-l3-sample.json      # L3 deployment profile (placeholder)
 └── l3-config_db.json       # L3 config template (placeholder)
 ```
 
-Copy these to your provisioning server and customize the `REPLACE-*` placeholders
-before serving them.
+Copy these to your provisioning server. Update the prefix IP in the profile and
+fill in the `REPLACE-*` placeholders in the config template before serving.
 
 ---
 
@@ -540,14 +545,35 @@ The shipped `l2-config_db.json` configures:
 - STP (spanning-tree) enabled
 - Hostname, platform, and MAC set to placeholder values (replace before serving)
 
+**The config filename on the server and the hostname inside the config are
+independent.** Name the file after the system MAC (or any unique identifier
+you used in the ZTP profile), then set the hostname inside the file to
+whatever you want the switch to call itself after provisioning.
+
 Minimum fields to replace for each switch:
 
 | Field | Description |
 |-------|-------------|
-| `DEVICE_METADATA.localhost.hostname` | Switch hostname (e.g., `leaf-01`) |
+| `DEVICE_METADATA.localhost.hostname` | Target hostname after provisioning (e.g., `leaf-01`) |
 | `DEVICE_METADATA.localhost.mac` | System MAC (from `show platform syseeprom`) |
 | `MGMT_INTERFACE.eth0\|IP/PREFIX` | Static management IP (if not using DHCP) |
 | `MGMT_INTERFACE.eth0\|IP/PREFIX.gwaddr` | Management gateway |
+
+**Quick way to get a switch's system MAC before provisioning:**
+
+```bash
+# On the switch console or via ONIE:
+show platform syseeprom | grep "Base MAC"
+# Or from ONIE:
+onie-syseeprom | grep MAC
+```
+
+Name the per-switch config file on your provisioning server after that MAC:
+
+```bash
+cp l2-config_db.json "00:1a:2b:3c:4d:5e_config_db.json"
+# Edit the copy: set hostname, MAC, management IP
+```
 
 ---
 
@@ -875,7 +901,74 @@ sudo config reload -y
 
 ## Chapter 8 — Interface Configuration
 
-### 8.1 Displaying Interface Status
+### 8.1 Port Naming and Interface Aliases
+
+The Wedge 100S-32X has 32 front-panel QSFP28 100G ports. SONiC names them
+`Ethernet0`, `Ethernet4`, `Ethernet8`, ... `Ethernet124` (incrementing by 4,
+because each port uses 4 SerDes lanes on the Tomahawk ASIC).
+
+This naming is non-intuitive for IOS/EOS operators. **We strongly recommend
+enabling alias mode for all CLI sessions.** Alias mode displays ports as
+`Ethernet1/1` through `Ethernet32/1`, matching the physical panel numbering
+printed on the chassis.
+
+#### Enable Alias Mode — Persistent for Your Session
+
+```bash
+# Add to ~/.bashrc so alias mode is always active:
+echo 'export SONIC_CLI_IFACE_MODE=alias' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Once set, all `show` commands display friendly aliases automatically:
+
+```bash
+show interfaces status
+#  Interface     Lanes    Speed  ...  Alias       Vlan  Oper  Admin
+# -----------  -------  -------  ...  ----------  ----  ----  -----
+#  Ethernet1/1   ...     100G   ...  Ethernet1/1   ...   up    up
+#  Ethernet2/1   ...     100G   ...  Ethernet2/1   ...  down   up
+
+show lldp table
+# LocalPort      Capability    PortID        TTL
+# -----------    ----------    ----------    ---
+# Ethernet5/1    BR, R         Ethernet13/1  120
+```
+
+#### Using Aliases in config Commands
+
+When alias mode is active, `config` commands also accept the alias form:
+
+```bash
+# These are equivalent when SONIC_CLI_IFACE_MODE=alias:
+sudo config interface shutdown Ethernet5/1
+sudo config interface fec Ethernet5/1 rs
+show interfaces transceiver presence Ethernet5/1
+```
+
+> **Note:** If alias mode is not set, you must use the internal SONiC name.
+> The conversion is: `EthernetN` where `N = (panel_port_number - 1) × 4`.
+> Panel port 5 → `Ethernet16`, panel port 13 → `Ethernet48`, etc.
+> See Appendix A for the complete mapping.
+
+The alias-to-SONiC name mapping for quick reference:
+
+| Panel Port | SONiC Name  | Alias (this guide uses) |
+|------------|-------------|-------------------------|
+| 1          | Ethernet0   | Ethernet1/1             |
+| 2          | Ethernet4   | Ethernet2/1             |
+| 3          | Ethernet8   | Ethernet3/1             |
+| 4          | Ethernet12  | Ethernet4/1             |
+| 5          | Ethernet16  | Ethernet5/1             |
+| ...        | ...         | ...                     |
+| 32         | Ethernet124 | Ethernet32/1            |
+
+**The remainder of this guide uses alias names (`Ethernet1/1` style) in all
+command examples.** Set `SONIC_CLI_IFACE_MODE=alias` before following them.
+
+---
+
+### 8.2 Displaying Interface Status
 
 ```bash
 # Brief status of all interfaces (IOS equivalent: "show interfaces status")
@@ -902,7 +995,7 @@ Sample `show interfaces status` output:
 
 ---
 
-### 8.2 LLDP Neighbor Discovery
+### 8.3 LLDP Neighbor Discovery
 
 LLDP is enabled by default on all SONiC ports.
 
@@ -923,7 +1016,7 @@ chassis ID, port ID, and system description.
 
 ---
 
-### 8.3 Transceiver (Optics) Commands
+### 8.4 Transceiver (Optics) Commands
 
 ```bash
 # Show which ports have transceivers inserted
@@ -958,7 +1051,7 @@ show interfaces transceiver lpmode Ethernet100
 
 ---
 
-### 8.4 Administratively Enabling/Disabling Ports
+### 8.5 Administratively Enabling/Disabling Ports
 
 ```bash
 # Disable a port (equivalent to "shutdown" in IOS)
@@ -973,7 +1066,7 @@ show interfaces status Ethernet0
 
 ---
 
-### 8.5 Port Speed and FEC
+### 8.6 Port Speed and FEC
 
 All 32 ports default to 100G with RS-FEC. To change FEC:
 
@@ -990,7 +1083,7 @@ show interfaces status Ethernet104 | grep -i fec
 
 ---
 
-### 8.6 Port Counters
+### 8.7 Port Counters
 
 ```bash
 # Show packet and byte counters for all ports
@@ -1011,7 +1104,7 @@ watch -n 2 'show interfaces counters Ethernet1/1'
 
 ---
 
-### 8.7 Port Breakout
+### 8.8 Port Breakout
 
 The Wedge 100S-32X supports port breakout: a single 100G QSFP28 port can be
 broken out into 4×25G sub-ports. This is useful for connecting to 25G servers.
@@ -1037,7 +1130,7 @@ show interfaces status Ethernet0 Ethernet1 Ethernet2 Ethernet3
 
 ---
 
-### 8.8 VLAN Configuration
+### 8.9 VLAN Configuration
 
 #### Create a VLAN
 
@@ -1075,7 +1168,7 @@ show ip interfaces
 
 ---
 
-### 8.9 Assigning an IP Address to a Port (Routed Interface)
+### 8.10 Assigning an IP Address to a Port (Routed Interface)
 
 ```bash
 # Assign IP directly to a front-panel port (no VLAN)  (alias mode active)
@@ -1092,7 +1185,7 @@ show interfaces Ethernet1/1
 
 ---
 
-### 8.10 PortChannel (LAG) Configuration
+### 8.11 PortChannel (LAG) Configuration
 
 ```bash
 # Create a PortChannel  (alias mode active)

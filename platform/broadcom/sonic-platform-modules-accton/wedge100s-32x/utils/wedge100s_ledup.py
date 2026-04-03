@@ -231,3 +231,100 @@ class LedupAccess:
         """Write zero to first `count` DATA_RAM entries."""
         for i in range(count):
             self.write_data_ram(proc, i, 0)
+
+
+# ── CPLD access via BMC SSH ───────────────────────────────────────────────
+
+# BMC SYSCPLD sysfs paths (i2c-12, addr 0x31)
+CPLD_SYSFS_DIR = "/sys/bus/i2c/devices/12-0031"
+CPLD_LED_CTRL_REG = "0x3c"      # register address for i2cget
+CPLD_LED_COLOR_REG = "0x3d"     # test color selector
+
+# CPLD 0x3c bit definitions
+CPLD_TEST_MODE_EN = 0x80        # bit 7
+CPLD_TEST_BLINK_EN = 0x40       # bit 6
+CPLD_TH_LED_STEAM_MASK = 0x30   # bits 5:4
+CPLD_WALK_TEST_EN = 0x08        # bit 3
+CPLD_TH_LED_EN = 0x02           # bit 1 — BCM passthrough enable
+CPLD_TH_LED_CLR = 0x01          # bit 0
+
+# Preset CPLD 0x3c values
+CPLD_RAINBOW = 0xE0             # test mode on, blink on, steam=2
+CPLD_PASSTHROUGH = 0x02         # passthrough only
+CPLD_ALL_OFF = 0x00             # everything disabled
+
+BMC_KEY = "/etc/sonic/wedge100s-bmc-key"
+BMC_HOST = "root@fe80::ff:fe00:1%usb0"
+RUN_DIR = "/run/wedge100s"
+
+
+class CpldAccess:
+    """Read/write BMC SYSCPLD registers via SSH.
+
+    Auto-detects daemon state:
+    - Daemon running: writes go via .set file dispatch (daemon handles SSH)
+    - Daemon stopped: direct SSH to BMC
+    """
+
+    def __init__(self, bmc_host=BMC_HOST, bmc_key=BMC_KEY):
+        self._bmc_host = bmc_host
+        self._bmc_key = bmc_key
+
+    def _ssh_cmd(self, bmc_command):
+        """Run a command on the BMC via SSH. Returns stdout string."""
+        cmd = [
+            "ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5", "-i", self._bmc_key,
+            self._bmc_host, bmc_command,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return result.stdout.strip()
+
+    def daemon_is_active(self):
+        """Check if wedge100s-bmc-daemon is running."""
+        result = subprocess.run(
+            ["systemctl", "is-active", "wedge100s-bmc-daemon"],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip() == "active"
+
+    def read_cpld_reg(self, reg_addr):
+        """Read a CPLD register (hex address string like '0x3c'). Returns int."""
+        output = self._ssh_cmd(
+            "i2cget -f -y 12 0x31 %s" % reg_addr
+        )
+        return int(output, 0)
+
+    def write_cpld_reg(self, reg_addr, value):
+        """Write a CPLD register via BMC SSH."""
+        self._ssh_cmd(
+            "i2cset -f -y 12 0x31 %s 0x%02x" % (reg_addr, value)
+        )
+
+    def read_led_ctrl(self):
+        """Read CPLD register 0x3c (LED control). Returns int."""
+        return self.read_cpld_reg(CPLD_LED_CTRL_REG)
+
+    def write_led_ctrl(self, value):
+        """Write CPLD register 0x3c."""
+        self.write_cpld_reg(CPLD_LED_CTRL_REG, value)
+
+    def read_led_color(self):
+        """Read CPLD register 0x3d (test color selector). Returns int."""
+        return self.read_cpld_reg(CPLD_LED_COLOR_REG)
+
+    def write_led_color(self, value):
+        """Write CPLD register 0x3d."""
+        self.write_cpld_reg(CPLD_LED_COLOR_REG, value)
+
+    def decode_led_ctrl(self, val):
+        """Decode 0x3c register into human-readable dict."""
+        return {
+            "raw": "0x%02x" % val,
+            "led_test_mode_en": bool(val & CPLD_TEST_MODE_EN),
+            "led_test_blink_en": bool(val & CPLD_TEST_BLINK_EN),
+            "th_led_steam": (val & CPLD_TH_LED_STEAM_MASK) >> 4,
+            "walk_test_en": bool(val & CPLD_WALK_TEST_EN),
+            "th_led_en": bool(val & CPLD_TH_LED_EN),
+            "th_led_clr": bool(val & CPLD_TH_LED_CLR),
+        }

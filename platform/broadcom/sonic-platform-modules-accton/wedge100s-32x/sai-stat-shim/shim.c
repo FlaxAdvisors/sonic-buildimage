@@ -40,10 +40,6 @@ static oid_cache_t g_oids;
 /* Counter value cache. */
 static counter_cache_t g_cache;
 
-/* bcmcmd socket fd (-1 = not connected). */
-static int g_bcmfd = -1;
-static pthread_mutex_t g_bcmfd_lock = PTHREAD_MUTEX_INITIALIZER;
-
 /* Port name table from 'ps': sdk_port → port_name */
 static struct { int sdk_port; char name[SHIM_PORT_NAME_LEN]; } g_ps_map[SHIM_MAX_PORTS];
 static int g_ps_map_size = 0;
@@ -103,71 +99,62 @@ static const char *port_name_for_sdk(int sdk_port)
 
 /* ---- bcmcmd connection management ---- */
 
-/* Connect to bcmcmd socket, run 'ps', populate g_ps_map.
- * Returns the connected fd or -1. */
-static int bcmcmd_init(void)
+/* Connect to bcmcmd socket, run 'ps', populate g_ps_map, disconnect.
+ * Safe to call multiple times (idempotent). */
+static void bcmcmd_init_ps(void)
 {
     const char *sock = SHIM_SOCKET_PATH;
     int fd = bcmcmd_connect(sock, SHIM_CONNECT_TIMEOUT_MS);
     if (fd < 0) {
         syslog(LOG_WARNING, "shim: cannot connect to bcmcmd socket %s: %m", sock);
-        return -1;
+        return;
     }
 
-    /* Build sdk_port → port_name table. */
+    /* Build sdk_port -> port_name table. */
     int sdk_ports[SHIM_MAX_PORTS];
     char names[SHIM_MAX_PORTS][SHIM_PORT_NAME_LEN];
     int n = bcmcmd_ps(fd, sdk_ports, names, SHIM_MAX_PORTS);
+    bcmcmd_close(fd);
+
     if (n < 0) {
         syslog(LOG_WARNING, "shim: bcmcmd 'ps' failed");
-        bcmcmd_close(fd);
-        return -1;
+        return;
     }
     g_ps_map_size = n;
     for (int i = 0; i < n; i++) {
         g_ps_map[i].sdk_port = sdk_ports[i];
         strncpy(g_ps_map[i].name, names[i], SHIM_PORT_NAME_LEN - 1);
     }
-    syslog(LOG_INFO, "shim: bcmcmd connected, %d ports from ps", n);
-    return fd;
+    syslog(LOG_INFO, "shim: bcmcmd ps fetched %d ports (connect-on-demand)", n);
 }
 
-/* ---- cache staleness check ---- */
-
-static int cache_is_stale(void)
+/* Refresh counter cache via a transient bcmcmd connection.
+ * Each call: connect -> show counters -> disconnect (~70ms).
+ * The g_cache.lock mutex protects concurrent readers.
+ * If two threads call simultaneously, both do independent fetches —
+ * deltas accumulate correctly since bcmcmd tracks totals internally. */
+static void refresh_cache(void)
 {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long diff_ms = (now.tv_sec  - g_cache.fetched_at.tv_sec)  * 1000 +
-                   (now.tv_nsec - g_cache.fetched_at.tv_nsec) / 1000000;
-    return diff_ms >= SHIM_CACHE_TTL_MS;
-}
+    int fd = bcmcmd_connect(SHIM_SOCKET_PATH, SHIM_CONNECT_TIMEOUT_MS);
+    if (fd < 0) return;
 
-/* Refresh counter cache if stale.  Acquires/releases g_bcmfd_lock internally. */
-static void refresh_cache_if_stale(void)
-{
-    pthread_mutex_lock(&g_cache.lock);
-    if (!cache_is_stale() || g_cache.fetch_in_progress) {
-        pthread_mutex_unlock(&g_cache.lock);
-        return;
-    }
-    g_cache.fetch_in_progress = 1;
-    pthread_mutex_unlock(&g_cache.lock);
-
-    pthread_mutex_lock(&g_bcmfd_lock);
-    if (g_bcmfd < 0)
-        g_bcmfd = bcmcmd_init();
-    if (g_bcmfd >= 0) {
-        if (bcmcmd_fetch_counters(g_bcmfd, &g_cache) < 0) {
-            bcmcmd_close(g_bcmfd);
-            g_bcmfd = -1;
+    /* If ps map is empty (syncd wasn't ready at init), try now. */
+    if (g_ps_map_size == 0) {
+        int sdk_ports[SHIM_MAX_PORTS];
+        char names[SHIM_MAX_PORTS][SHIM_PORT_NAME_LEN];
+        int n = bcmcmd_ps(fd, sdk_ports, names, SHIM_MAX_PORTS);
+        if (n > 0) {
+            g_ps_map_size = n;
+            for (int i = 0; i < n; i++) {
+                g_ps_map[i].sdk_port = sdk_ports[i];
+                strncpy(g_ps_map[i].name, names[i], SHIM_PORT_NAME_LEN - 1);
+            }
+            syslog(LOG_INFO, "shim: late ps fetch got %d ports", n);
         }
     }
-    pthread_mutex_unlock(&g_bcmfd_lock);
 
-    pthread_mutex_lock(&g_cache.lock);
-    g_cache.fetch_in_progress = 0;
-    pthread_mutex_unlock(&g_cache.lock);
+    bcmcmd_fetch_counters(fd, &g_cache);
+    bcmcmd_close(fd);
 }
 
 /* ---- OID cache helpers ---- */
@@ -257,7 +244,7 @@ static sai_status_t shim_get_port_stats(
     }
 
     /* Flex path: use bcmcmd counter cache. */
-    refresh_cache_if_stale();
+    refresh_cache();
 
     /* Find the port_name for this sdk_port. */
     const char *pname = port_name_for_sdk(entry->sdk_port);
@@ -359,11 +346,9 @@ sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
     g_oids.n = 0;
     pthread_mutex_unlock(&g_oids.lock);
 
-    /* Rebuild ps map (port layout may have changed) — reconnect to bcmcmd. */
-    pthread_mutex_lock(&g_bcmfd_lock);
-    if (g_bcmfd >= 0) { bcmcmd_close(g_bcmfd); g_bcmfd = -1; }
+    /* Rebuild ps map (port layout may have changed). */
     g_ps_map_size = 0;
-    pthread_mutex_unlock(&g_bcmfd_lock);
+    bcmcmd_init_ps();
 
     if (!g_initialised) {
         /* One-time: parse BCM config file, initialise mutexes. */

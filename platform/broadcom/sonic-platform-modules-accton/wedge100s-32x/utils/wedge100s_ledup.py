@@ -117,3 +117,117 @@ def decode_data_ram(val):
     if val & BIT_RX:
         parts.append("RX")
     return " ".join(parts)
+
+
+# ── BAR2 memory-mapped register access ────────────────────────────────────
+
+def find_bcm_bar2():
+    """Auto-discover BCM56960 PCIe BAR2 address and size.
+
+    Scans /sys/bus/pci/devices/ for vendor 14e4, device b960.
+    Returns (bar2_addr, bar2_size) or raises RuntimeError.
+    """
+    pci_dir = "/sys/bus/pci/devices"
+    for dev in os.listdir(pci_dir):
+        devpath = os.path.join(pci_dir, dev)
+        try:
+            vid = open(os.path.join(devpath, "vendor")).read().strip()
+            did = open(os.path.join(devpath, "device")).read().strip()
+        except OSError:
+            continue
+        if vid == BCM_VID and did == BCM_DID:
+            lines = open(os.path.join(devpath, "resource")).read().strip().split("\n")
+            parts = lines[2].split()  # BAR2 is index 2
+            start = int(parts[0], 16)
+            end = int(parts[1], 16)
+            if start == 0:
+                continue
+            return start, end - start + 1
+    raise RuntimeError("BCM56960 (14e4:b960) BAR2 not found in /sys/bus/pci/devices")
+
+
+class LedupAccess:
+    """Memory-mapped access to BCM56960 LEDUP registers via /dev/mem.
+
+    Usage:
+        with LedupAccess() as led:
+            ctrl = led.read_ctrl(0)
+            led.write_data_ram(0, 29, 0x80)
+    """
+
+    def __init__(self):
+        self._bar_addr, self._bar_size = find_bcm_bar2()
+        self._fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        self._mm = mmap.mmap(
+            self._fd, self._bar_size, mmap.MAP_SHARED,
+            mmap.PROT_READ | mmap.PROT_WRITE,
+            offset=self._bar_addr,
+        )
+
+    def close(self):
+        if self._mm:
+            self._mm.close()
+            self._mm = None
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def bar2_info(self):
+        """Return (bar2_addr, bar2_size) for display."""
+        return self._bar_addr, self._bar_size
+
+    def reg_read32(self, offset):
+        """Read a 32-bit register at the given BAR2 offset."""
+        self._mm.seek(offset)
+        return struct.unpack("<I", self._mm.read(4))[0]
+
+    def reg_write32(self, offset, value):
+        """Write a 32-bit register at the given BAR2 offset."""
+        self._mm.seek(offset)
+        self._mm.write(struct.pack("<I", value & 0xFFFFFFFF))
+
+    def read_ctrl(self, proc):
+        return self.reg_read32(_CTRL_BASES[proc])
+
+    def write_ctrl(self, proc, value):
+        self.reg_write32(_CTRL_BASES[proc], value)
+
+    def read_status(self, proc):
+        return self.reg_read32(_STATUS_BASES[proc])
+
+    def read_data_ram(self, proc, index):
+        return self.reg_read32(data_ram_offset(proc, index)) & 0xFF
+
+    def write_data_ram(self, proc, index, value):
+        self.reg_write32(data_ram_offset(proc, index), value & 0xFF)
+
+    def read_program_ram(self, proc, index):
+        return self.reg_read32(program_ram_offset(proc, index)) & 0xFF
+
+    def write_program_ram(self, proc, index, value):
+        self.reg_write32(program_ram_offset(proc, index), value & 0xFF)
+
+    def load_bytecode(self, proc, bytecodes):
+        """Write bytecode list to PROGRAM_RAM. Pads to 256 with zeros."""
+        for i in range(PROGRAM_RAM_SIZE):
+            val = bytecodes[i] if i < len(bytecodes) else 0
+            self.write_program_ram(proc, i, val)
+
+    def verify_bytecode(self, proc, bytecodes):
+        """Read back PROGRAM_RAM and compare. Returns (ok, first_mismatch_index)."""
+        for i in range(len(bytecodes)):
+            actual = self.read_program_ram(proc, i)
+            if actual != bytecodes[i]:
+                return False, i
+        return True, -1
+
+    def zero_data_ram(self, proc, count=NUM_PORTS):
+        """Write zero to first `count` DATA_RAM entries."""
+        for i in range(count):
+            self.write_data_ram(proc, i, 0)

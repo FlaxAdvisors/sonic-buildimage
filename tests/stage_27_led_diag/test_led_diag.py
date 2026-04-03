@@ -32,36 +32,47 @@ PATTERNS = [
 
 # Single SSH call: snapshot mtime, write .set, poll until mtime changes, print result.
 # Runs entirely on the target — no SSH round-trip per poll iteration.
+# Write + readback with retry. The bmc-daemon's 10s sensor poll can
+# coalesce our inotify event, so we retry the write up to 3 times.
 _WRITE_AND_READ_SCRIPT = r"""
 RD={run_dir}
 VAL={value}
-OLD_MT=$(stat -c %Y $RD/cpld_led_ctrl 2>/dev/null || echo 0)
-printf '0x%02x\n' $VAL > $RD/led_ctrl_write.set
-for i in $(seq 1 30); do
-  MT=$(stat -c %Y $RD/cpld_led_ctrl 2>/dev/null || echo 0)
-  if [ "$MT" -gt "$OLD_MT" ]; then
-    cat $RD/cpld_led_ctrl
-    exit 0
-  fi
-  sleep 0.5
+for ATTEMPT in 1 2 3; do
+  OLD_MT=$(stat -c %Y $RD/cpld_led_ctrl 2>/dev/null || echo 0)
+  printf '0x%02x\n' $VAL > $RD/led_ctrl_write.set
+  for i in $(seq 1 24); do
+    MT=$(stat -c %Y $RD/cpld_led_ctrl 2>/dev/null || echo 0)
+    if [ "$MT" -gt "$OLD_MT" ]; then
+      GOT=$(cat $RD/cpld_led_ctrl)
+      if [ "$GOT" = "$VAL" ]; then
+        echo "$GOT"
+        exit 0
+      fi
+    fi
+    sleep 0.5
+  done
+  sleep 2
 done
 echo TIMEOUT
 exit 1
 """
 
-# Single SSH call: trigger read, poll for result.
+# Trigger read + poll with retry.
 _READ_SCRIPT = r"""
 RD={run_dir}
 F={filename}
-OLD_MT=$(stat -c %Y $RD/$F 2>/dev/null || echo 0)
-touch $RD/{setfile}
-for i in $(seq 1 20); do
-  MT=$(stat -c %Y $RD/$F 2>/dev/null || echo 0)
-  if [ "$MT" -gt "$OLD_MT" ]; then
-    cat $RD/$F
-    exit 0
-  fi
-  sleep 0.5
+for ATTEMPT in 1 2 3; do
+  OLD_MT=$(stat -c %Y $RD/$F 2>/dev/null || echo 0)
+  touch $RD/{setfile}
+  for i in $(seq 1 24); do
+    MT=$(stat -c %Y $RD/$F 2>/dev/null || echo 0)
+    if [ "$MT" -gt "$OLD_MT" ]; then
+      cat $RD/$F
+      exit 0
+    fi
+    sleep 0.5
+  done
+  sleep 2
 done
 echo TIMEOUT
 exit 1
@@ -71,7 +82,7 @@ exit 1
 def _write_and_readback(ssh, value):
     """Write CPLD 0x3c, poll readback in one SSH call. Returns (actual_int, raw_output)."""
     script = _WRITE_AND_READ_SCRIPT.format(run_dir=RUN_DIR, value=value)
-    out, err, rc = ssh.run(f"bash -c '{script}'", timeout=30)
+    out, err, rc = ssh.run(f"sudo bash -c '{script}'", timeout=60)
     text = out.strip()
     if rc != 0 or text == "TIMEOUT":
         return None, text
@@ -97,7 +108,7 @@ def restore_passthrough(ssh):
     """Ensure LEDs return to passthrough mode after all tests, even on failure."""
     yield
     script = _WRITE_AND_READ_SCRIPT.format(run_dir=RUN_DIR, value=0x02)
-    ssh.run(f"bash -c '{script}'", timeout=30)
+    ssh.run(f"sudo bash -c '{script}'", timeout=60)
 
 
 def test_led_diag_status_readable(ssh):
@@ -105,7 +116,7 @@ def test_led_diag_status_readable(ssh):
     script = _READ_SCRIPT.format(
         run_dir=RUN_DIR, filename="cpld_led_ctrl", setfile="cpld_led_ctrl.set"
     )
-    out, err, rc = ssh.run(f"bash -c '{script}'", timeout=20)
+    out, err, rc = ssh.run(f"sudo bash -c '{script}'", timeout=60)
     assert rc == 0, f"Cannot read CPLD 0x3c via daemon (timeout): {err}"
     val = int(out.strip())
     print(f"\nCurrent CPLD 0x3c = 0x{val:02x}")
@@ -130,7 +141,7 @@ def test_led_pattern_write_readback(ssh, label, value):
 
 def test_led_diag_ends_in_passthrough(ssh):
     """Final state after pattern tests is passthrough (0x02)."""
-    out, _, rc = ssh.run(f"cat {RUN_DIR}/cpld_led_ctrl", timeout=5)
+    out, _, rc = ssh.run(f"sudo cat {RUN_DIR}/cpld_led_ctrl", timeout=5)
     assert rc == 0
     val = int(out.strip())
     assert val == 0x02, (
@@ -143,7 +154,7 @@ def test_led_color_register_readable(ssh):
     script = _READ_SCRIPT.format(
         run_dir=RUN_DIR, filename="cpld_led_color", setfile="led_color_read.set"
     )
-    out, err, rc = ssh.run(f"bash -c '{script}'", timeout=20)
+    out, err, rc = ssh.run(f"sudo bash -c '{script}'", timeout=60)
     assert rc == 0, f"Cannot read CPLD 0x3d via daemon (timeout): {err}"
     val = int(out.strip())
     print(f"\nCPLD 0x3d (test color) = 0x{val:02x}")

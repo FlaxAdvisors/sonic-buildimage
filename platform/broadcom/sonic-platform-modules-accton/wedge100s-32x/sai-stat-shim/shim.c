@@ -13,7 +13,7 @@
  * Flex detection (on first call per OID):
  *   Call real get_port_stats. If SUCCESS → non-flex, cache result, return.
  *   If non-SUCCESS → flex; query SAI_PORT_ATTR_HW_LANE_LIST; map lane → sdk_port
- *   via g_lane_map[]; map sdk_port → port_name via ps_map[]; use bcmcmd cache.
+ *   via g_lane_map[]; fetch counters via bcm_stat_multi_get().
  */
 #define _GNU_SOURCE
 #include "shim.h"
@@ -37,12 +37,8 @@ static sai_get_port_attribute_fn g_real_get_port_attr      = NULL;
 /* OID classification cache. */
 static oid_cache_t g_oids;
 
-/* Counter value cache. */
-static counter_cache_t g_cache;
-
-/* Port name table from 'ps': sdk_port → port_name */
-static struct { int sdk_port; char name[SHIM_PORT_NAME_LEN]; } g_ps_map[SHIM_MAX_PORTS];
-static int g_ps_map_size = 0;
+/* BCM SDK direct counter function, resolved via dlsym at init. */
+static bcm_stat_multi_get_fn g_bcm_stat_multi_get = NULL;
 
 /* Lane → SDK port map from BCM config. */
 lane_map_entry_t g_lane_map[SHIM_MAX_LANE_MAP];
@@ -65,9 +61,7 @@ static void parse_bcm_config(const char *path)
     }
     char line[256];
     while (fgets(line, sizeof(line), f) && g_lane_map_size < SHIM_MAX_LANE_MAP) {
-        /* Match: portmap_<N>.0=<lane>:<speed>[:<flags>] */
         int sdk_port, phys_lane, speed;
-        /* We only need .0 entries (primary sub-port). */
         if (sscanf(line, "portmap_%d.0=%d:%d", &sdk_port, &phys_lane, &speed) == 3) {
             g_lane_map[g_lane_map_size].physical_lane = (uint32_t)phys_lane;
             g_lane_map[g_lane_map_size].sdk_port      = sdk_port;
@@ -79,7 +73,7 @@ static void parse_bcm_config(const char *path)
            g_lane_map_size, path);
 }
 
-/* ---- SDK port lookup helpers ---- */
+/* ---- SDK port lookup helper ---- */
 
 static int sdk_port_for_lane(uint32_t lane)
 {
@@ -87,94 +81,6 @@ static int sdk_port_for_lane(uint32_t lane)
         if (g_lane_map[i].physical_lane == lane)
             return g_lane_map[i].sdk_port;
     return -1;
-}
-
-static const char *port_name_for_sdk(int sdk_port)
-{
-    for (int i = 0; i < g_ps_map_size; i++)
-        if (g_ps_map[i].sdk_port == sdk_port)
-            return g_ps_map[i].name;
-    return NULL;
-}
-
-/* ---- bcmcmd connection management ---- */
-
-/* Connect to bcmcmd socket, run 'ps', populate g_ps_map, disconnect.
- * Safe to call multiple times (idempotent). */
-static void bcmcmd_init_ps(void)
-{
-    const char *sock = SHIM_SOCKET_PATH;
-    int fd = bcmcmd_connect(sock, SHIM_CONNECT_TIMEOUT_MS);
-    if (fd < 0) {
-        syslog(LOG_WARNING, "shim: cannot connect to bcmcmd socket %s: %m", sock);
-        return;
-    }
-
-    /* Build sdk_port -> port_name table. */
-    int sdk_ports[SHIM_MAX_PORTS];
-    char names[SHIM_MAX_PORTS][SHIM_PORT_NAME_LEN];
-    int n = bcmcmd_ps(fd, sdk_ports, names, SHIM_MAX_PORTS);
-    bcmcmd_close(fd);
-
-    if (n < 0) {
-        syslog(LOG_WARNING, "shim: bcmcmd 'ps' failed");
-        return;
-    }
-    g_ps_map_size = n;
-    for (int i = 0; i < n; i++) {
-        g_ps_map[i].sdk_port = sdk_ports[i];
-        strncpy(g_ps_map[i].name, names[i], SHIM_PORT_NAME_LEN - 1);
-    }
-    syslog(LOG_INFO, "shim: bcmcmd ps fetched %d ports (connect-on-demand)", n);
-}
-
-/* Last failed connect time — used to back off retries so we don't block
- * syncd threads for 3s (banner timeout) on every stats poll.  If bcmcmd
- * is unreachable, we return stale cache data instead of blocking. */
-static struct timespec g_last_connect_fail;
-
-/* Refresh counter cache via a transient bcmcmd connection.
- * Each call: connect -> show counters -> disconnect (~70ms).
- * The g_cache.lock mutex protects concurrent readers.
- * If two threads call simultaneously, both do independent fetches —
- * deltas accumulate correctly since bcmcmd tracks totals internally.
- * On connect failure, backs off for SHIM_CONNECT_BACKOFF_MS to avoid
- * blocking syncd threads with repeated 3s banner timeouts. */
-static void refresh_cache(void)
-{
-    /* Backoff: if the last connect failed recently, skip this attempt. */
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long since_fail_ms = (now.tv_sec  - g_last_connect_fail.tv_sec)  * 1000 +
-                         (now.tv_nsec - g_last_connect_fail.tv_nsec) / 1000000;
-    if (g_last_connect_fail.tv_sec != 0 && since_fail_ms < SHIM_CONNECT_BACKOFF_MS)
-        return;
-
-    int fd = bcmcmd_connect(SHIM_SOCKET_PATH, SHIM_CONNECT_TIMEOUT_MS);
-    if (fd < 0) {
-        clock_gettime(CLOCK_MONOTONIC, &g_last_connect_fail);
-        return;
-    }
-    /* Clear backoff on success. */
-    g_last_connect_fail.tv_sec = 0;
-
-    /* If ps map is empty (syncd wasn't ready at init), try now. */
-    if (g_ps_map_size == 0) {
-        int sdk_ports[SHIM_MAX_PORTS];
-        char names[SHIM_MAX_PORTS][SHIM_PORT_NAME_LEN];
-        int n = bcmcmd_ps(fd, sdk_ports, names, SHIM_MAX_PORTS);
-        if (n > 0) {
-            g_ps_map_size = n;
-            for (int i = 0; i < n; i++) {
-                g_ps_map[i].sdk_port = sdk_ports[i];
-                strncpy(g_ps_map[i].name, names[i], SHIM_PORT_NAME_LEN - 1);
-            }
-            syslog(LOG_INFO, "shim: late ps fetch got %d ports", n);
-        }
-    }
-
-    bcmcmd_fetch_counters(fd, &g_cache);
-    bcmcmd_close(fd);
 }
 
 /* ---- OID cache helpers ---- */
@@ -200,8 +106,6 @@ static oid_entry_t *oid_insert(sai_object_id_t oid, int is_flex, int sdk_port)
 
 /* ---- Port info resolution for an unknown OID ---- */
 
-/* Query HW_LANE_LIST via real SAI, map first matching lane to sdk_port.
- * Returns sdk_port or -1. */
 static int resolve_sdk_port(sai_object_id_t oid)
 {
     uint32_t lane_buf[8] = {0};
@@ -220,6 +124,83 @@ static int resolve_sdk_port(sai_object_id_t oid)
     return -1;
 }
 
+/* ---- Flex port counter read via bcm_stat_multi_get ---- */
+
+/* Fetch counters for a flex sub-port directly from the BCM SDK.
+ * Builds a bcm_stat_val_t array from the requested SAI stat IDs,
+ * calls bcm_stat_multi_get once, then sums dual-stat entries. */
+static sai_status_t flex_get_stats(int sdk_port, uint32_t count,
+                                    const uint32_t *ids, uint64_t *values)
+{
+    if (!g_bcm_stat_multi_get) {
+        memset(values, 0, count * sizeof(uint64_t));
+        return SAI_STATUS_SUCCESS;
+    }
+
+    /* Build parallel arrays: one bcm_stat per requested SAI stat,
+     * plus a second bcm_stat for dual-stat entries. We batch all
+     * primary stats in one bcm_stat_multi_get call, then fetch
+     * any secondary stats in a second call. */
+    int    primary_stats[SHIM_MAX_STAT_IDS];
+    int    primary_map[SHIM_MAX_STAT_IDS];   /* index into values[] */
+    int    n_primary = 0;
+
+    int    secondary_stats[SHIM_MAX_STAT_IDS];
+    int    secondary_map[SHIM_MAX_STAT_IDS]; /* index into values[] */
+    int    n_secondary = 0;
+
+    for (uint32_t i = 0; i < count && i < SHIM_MAX_STAT_IDS; i++) {
+        int idx = stat_map_index((sai_port_stat_t)ids[i]);
+        if (idx < 0 || g_stat_map[idx].bcm_stat < 0) {
+            values[i] = 0;
+            continue;
+        }
+        primary_stats[n_primary] = g_stat_map[idx].bcm_stat;
+        primary_map[n_primary] = (int)i;
+        n_primary++;
+
+        if (g_stat_map[idx].bcm_stat2 >= 0) {
+            secondary_stats[n_secondary] = g_stat_map[idx].bcm_stat2;
+            secondary_map[n_secondary] = (int)i;
+            n_secondary++;
+        }
+    }
+
+    /* Zero all values first (covers unmapped stats). */
+    memset(values, 0, count * sizeof(uint64_t));
+
+    /* Primary batch. */
+    if (n_primary > 0) {
+        uint64_t primary_vals[SHIM_MAX_STAT_IDS];
+        int rc = g_bcm_stat_multi_get(0, sdk_port, n_primary,
+                                       primary_stats, primary_vals);
+        if (rc != 0) {
+            static int logged = 0;
+            if (!logged) {
+                syslog(LOG_WARNING, "shim: bcm_stat_multi_get(port=%d) rc=%d",
+                       sdk_port, rc);
+                logged = 1;
+            }
+            return SAI_STATUS_SUCCESS;  /* zeros already set */
+        }
+        for (int i = 0; i < n_primary; i++)
+            values[primary_map[i]] = primary_vals[i];
+    }
+
+    /* Secondary batch (dual-stat sums like non-ucast = mcast + bcast). */
+    if (n_secondary > 0) {
+        uint64_t secondary_vals[SHIM_MAX_STAT_IDS];
+        int rc = g_bcm_stat_multi_get(0, sdk_port, n_secondary,
+                                       secondary_stats, secondary_vals);
+        if (rc != 0)
+            return SAI_STATUS_SUCCESS;  /* primary values still valid */
+        for (int i = 0; i < n_secondary; i++)
+            values[secondary_map[i]] += secondary_vals[i];
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
 /* ---- Shim get_port_stats ---- */
 
 static sai_status_t shim_get_port_stats(
@@ -233,24 +214,19 @@ static sai_status_t shim_get_port_stats(
     pthread_mutex_unlock(&g_oids.lock);
 
     if (entry && !entry->is_flex) {
-        /* Known non-flex: passthrough. */
         return g_real_get_port_stats(port_id, count, ids, values);
     }
 
     if (!entry) {
-        /* First call for this OID: try real function to classify. */
         sai_status_t st = g_real_get_port_stats(port_id, count, ids, values);
         if (st == SAI_STATUS_SUCCESS) {
-            /* Non-flex: cache and return real result. */
             pthread_mutex_lock(&g_oids.lock);
             oid_insert(port_id, 0, -1);
             pthread_mutex_unlock(&g_oids.lock);
             return st;
         }
-        /* Flex: resolve sdk_port and cache. */
         int sdk_port = resolve_sdk_port(port_id);
         if (sdk_port < 0) {
-            /* Cannot identify port; return zeros + SUCCESS so COUNTERS_DB gets keys. */
             memset(values, 0, count * sizeof(uint64_t));
             return SAI_STATUS_SUCCESS;
         }
@@ -263,32 +239,8 @@ static sai_status_t shim_get_port_stats(
         }
     }
 
-    /* Flex path: use bcmcmd counter cache. */
-    refresh_cache();
-
-    /* Find the port_name for this sdk_port. */
-    const char *pname = port_name_for_sdk(entry->sdk_port);
-
-    pthread_mutex_lock(&g_cache.lock);
-    port_row_t *row = NULL;
-    if (pname) {
-        for (int i = 0; i < g_cache.n_rows; i++) {
-            if (strcmp(g_cache.rows[i].port_name, pname) == 0) {
-                row = &g_cache.rows[i];
-                break;
-            }
-        }
-    }
-    for (uint32_t i = 0; i < count; i++) {
-        int idx = stat_map_index((sai_port_stat_t)ids[i]);
-        if (idx >= 0 && row)
-            values[i] = row->val[idx];
-        else
-            values[i] = 0;
-    }
-    pthread_mutex_unlock(&g_cache.lock);
-
-    return SAI_STATUS_SUCCESS;
+    /* Flex path: direct BCM SDK call. */
+    return flex_get_stats(entry->sdk_port, count, ids, values);
 }
 
 /* get_port_stats_ext: passthrough — the ext path (drop counters)
@@ -305,11 +257,6 @@ static sai_status_t shim_get_port_stats_ext(
 
 /* ---- mprotect helper for patching read-only function pointer tables ---- */
 
-/* Write a void* value to *dst, temporarily making the page writable if needed.
- * libsai.so maps its API struct tables with r-- protection; a plain write
- * causes SIGSEGV (fault code 7 = write to non-writable page).  We use
- * mprotect to add PROT_WRITE for the one page containing *dst, write, then
- * restore to PROT_READ. */
 static int patch_fnptr(void **dst, void *val)
 {
     long pgsz  = sysconf(_SC_PAGESIZE);
@@ -322,20 +269,18 @@ static int patch_fnptr(void **dst, void *val)
         return -1;
     }
     *dst = val;
-    /* Restore read-only; ignore failure (mapping may span multiple perms). */
     mprotect((void *)page, (size_t)pgsz, PROT_READ);
     return 0;
 }
 
 /* ---- sai_api_query intercept ---- */
 
-/* Called once by syncd at startup, and again after each breakout change. */
 sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
 {
     static sai_api_query_fn real_query = NULL;
     if (!real_query)
         real_query = (sai_api_query_fn)dlsym(RTLD_NEXT, "sai_api_query");
-    if (!real_query) return -1;  /* SAI_STATUS_FAILURE */
+    if (!real_query) return -1;
 
     sai_status_t st = real_query(api, api_method_table);
     if (st != SAI_STATUS_SUCCESS || api != SAI_API_PORT)
@@ -343,11 +288,6 @@ sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
 
     sai_port_api_t *port_api = (sai_port_api_t *)*api_method_table;
 
-    /* Save real function pointers only if they do not already point to our
-     * shim — on the second and subsequent sai_api_query calls (breakout
-     * reconfiguration) the struct may already be patched.  If we blindly
-     * copy a shim pointer into g_real_*, the shim will recurse into itself
-     * and stack-overflow. */
     if (port_api->get_port_stats != shim_get_port_stats)
         g_real_get_port_stats     = port_api->get_port_stats;
     if (port_api->get_port_stats_ext != shim_get_port_stats_ext)
@@ -355,9 +295,6 @@ sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
     if (port_api->get_port_attribute != NULL)
         g_real_get_port_attr      = port_api->get_port_attribute;
 
-    /* Replace with shim functions.  The struct may live in a read-only page
-     * (libsai.so r-- mapping); use patch_fnptr to temporarily grant write
-     * permission via mprotect before modifying. */
     patch_fnptr((void **)&port_api->get_port_stats,     shim_get_port_stats);
     patch_fnptr((void **)&port_api->get_port_stats_ext, shim_get_port_stats_ext);
 
@@ -366,24 +303,27 @@ sai_status_t sai_api_query(sai_api_t api, void **api_method_table)
     g_oids.n = 0;
     pthread_mutex_unlock(&g_oids.lock);
 
-    /* Rebuild ps map (port layout may have changed). */
-    g_ps_map_size = 0;
-    bcmcmd_init_ps();
-
     if (!g_initialised) {
-        /* One-time: parse BCM config file, initialise mutexes. */
         pthread_mutex_init(&g_oids.lock, NULL);
-        pthread_mutex_init(&g_cache.lock, NULL);
         g_oids.n = 0;
-        g_cache.n_rows = 0;
 
         const char *cfg = getenv(SHIM_BCM_CONFIG_ENV);
         if (cfg) parse_bcm_config(cfg);
         else syslog(LOG_WARNING, "shim: %s not set; lane→port map empty",
                     SHIM_BCM_CONFIG_ENV);
 
+        /* Resolve bcm_stat_multi_get from libsai.so (same address space). */
+        g_bcm_stat_multi_get = (bcm_stat_multi_get_fn)dlsym(
+            RTLD_DEFAULT, "bcm_stat_multi_get");
+        if (!g_bcm_stat_multi_get)
+            syslog(LOG_ERR, "shim: dlsym(bcm_stat_multi_get) failed: %s — "
+                   "flex counters will return zeros", dlerror());
+        else
+            syslog(LOG_INFO, "shim: bcm_stat_multi_get resolved at %p",
+                   (void *)g_bcm_stat_multi_get);
+
         g_initialised = 1;
-        syslog(LOG_INFO, "shim: sai-stat-shim initialised (libsaibcm 14.3.x / BCM56960)");
+        syslog(LOG_INFO, "shim: sai-stat-shim initialised (direct bcm_stat path)");
     }
 
     return SAI_STATUS_SUCCESS;

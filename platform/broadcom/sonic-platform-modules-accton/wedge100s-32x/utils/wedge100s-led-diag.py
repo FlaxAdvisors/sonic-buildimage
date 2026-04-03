@@ -120,6 +120,84 @@ def cmd_set_all_off(args):
     print("All port LEDs disabled.")
 
 
+def load_and_enable_ledup(led, soc_path):
+    """Load bytecode from SOC file into PROGRAM_RAM, enable LEDUP processors.
+
+    Args:
+        led: LedupAccess instance (already open)
+        soc_path: path to led_proc_init.soc
+
+    Returns True on success, False on failure.
+    """
+    bytecodes = ledup.parse_soc_bytecodes(soc_path)
+    if not bytecodes:
+        print("ERROR: no bytecode found in %s" % soc_path)
+        return False
+
+    ok = True
+    for proc in sorted(bytecodes.keys()):
+        bc = bytecodes[proc]
+        print("Loading LEDUP%d: %d bytes..." % (proc, len(bc)), end=" ")
+        led.load_bytecode(proc, bc)
+        verified, mismatch = led.verify_bytecode(proc, bc)
+        if verified:
+            print("verified OK")
+        else:
+            print("FAIL at index %d (wrote 0x%02x, read 0x%02x)" % (
+                mismatch, bc[mismatch], led.read_program_ram(proc, mismatch)))
+            ok = False
+
+    if not ok:
+        return False
+
+    # Enable LEDUP processors.
+    # CTRL register bit layout (from BCM56960 investigation):
+    #   Bit 0: LEDUP_EN
+    #   The exact bit positions for SCAN_START_DELAY and INTRA_PORT_DELAY
+    #   are discovered empirically. Start with just LEDUP_EN=1 (value 0x01).
+    #   If that doesn't work, try the full value from the investigation.
+    #
+    # Strategy: write CTRL=1, check STATUS for RUNNING bit. If not running
+    # after a brief delay, try larger CTRL values with timing fields.
+    ctrl_candidates = [
+        0x00000001,          # minimal: just LEDUP_EN
+        0x00002A41,          # LEDUP_EN + SCAN_START_DELAY=0x2a<<8 + INTRA_PORT_DELAY=4<<4
+        0x0004_2A01,         # LEDUP_EN + INTRA_PORT_DELAY=4<<16 + SCAN_START_DELAY=0x2a<<8
+    ]
+
+    for proc in sorted(bytecodes.keys()):
+        enabled = False
+        for ctrl_val in ctrl_candidates:
+            led.write_ctrl(proc, ctrl_val)
+            time.sleep(0.05)
+            status = led.read_status(proc)
+            readback = led.read_ctrl(proc)
+            if readback & 1:  # LEDUP_EN bit is set
+                print("LEDUP%d: CTRL=0x%08x STATUS=0x%08x — enabled" % (
+                    proc, readback, status))
+                enabled = True
+                break
+            print("LEDUP%d: CTRL=0x%08x (tried 0x%08x, readback 0x%08x)" % (
+                proc, readback, ctrl_val, readback))
+
+        if not enabled:
+            print("WARNING: LEDUP%d could not be enabled — check CTRL register format" % proc)
+            ok = False
+
+    return ok
+
+
+def _ensure_bytecode_loaded(led):
+    """Load bytecode if PROGRAM_RAM is empty. Returns True on success."""
+    if led.read_program_ram(0, 0) != 0:
+        return True
+    soc_path = find_soc_path()
+    if not soc_path:
+        print("ERROR: led_proc_init.soc not found")
+        return False
+    return load_and_enable_ledup(led, soc_path)
+
+
 def cmd_set_passthrough(args):
     print("Not yet implemented (Task 9)")
 

@@ -254,6 +254,18 @@ static void dispatch_write_requests(int inotify_fd)
             continue;
 
         snprintf(path, sizeof(path), RUN_DIR "/%s", ev->name);
+
+        /* Read .set file content before unlink (some handlers need the value). */
+        char setfile_content[64] = "";
+        {
+            FILE *sf = fopen(path, "r");
+            if (sf) {
+                if (!fgets(setfile_content, sizeof(setfile_content), sf))
+                    setfile_content[0] = '\0';
+                setfile_content[strcspn(setfile_content, "\r\n")] = '\0';
+                fclose(sf);
+            }
+        }
         unlink(path);
 
         /* Special case: cpld_led_ctrl.set → read register, write result file */
@@ -263,6 +275,43 @@ static void dispatch_write_requests(int inotify_fd)
             if (bmc_ensure_connected() == 0 &&
                 bmc_read_int("i2cget -f -y 12 0x31 0x3c", 0, &val) == 0) {
                 snprintf(path, sizeof(path), RUN_DIR "/cpld_led_ctrl");
+                write_file(path, val);
+            }
+            continue;
+        }
+
+        /* led_ctrl_write.set → write value to CPLD 0x3c, read back */
+        if (strcmp(ev->name, "led_ctrl_write.set") == 0) {
+            int desired, actual;
+            char *end;
+            errno = 0;
+            desired = (int)strtol(setfile_content, &end, 0);
+            if (end == setfile_content || errno != 0) {
+                syslog(LOG_WARNING, "wedge100s-bmc-daemon: bad value in led_ctrl_write.set: '%s'",
+                       setfile_content);
+                continue;
+            }
+            syslog(LOG_INFO, "wedge100s-bmc-daemon: writing CPLD 0x3c = 0x%02x", desired);
+            if (bmc_ensure_connected() == 0) {
+                char bmc_cmd[128];
+                snprintf(bmc_cmd, sizeof(bmc_cmd),
+                         "i2cset -f -y 12 0x31 0x3c 0x%02x", desired & 0xFF);
+                bmc_run(bmc_cmd);
+                if (bmc_read_int("i2cget -f -y 12 0x31 0x3c", 0, &actual) == 0) {
+                    snprintf(path, sizeof(path), RUN_DIR "/cpld_led_ctrl");
+                    write_file(path, actual);
+                }
+            }
+            continue;
+        }
+
+        /* led_color_read.set → read CPLD 0x3d, write to cpld_led_color */
+        if (strcmp(ev->name, "led_color_read.set") == 0) {
+            int val;
+            syslog(LOG_INFO, "wedge100s-bmc-daemon: reading CPLD 0x3d");
+            if (bmc_ensure_connected() == 0 &&
+                bmc_read_int("i2cget -f -y 12 0x31 0x3d", 0, &val) == 0) {
+                snprintf(path, sizeof(path), RUN_DIR "/cpld_led_color");
                 write_file(path, val);
             }
             continue;

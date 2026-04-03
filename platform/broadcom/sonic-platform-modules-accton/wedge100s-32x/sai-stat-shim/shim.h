@@ -77,69 +77,60 @@ typedef struct {
 
 typedef sai_status_t (*sai_api_query_fn)(sai_api_t api, void **api_method_table);
 
-/* ---- BCM SDK stat types ---- */
-
-/* bcm_stat_val_t enum stubs — only the values used by the shim.
- * These are fixed by the BCM API specification (soberly documented in
- * $SDK/include/bcm/stat.h) and do not change across SDK versions. */
-enum {
-    snmpIfHCInOctets              = 39,
-    snmpIfHCInUcastPkts           = 40,
-    snmpIfHCInMulticastPkts       = 41,
-    snmpIfHCInBroadcastPkts       = 42,
-    snmpIfHCOutOctets             = 43,
-    snmpIfHCOutUcastPkts          = 44,
-    snmpIfHCOutMulticastPkts      = 45,
-    snmpIfHCOutBroadcastPckts     = 46,
-    snmpIfInDiscards              = 3,
-    snmpIfInErrors                = 4,
-    snmpIfInUnknownProtos         = 5,
-    snmpIfOutDiscards             = 9,
-    snmpIfOutErrors               = 10,
-    snmpEtherStatsUndersizePkts   = 15,
-    snmpEtherStatsFragments       = 16,
-    snmpEtherStatsOversizePkts    = 23,
-    snmpEtherRxOversizePkts       = 24,
-    snmpEtherTxOversizePkts       = 25,
-    snmpEtherStatsJabbers         = 26,
-    snmpEtherStatsTXNoErrors      = 34,
-    snmpEtherStatsPkts64Octets    = 17,
-    snmpEtherStatsPkts65to127Octets   = 18,
-    snmpEtherStatsPkts128to255Octets  = 19,
-    snmpEtherStatsPkts256to511Octets  = 20,
-    snmpEtherStatsPkts512to1023Octets = 21,
-    snmpEtherStatsPkts1024to1518Octets = 22,
-    snmpIfInBroadcastPkts         = 35,
-    snmpIfInMulticastPkts         = 36,
-    snmpIfOutBroadcastPkts        = 37,
-    snmpIfOutMulticastPkts        = 38,
-};
-
-/* Function pointer type for bcm_stat_multi_get, resolved via dlsym. */
-typedef int (*bcm_stat_multi_get_fn)(int unit, int port, int nstat,
-                                      int *stat_arr, uint64_t *value_arr);
-
 /* ---- Shim configuration ---- */
+#define SHIM_SOCKET_PATH    "/var/run/sswsyncd/sswsyncd.socket"
 #define SHIM_BCM_CONFIG_ENV "WEDGE100S_BCM_CONFIG"
+#define SHIM_CONNECT_TIMEOUT_MS  50
+#define SHIM_CONNECT_BACKOFF_MS  5000  /* after a failed connect, don't retry for 5s */
 #define SHIM_MAX_PORTS           256   /* bcmcmd ps shows ≤256 ports on Tomahawk */
 #define SHIM_MAX_OID_CACHE       512   /* max SAI port OIDs tracked */
 #define SHIM_MAX_STAT_IDS        80    /* max stat IDs in one get_port_stats call */
+#define SHIM_PORT_NAME_LEN       16    /* "xe86\0" fits in 6; 16 is generous */
 
 /* ---- stat_map.c types ---- */
 typedef struct {
     sai_port_stat_t  stat_id;
-    int              bcm_stat;    /* bcm_stat_val_t; -1 = return 0 */
-    int              bcm_stat2;   /* second stat to add; -1 = none */
+    const char      *name1;  /* bcmcmd counter name; NULL → return 0 */
+    const char      *name2;  /* second counter to add (for non-ucast sums); NULL if single */
 } stat_map_entry_t;
 
 extern const stat_map_entry_t g_stat_map[];
 extern const int              g_stat_map_size;
 int stat_map_index(sai_port_stat_t stat_id);  /* -1 if not found */
 
+/* ---- bcmcmd_client.c types ---- */
+
+/* One row in the port counter cache: port_name + value per stat_map index. */
+typedef struct {
+    char     port_name[SHIM_PORT_NAME_LEN];  /* "xe86", "ce0" */
+    int      sdk_port;                        /* numeric SDK port from ps */
+    uint64_t val[SHIM_MAX_STAT_IDS];         /* indexed by g_stat_map index */
+    /* Raw named counter lookup for name2 sums — flat table of (name, value) pairs. */
+    int      n_raw;
+    struct { char name[24]; uint64_t value; } raw[64];
+} port_row_t;
+
+typedef struct {
+    port_row_t      rows[SHIM_MAX_PORTS];
+    int             n_rows;
+    struct timespec fetched_at;    /* CLOCK_MONOTONIC */
+    pthread_mutex_t lock;
+} counter_cache_t;
+
+int  bcmcmd_connect(const char *path, int timeout_ms);   /* fd or -1 */
+void bcmcmd_close(int fd);
+/* Runs 'ps' → fills sdk_ports[]/port_names[] up to max entries.
+ * Returns count of ports parsed, or -1 on error. */
+int  bcmcmd_ps(int fd, int *sdk_ports, char port_names[][SHIM_PORT_NAME_LEN], int max);
+/* Runs 'show counters' → fills/refreshes cache rows.
+ * Caller holds no lock (this function acquires internally).
+ * Returns 0 on success, -1 on error. */
+int  bcmcmd_fetch_counters(int fd, counter_cache_t *cache);
+
 /* ---- shim.c internal bookkeeping ---- */
 typedef struct {
     sai_object_id_t oid;
-    int             is_flex;   /* 1 = use bcm_stat; 0 = passthrough */
+    int             is_flex;   /* 1 = use bcmcmd; 0 = passthrough */
     int             sdk_port;  /* set for flex ports */
     int             valid;
 } oid_entry_t;

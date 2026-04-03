@@ -198,20 +198,237 @@ def _ensure_bytecode_loaded(led):
     return load_and_enable_ledup(led, soc_path)
 
 
-def cmd_set_passthrough(args):
-    print("Not yet implemented (Task 9)")
-
-
 def cmd_set_color(args):
-    print("Not yet implemented (Task 7)")
+    """Software-drive all 32 ports to a single color.
+
+    Color is specified as ledup0/ledup1/both/off, referring to which
+    LEDUP processor(s) output active (1) for all ports.
+    """
+    color = args.color
+    cpld = ledup.CpldAccess()
+    cpld.write_led_ctrl(ledup.CPLD_PASSTHROUGH)
+
+    with ledup.LedupAccess() as led:
+        if not _ensure_bytecode_loaded(led):
+            sys.exit(1)
+
+        for proc in (0, 1):
+            if color == "off":
+                led.zero_data_ram(proc)
+                led.write_ctrl(proc, 0)
+            else:
+                active = (color == "both" or
+                          (color == "ledup0" and proc == 0) or
+                          (color == "ledup1" and proc == 1))
+                if active:
+                    for i in range(ledup.NUM_PORTS):
+                        led.write_data_ram(proc, i, ledup.BIT_LINK)
+                else:
+                    led.zero_data_ram(proc)
+
+        # Read back and report
+        for proc in (0, 1):
+            ctrl = led.read_ctrl(proc)
+            nz = sum(1 for i in range(ledup.NUM_PORTS) if led.read_data_ram(proc, i) != 0)
+            print("LEDUP%d: CTRL=0x%08x, DATA_RAM non-zero=%d/32" % (proc, ctrl, nz))
+
+    print("Set all ports to: %s" % color)
 
 
 def cmd_set_port(args):
-    print("Not yet implemented (Task 7)")
+    """Software-drive a single front-panel port to a color.
+
+    All other ports are set to off. Uses the SOC file remap table
+    to map front-panel port number to DATA_RAM index.
+    """
+    fp_port = args.port_num
+    color = args.color
+    cpld = ledup.CpldAccess()
+    cpld.write_led_ctrl(ledup.CPLD_PASSTHROUGH)
+
+    soc_path = find_soc_path()
+    if not soc_path:
+        print("ERROR: led_proc_init.soc not found")
+        sys.exit(1)
+
+    remap = ledup.parse_soc_remap(soc_path)
+    led_index = remap[fp_port]
+
+    with ledup.LedupAccess() as led:
+        if not _ensure_bytecode_loaded(led):
+            sys.exit(1)
+
+        for proc in (0, 1):
+            led.zero_data_ram(proc)
+
+            active = (color == "both" or
+                      (color == "ledup0" and proc == 0) or
+                      (color == "ledup1" and proc == 1))
+            if active:
+                led.write_data_ram(proc, led_index, ledup.BIT_LINK)
+
+        for proc in (0, 1):
+            val = led.read_data_ram(proc, led_index)
+            print("LEDUP%d DATA_RAM[%d] = 0x%02x" % (proc, led_index, val))
+
+    print("Set FP port %d (DATA_RAM[%d]) to: %s" % (fp_port, led_index, color))
 
 
 def cmd_probe(args):
-    print("Not yet implemented (Task 8)")
+    """Discover LED color mapping through automated test sequences.
+
+    Phase 1: CPLD test mode -- cycles through CPLD-generated patterns
+    Phase 2: BCM scan chain -- tests all 4 LEDUP0/LEDUP1 combinations
+    Phase 3: Per-port walk -- lights one port at a time
+
+    Each phase pauses for manual observation. Results saved to JSON.
+    """
+    results = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"), "phases": {}}
+    cpld = ledup.CpldAccess()
+
+    # -- Phase 1: CPLD test mode colors
+    print("=== Phase 1: CPLD Test Mode Colors ===")
+    print("Observe the front panel LEDs and note the color/pattern.")
+    phase1 = []
+
+    for steam in range(4):
+        val = ledup.CPLD_TEST_MODE_EN | (steam << 4)
+        cpld.write_led_ctrl(val)
+        readback = cpld.read_led_ctrl()
+        desc = "th_led_steam=%d, 0x3c=0x%02x" % (steam, readback)
+        print("\n[Phase 1.%d] %s" % (steam, desc))
+        print("  Press Enter after observing (type color description): ", end="")
+        observation = input().strip() or "not recorded"
+        phase1.append({"steam": steam, "reg_0x3c": "0x%02x" % readback,
+                       "observation": observation})
+
+    for name, val in [("blink", 0xE0), ("walk", 0x08)]:
+        cpld.write_led_ctrl(val)
+        readback = cpld.read_led_ctrl()
+        print("\n[Phase 1.%s] 0x3c=0x%02x" % (name, readback))
+        print("  Press Enter after observing (type description): ", end="")
+        observation = input().strip() or "not recorded"
+        phase1.append({"mode": name, "reg_0x3c": "0x%02x" % readback,
+                       "observation": observation})
+
+    results["phases"]["cpld_test_modes"] = phase1
+
+    # -- Phase 2: BCM scan chain combinations
+    print("\n=== Phase 2: BCM Scan Chain Combinations ===")
+    cpld.write_led_ctrl(ledup.CPLD_PASSTHROUGH)
+    phase2 = []
+
+    soc_path = find_soc_path()
+    with ledup.LedupAccess() as led:
+        if soc_path:
+            _ensure_bytecode_loaded(led)
+
+        combos = [
+            ("off/off", False, False),
+            ("on/off", True, False),
+            ("off/on", False, True),
+            ("on/on", True, True),
+        ]
+
+        for label, ledup0_on, ledup1_on in combos:
+            for proc in (0, 1):
+                active = (proc == 0 and ledup0_on) or (proc == 1 and ledup1_on)
+                if active:
+                    for i in range(ledup.NUM_PORTS):
+                        led.write_data_ram(proc, i, ledup.BIT_LINK)
+                else:
+                    led.zero_data_ram(proc)
+
+            print("\n[Phase 2] LEDUP0=%s LEDUP1=%s" % (
+                "active" if ledup0_on else "off",
+                "active" if ledup1_on else "off"))
+            print("  Press Enter after observing (type color): ", end="")
+            observation = input().strip() or "not recorded"
+            phase2.append({
+                "ledup0": "active" if ledup0_on else "off",
+                "ledup1": "active" if ledup1_on else "off",
+                "observation": observation,
+            })
+
+    results["phases"]["bcm_scan_chain"] = phase2
+
+    # -- Phase 3: Per-port walk
+    print("\n=== Phase 3: Per-Port Walk ===")
+    print("Lighting one port at a time (both LEDUP channels).")
+    phase3 = []
+
+    if soc_path:
+        remap = ledup.parse_soc_remap(soc_path)
+    else:
+        print("WARNING: no SOC file, using identity mapping")
+        remap = {fp: fp - 1 for fp in range(1, 33)}
+
+    with ledup.LedupAccess() as led:
+        _ensure_bytecode_loaded(led)
+
+        for fp in range(1, ledup.NUM_PORTS + 1):
+            led_idx = remap[fp]
+            for proc in (0, 1):
+                led.zero_data_ram(proc)
+                led.write_data_ram(proc, led_idx, ledup.BIT_LINK)
+
+            print("[Phase 3] FP%d (DATA_RAM[%d]) -- observe which cage lights up: " % (
+                fp, led_idx), end="")
+            observation = input().strip() or "ok"
+            phase3.append({"fp_port": fp, "data_ram_index": led_idx,
+                           "observation": observation})
+
+        for proc in (0, 1):
+            led.zero_data_ram(proc)
+
+    results["phases"]["per_port_walk"] = phase3
+
+    # -- Save results
+    os.makedirs(ledup.RUN_DIR, exist_ok=True)
+    with open(PROBE_RESULTS_PATH, "w") as f:
+        json.dump(results, f, indent=2)
+    print("\nResults saved to %s" % PROBE_RESULTS_PATH)
+
+    cpld.write_led_ctrl(ledup.CPLD_PASSTHROUGH)
+    print("Restored CPLD to passthrough mode.")
+
+
+def cmd_set_passthrough(args):
+    """Restore full LED pipeline: CPLD passthrough + bytecode + auto.
+
+    Equivalent to what ledinit should do via bcmcmd:
+    1. Load led_proc_init.soc bytecode into PROGRAM_RAM
+    2. Enable LEDUP processors
+    3. Set CPLD to passthrough mode (0x02)
+
+    PORT_ORDER_REMAP registers are NOT written (BAR2 offsets unknown).
+    If port-to-LED mapping is wrong, remap offsets must be discovered
+    separately via bcmcmd or SDK headers.
+    """
+    soc_path = find_soc_path()
+    if not soc_path:
+        print("ERROR: led_proc_init.soc not found")
+        sys.exit(1)
+
+    cpld = ledup.CpldAccess()
+    cpld.write_led_ctrl(ledup.CPLD_PASSTHROUGH)
+    readback = cpld.read_led_ctrl()
+    print("CPLD 0x3c = 0x%02x -- %s" % (
+        readback, "PASS" if readback == ledup.CPLD_PASSTHROUGH else "FAIL"))
+
+    with ledup.LedupAccess() as led:
+        ok = load_and_enable_ledup(led, soc_path)
+        if ok:
+            print("\nPassthrough mode active. LEDUP processors running.")
+            print("Port LEDs should now reflect live link/speed status.")
+            print("\nNOTE: PORT_ORDER_REMAP not configured via /dev/mem.")
+            print("If port LEDs show wrong positions, remap offsets need discovery.")
+        else:
+            print("\nWARNING: Bytecode loaded but LEDUP enable may have failed.")
+            print("Run 'status' to inspect register state.")
+
+    print("\n--- Post-passthrough status ---")
+    cmd_status(argparse.Namespace())
 
 
 def main():

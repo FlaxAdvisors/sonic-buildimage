@@ -81,6 +81,7 @@ typedef sai_status_t (*sai_api_query_fn)(sai_api_t api, void **api_method_table)
 #define SHIM_SOCKET_PATH    "/var/run/sswsyncd/sswsyncd.socket"
 #define SHIM_BCM_CONFIG_ENV "WEDGE100S_BCM_CONFIG"
 #define SHIM_CONNECT_TIMEOUT_MS  50
+#define SHIM_CONNECT_BACKOFF_MS  5000  /* after a failed connect, don't retry for 5s */
 #define SHIM_MAX_PORTS           256   /* bcmcmd ps shows ≤256 ports on Tomahawk */
 #define SHIM_MAX_OID_CACHE       512   /* max SAI port OIDs tracked */
 #define SHIM_MAX_STAT_IDS        80    /* max stat IDs in one get_port_stats call */

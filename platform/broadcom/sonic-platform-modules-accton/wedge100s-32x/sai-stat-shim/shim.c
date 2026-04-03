@@ -128,15 +128,35 @@ static void bcmcmd_init_ps(void)
     syslog(LOG_INFO, "shim: bcmcmd ps fetched %d ports (connect-on-demand)", n);
 }
 
+/* Last failed connect time — used to back off retries so we don't block
+ * syncd threads for 3s (banner timeout) on every stats poll.  If bcmcmd
+ * is unreachable, we return stale cache data instead of blocking. */
+static struct timespec g_last_connect_fail;
+
 /* Refresh counter cache via a transient bcmcmd connection.
  * Each call: connect -> show counters -> disconnect (~70ms).
  * The g_cache.lock mutex protects concurrent readers.
  * If two threads call simultaneously, both do independent fetches —
- * deltas accumulate correctly since bcmcmd tracks totals internally. */
+ * deltas accumulate correctly since bcmcmd tracks totals internally.
+ * On connect failure, backs off for SHIM_CONNECT_BACKOFF_MS to avoid
+ * blocking syncd threads with repeated 3s banner timeouts. */
 static void refresh_cache(void)
 {
+    /* Backoff: if the last connect failed recently, skip this attempt. */
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long since_fail_ms = (now.tv_sec  - g_last_connect_fail.tv_sec)  * 1000 +
+                         (now.tv_nsec - g_last_connect_fail.tv_nsec) / 1000000;
+    if (g_last_connect_fail.tv_sec != 0 && since_fail_ms < SHIM_CONNECT_BACKOFF_MS)
+        return;
+
     int fd = bcmcmd_connect(SHIM_SOCKET_PATH, SHIM_CONNECT_TIMEOUT_MS);
-    if (fd < 0) return;
+    if (fd < 0) {
+        clock_gettime(CLOCK_MONOTONIC, &g_last_connect_fail);
+        return;
+    }
+    /* Clear backoff on success. */
+    g_last_connect_fail.tv_sec = 0;
 
     /* If ps map is empty (syncd wasn't ready at init), try now. */
     if (g_ps_map_size == 0) {

@@ -80,19 +80,23 @@ def daemon_read_led_color():
         f.write("\n")
 
 
-def read_result_file(name, timeout=5.0):
+def snapshot_mtime(name):
+    """Return current mtime of /run/wedge100s/<name>, or 0 if missing."""
+    path = os.path.join(RUN_DIR, name)
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0
+
+
+def read_result_file(name, old_mtime=0, timeout=5.0):
     """Read an integer result from /run/wedge100s/<name>.
 
-    Polls until the file mtime changes or timeout. Returns int or None.
+    Polls until the file mtime is strictly greater than old_mtime, or
+    timeout. Returns int or None. Caller should capture old_mtime with
+    snapshot_mtime() BEFORE triggering the daemon action.
     """
     path = os.path.join(RUN_DIR, name)
-
-    # Record current mtime (if file exists) so we can detect updates
-    old_mtime = 0
-    try:
-        old_mtime = os.path.getmtime(path)
-    except OSError:
-        pass
 
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -113,13 +117,24 @@ def read_result_file(name, timeout=5.0):
         return None
 
 
-def write_and_verify(value, label=""):
+def write_and_verify(value, label="", retries=3):
     """Write a CPLD 0x3c value via daemon, read back, compare.
 
+    Retries the write if the inotify event was lost (coalesced by kernel
+    when the daemon is busy with its 10-second sensor poll tick).
     Returns dict with intended, actual, match fields.
     """
-    daemon_write_led_ctrl(value)
-    actual = read_result_file("cpld_led_ctrl")
+    actual = None
+    for attempt in range(1 + retries):
+        mt = snapshot_mtime("cpld_led_ctrl")
+        daemon_write_led_ctrl(value)
+        actual = read_result_file("cpld_led_ctrl", mt, timeout=12.0)
+        if actual == value:
+            break
+        if attempt < retries:
+            # inotify event was likely coalesced — wait for daemon to
+            # finish its current cycle before retrying
+            time.sleep(2)
 
     result = {
         "label": label,
@@ -139,11 +154,13 @@ def write_and_verify(value, label=""):
 
 def cmd_status():
     """Read and decode CPLD LED registers via bmc-daemon."""
+    mt_ctrl = snapshot_mtime("cpld_led_ctrl")
+    mt_color = snapshot_mtime("cpld_led_color")
     daemon_read_led_ctrl()
     daemon_read_led_color()
 
-    ctrl = read_result_file("cpld_led_ctrl")
-    color = read_result_file("cpld_led_color")
+    ctrl = read_result_file("cpld_led_ctrl", mt_ctrl)
+    color = read_result_file("cpld_led_color", mt_color)
 
     if ctrl is None:
         print("ERROR: could not read CPLD 0x3c via daemon (timeout)")

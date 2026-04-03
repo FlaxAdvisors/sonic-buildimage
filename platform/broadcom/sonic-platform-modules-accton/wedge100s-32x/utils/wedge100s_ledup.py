@@ -15,15 +15,18 @@ import struct
 import subprocess
 
 # -- BCM56960 LEDUP register offsets within PCIe BAR2 ---------------------
+# These are CMIC space offsets (0x2xxxx), NOT iProc space (0x3xxxx).
+# Confirmed by scanning BAR2 for bytecode signature 02 FD 42 80 at 0x20800.
+# (verified on hardware 2026-04-03)
 
-LEDUP0_CTRL = 0x34000
-LEDUP0_STATUS = 0x34004
-LEDUP0_PROGRAM_RAM_BASE = 0x34100   # + 4*n, n=0..255
-LEDUP0_DATA_RAM_BASE = 0x34800      # + 4*n, n=0..255
-LEDUP1_CTRL = 0x34400
-LEDUP1_STATUS = 0x34404
-LEDUP1_PROGRAM_RAM_BASE = 0x34500
-LEDUP1_DATA_RAM_BASE = 0x34C00
+LEDUP0_CTRL = 0x20000
+LEDUP0_STATUS = 0x20004
+LEDUP0_PROGRAM_RAM_BASE = 0x20800   # + 4*n, n=0..255
+LEDUP0_DATA_RAM_BASE = 0x20400      # + 4*n, n=0..255
+LEDUP1_CTRL = 0x21000
+LEDUP1_STATUS = 0x21004
+LEDUP1_PROGRAM_RAM_BASE = 0x21800
+LEDUP1_DATA_RAM_BASE = 0x21400
 
 NUM_PORTS = 32
 PROGRAM_RAM_SIZE = 256

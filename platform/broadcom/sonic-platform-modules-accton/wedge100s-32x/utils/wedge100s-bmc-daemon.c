@@ -15,9 +15,10 @@
  *   - popen(ssh … 'bmc-cmd') replaces the TTY send_cmd/read_until loop.
  *     Output is clean (no echo, no prompt noise): first line → strtol().
  *   - Write-requests: platform code writes /run/wedge100s/<file>.set;
- *     daemon reads, dispatches via SSH, removes file.  Sysfs attribute
- *     writes are used (not raw i2cset) to go through the syscpld kernel
- *     driver's i2c lock.
+ *     dispatch_write_requests() detects via inotify, runs the mapped BMC
+ *     command via SSH, removes the .set file.  Sysfs attribute writes are
+ *     used on the BMC side (not raw i2cset) to go through the syscpld
+ *     kernel driver's i2c lock.  See write_requests[] dispatch table.
  *
  * Output files — all plain decimal integers in /run/wedge100s/:
  *   thermal_{1..7}                 TMP75 temperature in millidegrees C
@@ -227,11 +228,55 @@ static int bmc_ensure_connected(void)
     return bmc_connect();
 }
 
-static void drain_inotify_bmc(int inotify_fd)
+/* Dispatch table: .set filename → BMC command */
+static const struct {
+    const char *setfile;
+    const char *bmc_cmd;
+} write_requests[] = {
+    { "clear_led_diag.set", "/usr/local/bin/clear_led_diag.sh" },
+};
+
+static void dispatch_write_requests(int inotify_fd)
 {
     char ibuf[sizeof(struct inotify_event) + NAME_MAX + 1];
-    while (read(inotify_fd, ibuf, sizeof(ibuf)) > 0)
-        ;
+    ssize_t n;
+
+    while ((n = read(inotify_fd, ibuf, sizeof(ibuf))) > 0) {
+        struct inotify_event *ev = (struct inotify_event *)ibuf;
+        char path[256];
+        size_t i, nlen;
+
+        if (!(ev->mask & IN_CLOSE_WRITE) || ev->len == 0)
+            continue;
+
+        nlen = strlen(ev->name);
+        if (nlen < 4 || strcmp(ev->name + nlen - 4, ".set") != 0)
+            continue;
+
+        snprintf(path, sizeof(path), RUN_DIR "/%s", ev->name);
+        unlink(path);
+
+        /* Special case: cpld_led_ctrl.set → read register, write result file */
+        if (strcmp(ev->name, "cpld_led_ctrl.set") == 0) {
+            int val;
+            syslog(LOG_INFO, "wedge100s-bmc-daemon: reading CPLD 0x3c");
+            if (bmc_ensure_connected() == 0 &&
+                bmc_read_int("i2cget -f -y 12 0x31 0x3c", 0, &val) == 0) {
+                snprintf(path, sizeof(path), RUN_DIR "/cpld_led_ctrl");
+                write_file(path, val);
+            }
+            continue;
+        }
+
+        for (i = 0; i < sizeof(write_requests) / sizeof(write_requests[0]); i++) {
+            if (strcmp(ev->name, write_requests[i].setfile) == 0) {
+                syslog(LOG_INFO, "wedge100s-bmc-daemon: dispatching %s", ev->name);
+                if (bmc_ensure_connected() == 0)
+                    bmc_run(write_requests[i].bmc_cmd);
+                break;
+            }
+        }
+    }
 }
 
 /* ── main ────────────────────────────────────────────────────────────────── */
@@ -305,9 +350,9 @@ int main(void)
             return 1;
         }
 
-        /* inotify: placeholder for future BMC write-request consumers */
+        /* inotify: dispatch .set write-requests to BMC */
         if (pfds[1].revents & POLLIN)
-            drain_inotify_bmc(inotify_fd);
+            dispatch_write_requests(inotify_fd);
 
         /* timer: 10s tick — full BMC sensor poll */
         if (pfds[0].revents & POLLIN) {

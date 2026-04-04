@@ -1,7 +1,7 @@
 # Makefile for wedge100s-flex-counter-daemon
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -g
-LDFLAGS = -lhiredis -lpthread
+LDFLAGS = -Wl,-Bstatic -lhiredis -Wl,-Bdynamic -lpthread
 
 OBJS = daemon.o bcmcmd_client.o stat_map.o compat.o
 

@@ -559,7 +559,7 @@ fi
 if command -v docker >/dev/null 2>&1; then
     SYNCD_STATUS=$(docker inspect --format='{{.State.Status}}' syncd 2>/dev/null || true)
     if [ "$SYNCD_STATUS" = "running" ]; then
-        docker exec syncd sh -c 'cat > /etc/supervisor/conf.d/flex-counter-daemon.conf' <<'SUPEOF'
+        docker exec -i syncd sh -c 'cat > /etc/supervisor/conf.d/flex-counter-daemon.conf' <<'SUPEOF'
 [program:flex-counter-daemon]
 command=/usr/bin/wedge100s-flex-counter-daemon
 priority=100

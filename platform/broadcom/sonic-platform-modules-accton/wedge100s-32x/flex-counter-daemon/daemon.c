@@ -25,7 +25,6 @@
 #define DAEMON_NAME        "flex-counter-daemon"
 #define POLL_INTERVAL_S    3
 #define CONNECT_TIMEOUT_MS 50
-#define FLEX_KEY_THRESHOLD 2
 #define MAX_LANE_MAP       512
 #define MAX_PS_MAP         256
 #define REDIS_TIMEOUT_MS   500
@@ -142,35 +141,30 @@ static redisContext *redis_connect(int db)
     return c;
 }
 
-/* Check how many SAI_PORT_STAT_* keys exist for an OID in COUNTERS_DB.
- * Returns key count, or -1 on error. */
-static int counters_key_count(redisContext *c, const char *oid)
+/* Count lanes in a comma-separated lane string (e.g. "117" = 1, "5,6,7,8" = 4). */
+static int count_lanes(const char *lanes_str)
 {
-    redisReply *r = redisCommand(c, "HKEYS COUNTERS:%s", oid);
-    if (!r || r->type != REDIS_REPLY_ARRAY) {
-        if (r) freeReplyObject(r);
-        return -1;
-    }
-    int count = 0;
-    for (size_t i = 0; i < r->elements; i++) {
-        if (r->element[i]->type == REDIS_REPLY_STRING &&
-            strncmp(r->element[i]->str, "SAI_PORT_STAT_", 14) == 0)
-            count++;
-    }
-    freeReplyObject(r);
+    int count = 1;
+    for (const char *p = lanes_str; *p; p++)
+        if (*p == ',') count++;
     return count;
 }
 
 /* Resolve Ethernet port name -> bcmcmd port name via CONFIG_DB lanes -> lane_map -> ps_map.
+ * Sets *n_lanes to the number of lanes for this port.
  * Returns NULL if resolution fails. */
-static const char *resolve_port(redisContext *cfg_db, const char *eth_name)
+static const char *resolve_port(redisContext *cfg_db, const char *eth_name, int *n_lanes)
 {
+    *n_lanes = 0;
+
     /* Get lanes from CONFIG_DB PORT|EthernetN */
     redisReply *r = redisCommand(cfg_db, "HGET PORT|%s lanes", eth_name);
     if (!r || r->type != REDIS_REPLY_STRING || !r->str) {
         if (r) freeReplyObject(r);
         return NULL;
     }
+
+    *n_lanes = count_lanes(r->str);
 
     /* lanes is a comma-separated list; use the first lane for port lookup. */
     uint32_t first_lane = (uint32_t)atoi(r->str);
@@ -300,19 +294,18 @@ int main(void)
             continue;
         }
 
-        /* For each port in the map, check if it's flex. */
+        /* For each port in the map, check if it's a flex sub-port. */
         for (size_t i = 0; i + 1 < map_reply->elements; i += 2) {
             const char *eth_name = map_reply->element[i]->str;
             const char *oid      = map_reply->element[i + 1]->str;
             if (!eth_name || !oid) continue;
 
-            /* Check key count — flex ports have <=2 keys. */
-            int nkeys = counters_key_count(cdb, oid);
-            if (nkeys < 0 || nkeys > FLEX_KEY_THRESHOLD) continue;
-
-            /* Resolve Ethernet -> bcmcmd port name. */
-            const char *pname = resolve_port(cfgdb, eth_name);
+            /* Resolve Ethernet -> bcmcmd port name and get lane count.
+             * Flex sub-ports have fewer than 4 lanes (breakout from 100G). */
+            int n_lanes = 0;
+            const char *pname = resolve_port(cfgdb, eth_name, &n_lanes);
             if (!pname) continue;
+            if (n_lanes >= 4) continue;  /* native 100G port — skip */
 
             /* Find the port in the counter cache. */
             pthread_mutex_lock(&g_cache.lock);

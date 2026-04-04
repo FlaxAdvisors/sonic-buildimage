@@ -49,6 +49,9 @@ override_dh_auto_clean:
 		if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ]; then \
 			$(MAKE) -C $(MOD_SRC_DIR)/$${mod}/sai-stat-shim clean; \
 		fi; \
+		if [ -d $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon ]; then \
+			$(MAKE) -C $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon clean; \
+		fi; \
 	done)
 	dh_clean
 
@@ -85,6 +88,10 @@ override_dh_auto_build:
 		if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ]; then \
 			$(MAKE) $(MAKE_FLAGS) -C $(MOD_SRC_DIR)/$${mod}/sai-stat-shim libsai-stat-shim.so; \
 			echo "Built libsai-stat-shim.so for $$mod"; \
+		fi; \
+		if [ -d $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon ]; then \
+			$(MAKE) $(MAKE_FLAGS) -C $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon; \
+			echo "Built wedge100s-flex-counter-daemon for $$mod"; \
 		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/pddf ]; then \
 			cd $(MOD_SRC_DIR)/$${mod}/pddf; \
@@ -124,15 +131,15 @@ override_dh_auto_install:
 		if [ -f $(MOD_SRC_DIR)/$${mod}/setup.py ]; then \
 			PYBUILD_NAME=$${mod} pybuild --install -d $${mod} --dest-dir debian/$(PACKAGE_PRE_NAME)-$${mod}; \
 		fi; \
-		if [ -d $(MOD_SRC_DIR)/$${mod}/etc/systemd/system ]; then \
-				dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} etc/systemd/system; \
-				cp -r $(MOD_SRC_DIR)/$${mod}/etc/systemd/system/* \
-				   debian/$(PACKAGE_PRE_NAME)-$${mod}/etc/systemd/system/; \
-			fi; \
-			if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ] && \
+		if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ] && \
 		   [ -f $(MOD_SRC_DIR)/$${mod}/sai-stat-shim/libsai-stat-shim.so ]; then \
 			dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0; \
 			cp $(MOD_SRC_DIR)/$${mod}/sai-stat-shim/libsai-stat-shim.so \
 			   debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/; \
+		fi; \
+		if [ -d $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon ] && \
+		   [ -f $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon/wedge100s-flex-counter-daemon ]; then \
+			cp $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon/wedge100s-flex-counter-daemon \
+			   debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/bin/; \
 		fi; \
 	done)

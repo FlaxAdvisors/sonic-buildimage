@@ -553,6 +553,46 @@ print("wedge100s postinst: patched " + SYNCD_SH + " — shim LD_PRELOAD added")
 PYEOF
 fi
 
+# Install flex-counter-daemon supervisor config inside syncd container.
+# The daemon runs inside syncd (needs bcmcmd socket + Redis access).
+# supervisor is the process manager inside all SONiC Docker containers.
+if command -v docker >/dev/null 2>&1; then
+    SYNCD_STATUS=$(docker inspect --format='{{.State.Status}}' syncd 2>/dev/null || true)
+    if [ "$SYNCD_STATUS" = "running" ]; then
+        docker exec syncd sh -c 'cat > /etc/supervisor/conf.d/flex-counter-daemon.conf' <<'SUPEOF'
+[program:flex-counter-daemon]
+command=/usr/bin/wedge100s-flex-counter-daemon
+priority=100
+autostart=true
+autorestart=true
+startsecs=10
+startretries=3
+stdout_logfile=syslog
+stderr_logfile=syslog
+environment=WEDGE100S_BCM_CONFIG="/usr/share/sonic/hwsku/th-wedge100s-32x-flex.config.bcm"
+SUPEOF
+        docker exec syncd supervisorctl reread >/dev/null 2>&1 || true
+        docker exec syncd supervisorctl update >/dev/null 2>&1 || true
+        echo "wedge100s postinst: installed flex-counter-daemon supervisor config in syncd"
+    else
+        echo "wedge100s postinst: NOTE: syncd not running — flex-counter-daemon config will be installed on next restart"
+    fi
+fi
+
+# Copy the flex-counter-daemon binary into the running syncd container.
+# The binary is installed to the host at /usr/bin/ by the .deb;
+# syncd's filesystem is isolated, so we docker cp it in.
+if command -v docker >/dev/null 2>&1; then
+    SYNCD_STATUS=$(docker inspect --format='{{.State.Status}}' syncd 2>/dev/null || true)
+    if [ "$SYNCD_STATUS" = "running" ]; then
+        if [ -f /usr/bin/wedge100s-flex-counter-daemon ]; then
+            docker cp /usr/bin/wedge100s-flex-counter-daemon syncd:/usr/bin/ 2>/dev/null || true
+            docker exec syncd supervisorctl start flex-counter-daemon 2>/dev/null || true
+            echo "wedge100s postinst: copied and started flex-counter-daemon in syncd"
+        fi
+    fi
+fi
+
 # system-health (healthd) blocks on a Redis wait when it receives SIGTERM during
 # shutdown — Redis is already stopped by that point.  healthd has no signal handler
 # that interrupts the blocking DB call, so it hangs for the full DefaultTimeoutStopSec

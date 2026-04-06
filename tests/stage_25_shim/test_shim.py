@@ -1092,3 +1092,149 @@ def test_counter_parity_via_iperf(ssh):
     )
     print(f"\nCounter parity verified for {len(pairs_to_test)} pairs "
           f"in both directions ✓")
+
+
+# ---------------------------------------------------------------------------
+# DPB counter-continuity test
+# ---------------------------------------------------------------------------
+
+def test_dpb_counter_continuity(ssh):
+    """Witness-port counters survive a DPB event on an unrelated QSFP group.
+
+    A DPB on Ethernet80-83 (QSFP group, no 100G peer → link-down in 1x100G mode)
+    must not corrupt counters on witness ports Ethernet0/1/66/67 that have live
+    links.  The test verifies:
+      1. Byte counters are monotonically non-decreasing throughout all phases.
+      2. Rates remain within physical link-speed limits at all checkpoints.
+      3. Total byte delta since baseline is bounded by link_speed × elapsed_time
+         (detects the 87 MB/s-on-25G counter explosion / EWMA divergence pattern).
+
+    Subject:   Ethernet80-83  (4x25G → 1x100G → 4x25G)
+    Witnesses: Ethernet0, Ethernet1, Ethernet66, Ethernet67  (link-up)
+    """
+    DPB_PARENT  = "Ethernet80"
+    DPB_PORTS   = ["Ethernet80", "Ethernet81", "Ethernet82", "Ethernet83"]
+    WITNESSES   = ["Ethernet0", "Ethernet1", "Ethernet66", "Ethernet67"]
+    DPB_TIMEOUT = 20
+
+    # Pre-compute byte-rate ceilings for witnesses (CONFIG_DB speed field)
+    speed_bps_by_port = {p: _get_speed_bps(ssh, p) for p in WITNESSES}
+
+    # ------------------------------------------------------------------
+    # Phase 1: baseline — confirm daemon is active on all 12 FLEX_PORTS
+    # ------------------------------------------------------------------
+    print("\n=== Phase 1: baseline ===")
+
+    phase1_oids = {p: _get_oid(ssh, p) for p in FLEX_PORTS}
+    for port in FLEX_PORTS:
+        assert phase1_oids[port], (
+            f"{port} has no OID in COUNTERS_PORT_NAME_MAP. "
+            "Switch must be in standard breakout config (run tools/deploy.py)."
+        )
+
+    phase1_snap = _counters_snapshot(ssh, FLEX_PORTS)
+    phase1_time = time.time()
+
+    _assert_rates_sane(ssh, FLEX_PORTS)
+    print("  Baseline rates sane for all 12 FLEX_PORTS ✓")
+
+    # 12s sleep: at least one witness must accumulate bytes (daemon-liveness proof)
+    _assert_bytes_growing(ssh, WITNESSES, wait_s=12)
+
+    try:
+        # ------------------------------------------------------------------
+        # Phase 2: DPB Ethernet80 → 1x100G[40G]
+        # ------------------------------------------------------------------
+        print("\n=== Phase 2: DPB Ethernet80 → 1x100G[40G] ===")
+        pre_dpb_snap = _counters_snapshot(ssh, WITNESSES)
+
+        out, err, rc = ssh.run(
+            f"sudo config interface breakout {DPB_PARENT} '1x100G[40G]' -y -f -l",
+            timeout=30,
+        )
+        assert rc == 0, (
+            f"DPB to 1x100G failed (rc={rc}): {err.strip()[:300]}\n{out.strip()[:300]}"
+        )
+
+        # Sub-port OIDs Ethernet81-83 must disappear from COUNTERS_PORT_NAME_MAP
+        _wait_for_oids(ssh, ["Ethernet81", "Ethernet82", "Ethernet83"],
+                       present=False, timeout_s=DPB_TIMEOUT)
+        # New 1x100G OID for Ethernet80 must appear
+        _wait_for_oids(ssh, [DPB_PARENT], present=True, timeout_s=DPB_TIMEOUT)
+
+        # Allow 3 daemon cycles (~3s each) to detect OID change and re-stabilize
+        print("  Waiting 9s for daemon to re-stabilize after DPB...")
+        time.sleep(9)
+
+        _assert_rates_sane(ssh, WITNESSES)
+        print("  Post-DPB witness rates sane ✓")
+
+        post_dpb_snap = _counters_snapshot(ssh, WITNESSES)
+        _assert_bytes_monotone(pre_dpb_snap, post_dpb_snap, WITNESSES)
+        print("  Post-DPB witness bytes monotone ✓")
+
+        # ------------------------------------------------------------------
+        # Phase 3: post-DPB continuity (the key check)
+        # ------------------------------------------------------------------
+        print("\n=== Phase 3: physics-bound continuity check ===")
+        elapsed = time.time() - phase1_time
+        _assert_bytes_bounded(phase1_snap, post_dpb_snap, speed_bps_by_port, elapsed)
+        print(f"  Physics bound satisfied ({elapsed:.0f}s since baseline) ✓")
+
+        # Daemon still writing after DPB
+        _assert_bytes_growing(ssh, WITNESSES, wait_s=12)
+
+        # ------------------------------------------------------------------
+        # Phase 4: DPB Ethernet80 → 4x25G[10G] (restore)
+        # ------------------------------------------------------------------
+        print("\n=== Phase 4: DPB Ethernet80 → 4x25G[10G] (restore) ===")
+        pre_restore_snap = _counters_snapshot(ssh, WITNESSES)
+
+        out, err, rc = ssh.run(
+            f"sudo config interface breakout {DPB_PARENT} '4x25G[10G]' -y -f -l",
+            timeout=30,
+        )
+        assert rc == 0, (
+            f"DPB restore to 4x25G failed (rc={rc}): {err.strip()[:300]}\n{out.strip()[:300]}"
+        )
+
+        _wait_for_oids(ssh, DPB_PORTS, present=True, timeout_s=DPB_TIMEOUT)
+
+        # Allow daemon to detect new OIDs, remove from FlexCounter, begin writing
+        print("  Waiting 9s for daemon to re-engage after restore...")
+        time.sleep(9)
+
+        # All 12 FLEX_PORTS must be sane after full round-trip
+        _assert_rates_sane(ssh, FLEX_PORTS)
+        print("  All 12 FLEX_PORTS rates sane after restore ✓")
+
+        post_restore_snap = _counters_snapshot(ssh, WITNESSES)
+        _assert_bytes_monotone(pre_restore_snap, post_restore_snap, WITNESSES)
+        print("  Post-restore witness bytes monotone ✓")
+
+        print("\n=== DPB counter continuity: PASS ===")
+
+    finally:
+        # Always restore Ethernet80 to 4x25G[10G] regardless of test outcome
+        mode_out, _, _ = ssh.run(
+            f"redis-cli -n 4 hget 'BREAKOUT_CFG|{DPB_PARENT}' brkout_mode",
+            timeout=10,
+        )
+        if mode_out.strip() != "4x25G[10G]":
+            print(f"\n  [cleanup] Restoring {DPB_PARENT} to 4x25G[10G]...")
+            ssh.run(
+                f"sudo config interface breakout {DPB_PARENT} '4x25G[10G]' -y -f -l",
+                timeout=30,
+            )
+            _wait_for_oids(ssh, DPB_PORTS, present=True, timeout_s=30)
+            print(f"  [cleanup] {DPB_PARENT} restored to 4x25G[10G]")
+
+        # DPB removes sub-ports from VLAN 10; re-add them so subsequent tests
+        # (sonic-clear counters, iperf parity) have L2 connectivity.
+        for sp in DPB_PORTS:
+            vlan_check, _, _ = ssh.run(
+                f"redis-cli -n 4 exists 'VLAN_MEMBER|Vlan10|{sp}'", timeout=5
+            )
+            if vlan_check.strip() != "1":
+                ssh.run(f"sudo config vlan member add 10 {sp}", timeout=10)
+                print(f"  [cleanup] Re-added {sp} to VLAN 10")

@@ -391,7 +391,7 @@ def _assert_bytes_bounded(phase1_snap, current_snap, speed_bps_by_port, elapsed_
     """
     violations = []
     for port in set(phase1_snap) & set(current_snap):
-        speed_bps = speed_bps_by_port.get(port, 3_125_000)
+        speed_bps = speed_bps_by_port.get(port, 3_125_000_000)  # default: 25G in bytes/sec
         ceiling = speed_bps * elapsed_s * 1.1
         for idx, direction in enumerate(["IF_IN_OCTETS", "IF_OUT_OCTETS"]):
             delta = current_snap[port][idx] - phase1_snap[port][idx]
@@ -1155,6 +1155,9 @@ def test_dpb_counter_continuity(ssh):
         assert rc == 0, (
             f"DPB to 1x100G failed (rc={rc}): {err.strip()[:300]}\n{out.strip()[:300]}"
         )
+        assert "successfully completed" in out, (
+            f"DPB to 1x100G: unexpected output (may have silently failed): {out.strip()[:300]}"
+        )
 
         # Sub-port OIDs Ethernet81-83 must disappear from COUNTERS_PORT_NAME_MAP
         _wait_for_oids(ssh, ["Ethernet81", "Ethernet82", "Ethernet83"],
@@ -1197,6 +1200,9 @@ def test_dpb_counter_continuity(ssh):
         assert rc == 0, (
             f"DPB restore to 4x25G failed (rc={rc}): {err.strip()[:300]}\n{out.strip()[:300]}"
         )
+        assert "successfully completed" in out, (
+            f"DPB restore to 4x25G: unexpected output (may have silently failed): {out.strip()[:300]}"
+        )
 
         _wait_for_oids(ssh, DPB_PORTS, present=True, timeout_s=DPB_TIMEOUT)
 
@@ -1212,6 +1218,13 @@ def test_dpb_counter_continuity(ssh):
         _assert_bytes_monotone(pre_restore_snap, post_restore_snap, WITNESSES)
         print("  Post-restore witness bytes monotone ✓")
 
+        # End-to-end monotone check: witnesses never went backwards over the full test.
+        # _assert_bytes_monotone skips ports absent from either dict, so passing
+        # phase1_snap (12 ports) and post_restore_snap (4 ports) correctly checks
+        # only the 4 witnesses.
+        _assert_bytes_monotone(phase1_snap, post_restore_snap, WITNESSES)
+        print("  Full-test witness bytes monotone (phase1 → post-restore) ✓")
+
         print("\n=== DPB counter continuity: PASS ===")
 
     finally:
@@ -1226,8 +1239,11 @@ def test_dpb_counter_continuity(ssh):
                 f"sudo config interface breakout {DPB_PARENT} '4x25G[10G]' -y -f -l",
                 timeout=30,
             )
-            _wait_for_oids(ssh, DPB_PORTS, present=True, timeout_s=30)
-            print(f"  [cleanup] {DPB_PARENT} restored to 4x25G[10G]")
+            try:
+                _wait_for_oids(ssh, DPB_PORTS, present=True, timeout_s=30)
+                print(f"  [cleanup] {DPB_PARENT} restored to 4x25G[10G]")
+            except AssertionError as e:
+                print(f"  [cleanup] WARNING: OID wait after restore failed: {e}")
 
         # DPB removes sub-ports from VLAN 10; re-add them so subsequent tests
         # (sonic-clear counters, iperf parity) have L2 connectivity.

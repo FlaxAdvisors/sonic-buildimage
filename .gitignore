@@ -140,3 +140,4 @@ CLAUDE.md
 guides/*.pdf
 guides/*.html
 _tmp*.html
+misc/*

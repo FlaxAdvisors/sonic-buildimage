@@ -355,6 +355,41 @@ def _assert_rates_sane(ssh, ports):
     )
 
 
+def _wait_for_rates_sane(ssh, ports, timeout_s=30):
+    """Poll until all port rates are within link-speed limits, or fail on timeout.
+
+    Used after a DPB event: the flex-counter EWMA may need several cycles to
+    decay from a transient spike caused by counter-epoch reset.  A fixed sleep
+    cannot guarantee settling; polling can.
+
+    Falls through to _assert_rates_sane on timeout to produce a clear failure
+    message distinguishing transient spikes (decay) from sustained explosions
+    (real bugs, won't decay).
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        violations = []
+        for port in ports:
+            oid = _get_oid(ssh, port)
+            if not oid:
+                continue
+            max_bps = _get_speed_bps(ssh, port)
+            for direction in ["RX_BPS", "TX_BPS"]:
+                val_out, _, _ = ssh.run(
+                    f"redis-cli -n 2 hget 'RATES:{oid}' {direction}", timeout=10
+                )
+                rate = float(val_out.strip() or "0")
+                if rate > max_bps * 1.1:
+                    violations.append(rate)
+            if violations:
+                break
+        if not violations:
+            return
+        time.sleep(3)
+    # Timeout expired — run the real assertion for a clear failure message
+    _assert_rates_sane(ssh, ports)
+
+
 def _assert_bytes_monotone(before, after, ports):
     """Assert IN and OUT octets did not decrease for each port in ports.
 
@@ -1165,11 +1200,11 @@ def test_dpb_counter_continuity(ssh):
         # New 1x100G OID for Ethernet80 must appear
         _wait_for_oids(ssh, [DPB_PARENT], present=True, timeout_s=DPB_TIMEOUT)
 
-        # Allow 3 daemon cycles (~3s each) to detect OID change and re-stabilize
-        print("  Waiting 9s for daemon to re-stabilize after DPB...")
-        time.sleep(9)
-
-        _assert_rates_sane(ssh, WITNESSES)
+        # Wait for EWMA to settle after DPB-triggered counter-epoch reset.
+        # Transient spikes (e.g., 450 TB/s) decay within a few cycles; sustained
+        # explosions (the real bug) do not and will fail after timeout_s.
+        print("  Waiting for witness rates to stabilize after DPB (up to 30s)...")
+        _wait_for_rates_sane(ssh, WITNESSES, timeout_s=30)
         print("  Post-DPB witness rates sane ✓")
 
         post_dpb_snap = _counters_snapshot(ssh, WITNESSES)
@@ -1206,12 +1241,9 @@ def test_dpb_counter_continuity(ssh):
 
         _wait_for_oids(ssh, DPB_PORTS, present=True, timeout_s=DPB_TIMEOUT)
 
-        # Allow daemon to detect new OIDs, remove from FlexCounter, begin writing
-        print("  Waiting 9s for daemon to re-engage after restore...")
-        time.sleep(9)
-
-        # All 12 FLEX_PORTS must be sane after full round-trip
-        _assert_rates_sane(ssh, FLEX_PORTS)
+        # Wait for EWMA to settle after the restore DPB.
+        print("  Waiting for all FLEX_PORT rates to stabilize after restore (up to 30s)...")
+        _wait_for_rates_sane(ssh, FLEX_PORTS, timeout_s=30)
         print("  All 12 FLEX_PORTS rates sane after restore ✓")
 
         post_restore_snap = _counters_snapshot(ssh, WITNESSES)

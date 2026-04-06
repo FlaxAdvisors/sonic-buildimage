@@ -19,6 +19,7 @@
 #define READ_BUF_SIZE 262144
 #define SEND_TIMEOUT_MS 2000
 #define RECV_TIMEOUT_MS 3000
+#define COUNTER_RECV_TIMEOUT_MS 8000
 
 static int read_until_prompt(int fd, char *buf, int bufsz, int timeout_ms)
 {
@@ -170,11 +171,12 @@ static port_row_t *cache_row(counter_cache_t *cache, const char *port_name)
     return row;
 }
 
-static int parse_counters(const char *buf, counter_cache_t *cache)
+/* Parse counter lines from bcmcmd output into cache rows.
+ * Format: COUNTERNAME.PORTNAME : VALUE  [+DELTA  RATE/s]
+ * Accumulates name1 matches into val[] via += (for name2 second-pass).
+ * Does NOT clear val[] — caller must zero rows before a new cycle. */
+static void parse_lines(const char *buf, counter_cache_t *cache)
 {
-    for (int i = 0; i < cache->n_rows; i++)
-        cache->rows[i].n_raw = 0;
-
     const char *p = buf;
     while (*p) {
         const char *nl = strchr(p, '\n');
@@ -233,7 +235,12 @@ static int parse_counters(const char *buf, counter_cache_t *cache)
 
         p = nl + 1;
     }
+}
 
+/* Resolve name2 (second BCM counter) for compound stats like NON_UCAST = RMCA + RBCA.
+ * Must be called after all lines are parsed so raw[] is complete. */
+static void resolve_name2(counter_cache_t *cache)
+{
     for (int r = 0; r < cache->n_rows; r++) {
         port_row_t *row = &cache->rows[r];
         for (int i = 0; i < g_stat_map_size; i++) {
@@ -241,22 +248,60 @@ static int parse_counters(const char *buf, counter_cache_t *cache)
                 row->val[i] += raw_lookup(row, g_stat_map[i].name2);
         }
     }
+}
 
-    return 0;
+/* Clear val[] and n_raw for all cache rows — call before each poll cycle. */
+void bcmcmd_cache_clear(counter_cache_t *cache)
+{
+    for (int i = 0; i < cache->n_rows; i++) {
+        memset(cache->rows[i].val, 0, sizeof(cache->rows[i].val));
+        cache->rows[i].n_raw = 0;
+    }
 }
 
 int bcmcmd_fetch_counters(int fd, counter_cache_t *cache)
 {
-    static char buf[READ_BUF_SIZE];
+    /* 'show c all' returns ~1.35 MB for 128 ports — needs large buffer.
+     * Using 'show c all' instead of 'show counters' because the latter
+     * only returns ports whose counters changed since the last call,
+     * causing stale data and rate computation errors. */
+    static char buf[COUNTER_BUF_SIZE];
 
-    if (write_all(fd, "show counters\n") < 0)
+    if (write_all(fd, "show c all\n") < 0)
         return -1;
-    int n = read_until_prompt(fd, buf, sizeof(buf), RECV_TIMEOUT_MS);
+    int n = read_until_prompt(fd, buf, sizeof(buf), COUNTER_RECV_TIMEOUT_MS);
     if (n < 0) return -1;
 
-    pthread_mutex_lock(&cache->lock);
-    parse_counters(buf, cache);
+    bcmcmd_cache_clear(cache);
+    parse_lines(buf, cache);
+    resolve_name2(cache);
     clock_gettime(CLOCK_MONOTONIC, &cache->fetched_at);
-    pthread_mutex_unlock(&cache->lock);
+    return 0;
+}
+
+int bcmcmd_fetch_port_counters(int fd, counter_cache_t *cache,
+                               const char ports[][BCMCMD_PORT_NAME_LEN],
+                               int n_ports)
+{
+    /* Query each port individually with 'show c all <port>'.
+     * Returns all counters per port (~268 lines, ~10KB) vs
+     * ~1.35 MB / ~2s for 'show c all' (all 128 ports).
+     * 12 ports: ~0.2s total — 10x faster, 92% less data. */
+    static char buf[READ_BUF_SIZE];
+
+    bcmcmd_cache_clear(cache);
+
+    for (int p = 0; p < n_ports; p++) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "show c all %s\n", ports[p]);
+        if (write_all(fd, cmd) < 0)
+            return -1;
+        int n = read_until_prompt(fd, buf, sizeof(buf), RECV_TIMEOUT_MS);
+        if (n < 0) return -1;
+        parse_lines(buf, cache);
+    }
+
+    resolve_name2(cache);
+    clock_gettime(CLOCK_MONOTONIC, &cache->fetched_at);
     return 0;
 }

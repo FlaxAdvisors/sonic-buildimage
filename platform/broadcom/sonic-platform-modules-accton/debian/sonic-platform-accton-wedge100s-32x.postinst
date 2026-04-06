@@ -529,69 +529,14 @@ if command -v docker >/dev/null 2>&1; then
     fi
 fi
 
-# Patch syncd.sh to inject LD_PRELOAD shim for flex sub-port counters.
-SYNCD_SH="/usr/bin/syncd.sh"
-if [ -f "$SYNCD_SH" ] && ! grep -q "libsai-stat-shim" "$SYNCD_SH"; then
-    python3 - <<'PYEOF'
-import sys
-SYNCD_SH = "/usr/bin/syncd.sh"
-NEEDLE = '        --name=$DOCKERNAME \\\n'
-INSERT = (
-    '        --env "LD_PRELOAD=/usr/share/sonic/platform/libsai-stat-shim.so" \\\n'
-    '        --env "WEDGE100S_BCM_CONFIG=/usr/share/sonic/hwsku/'
-    'th-wedge100s-32x-flex.config.bcm" \\\n'
-)
-with open(SYNCD_SH) as fh:
-    text = fh.read()
-if NEEDLE not in text:
-    print("wedge100s postinst: WARNING: needle not found in " + SYNCD_SH, file=sys.stderr)
-    sys.exit(0)
-text = text.replace(NEEDLE, INSERT + NEEDLE, 1)
-with open(SYNCD_SH, 'w') as fh:
-    fh.write(text)
-print("wedge100s postinst: patched " + SYNCD_SH + " — shim LD_PRELOAD added")
-PYEOF
-fi
-
-# Install flex-counter-daemon supervisor config inside syncd container.
-# The daemon runs inside syncd (needs bcmcmd socket + Redis access).
-# supervisor is the process manager inside all SONiC Docker containers.
-if command -v docker >/dev/null 2>&1; then
-    SYNCD_STATUS=$(docker inspect --format='{{.State.Status}}' syncd 2>/dev/null || true)
-    if [ "$SYNCD_STATUS" = "running" ]; then
-        docker exec -i syncd sh -c 'cat > /etc/supervisor/conf.d/flex-counter-daemon.conf' <<'SUPEOF'
-[program:flex-counter-daemon]
-command=/usr/bin/wedge100s-flex-counter-daemon
-priority=100
-autostart=true
-autorestart=true
-startsecs=10
-startretries=3
-stdout_logfile=syslog
-stderr_logfile=syslog
-environment=WEDGE100S_BCM_CONFIG="/usr/share/sonic/hwsku/th-wedge100s-32x-flex.config.bcm"
-SUPEOF
-        docker exec syncd supervisorctl reread >/dev/null 2>&1 || true
-        docker exec syncd supervisorctl update >/dev/null 2>&1 || true
-        echo "wedge100s postinst: installed flex-counter-daemon supervisor config in syncd"
-    else
-        echo "wedge100s postinst: NOTE: syncd not running — flex-counter-daemon config will be installed on next restart"
-    fi
-fi
-
-# Copy the flex-counter-daemon binary into the running syncd container.
-# The binary is installed to the host at /usr/bin/ by the .deb;
-# syncd's filesystem is isolated, so we docker cp it in.
-if command -v docker >/dev/null 2>&1; then
-    SYNCD_STATUS=$(docker inspect --format='{{.State.Status}}' syncd 2>/dev/null || true)
-    if [ "$SYNCD_STATUS" = "running" ]; then
-        if [ -f /usr/bin/wedge100s-flex-counter-daemon ]; then
-            docker cp /usr/bin/wedge100s-flex-counter-daemon syncd:/usr/bin/ 2>/dev/null || true
-            docker exec syncd supervisorctl start flex-counter-daemon 2>/dev/null || true
-            echo "wedge100s postinst: copied and started flex-counter-daemon in syncd"
-        fi
-    fi
-fi
+# Enable and start the flex-counter-daemon on the host.
+# The C daemon reads breakout port counters from bcmcmd (via the host-side
+# bind-mounted socket at /var/run/docker-syncd/sswsyncd.socket) and writes
+# to Redis on localhost.  It retries both connections internally, so hard
+# dependencies are not required — just ordering after syncd.
+systemctl enable wedge100s-flex-counter-daemon.service
+systemctl start  wedge100s-flex-counter-daemon.service || true
+echo "wedge100s postinst: enabled wedge100s-flex-counter-daemon.service"
 
 # system-health (healthd) blocks on a Redis wait when it receives SIGTERM during
 # shutdown — Redis is already stopped by that point.  healthd has no signal handler

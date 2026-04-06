@@ -46,9 +46,6 @@ override_dh_auto_clean:
 		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-daemon; \
 		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-i2c-daemon; \
 		rm -f $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth; \
-		if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ]; then \
-			$(MAKE) -C $(MOD_SRC_DIR)/$${mod}/sai-stat-shim clean; \
-		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon ]; then \
 			$(MAKE) -C $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon clean; \
 		fi; \
@@ -84,10 +81,6 @@ override_dh_auto_build:
 			gcc -O2 -o $(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth \
 				$(MOD_SRC_DIR)/$${mod}/$(UTILS_DIR)/wedge100s-bmc-auth.c; \
 			echo "Built wedge100s-bmc-auth for $$mod"; \
-		fi; \
-		if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ]; then \
-			$(MAKE) $(MAKE_FLAGS) -C $(MOD_SRC_DIR)/$${mod}/sai-stat-shim libsai-stat-shim.so; \
-			echo "Built libsai-stat-shim.so for $$mod"; \
 		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon ]; then \
 			$(MAKE) $(MAKE_FLAGS) -C $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon; \
@@ -130,12 +123,6 @@ override_dh_auto_install:
 		fi; \
 		if [ -f $(MOD_SRC_DIR)/$${mod}/setup.py ]; then \
 			PYBUILD_NAME=$${mod} pybuild --install -d $${mod} --dest-dir debian/$(PACKAGE_PRE_NAME)-$${mod}; \
-		fi; \
-		if [ -d $(MOD_SRC_DIR)/$${mod}/sai-stat-shim ] && \
-		   [ -f $(MOD_SRC_DIR)/$${mod}/sai-stat-shim/libsai-stat-shim.so ]; then \
-			dh_installdirs -p$(PACKAGE_PRE_NAME)-$${mod} usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0; \
-			cp $(MOD_SRC_DIR)/$${mod}/sai-stat-shim/libsai-stat-shim.so \
-			   debian/$(PACKAGE_PRE_NAME)-$${mod}/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/; \
 		fi; \
 		if [ -d $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon ] && \
 		   [ -f $(MOD_SRC_DIR)/$${mod}/flex-counter-daemon/wedge100s-flex-counter-daemon ]; then \

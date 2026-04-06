@@ -311,6 +311,132 @@ def _wait_for_oids(ssh, ports, present=True, timeout_s=30):
     )
 
 
+# ---------------------------------------------------------------------------
+# DPB counter-continuity helpers
+# ---------------------------------------------------------------------------
+
+def _get_speed_bps(ssh, port):
+    """Return byte-rate ceiling for port from CONFIG_DB (bytes/sec).
+
+    Reads PORT|<port> speed (Mbps).  Falls back to 25G if absent.
+    """
+    out, _, _ = ssh.run(f"redis-cli -n 4 hget 'PORT|{port}' speed", timeout=10)
+    try:
+        speed_mbps = int(out.strip())
+    except (ValueError, AttributeError):
+        speed_mbps = 25000  # 25G fallback
+    return speed_mbps * 1e6 / 8   # convert to bytes/sec
+
+
+def _assert_rates_sane(ssh, ports):
+    """Assert each port's RX_BPS and TX_BPS are within 110% of link speed.
+
+    Uses RATES:<oid> in COUNTERS_DB (DB 2).  Skips ports with no OID.
+    """
+    violations = []
+    for port in ports:
+        oid = _get_oid(ssh, port)
+        if not oid:
+            continue
+        max_bps = _get_speed_bps(ssh, port)
+        for direction in ["RX_BPS", "TX_BPS"]:
+            val_out, _, _ = ssh.run(
+                f"redis-cli -n 2 hget 'RATES:{oid}' {direction}", timeout=10
+            )
+            rate = float(val_out.strip() or "0")
+            if rate > max_bps * 1.1:
+                speed_g = int(max_bps * 8 / 1e9)
+                violations.append(
+                    f"{port} {direction}={rate/1e6:.1f} MB/s exceeds "
+                    f"{max_bps/1e6:.1f} MB/s ({speed_g}G link) — rate explosion"
+                )
+    assert not violations, (
+        "Rate sanity check failed:\n" + "\n".join(f"  {v}" for v in violations)
+    )
+
+
+def _assert_bytes_monotone(before, after, ports):
+    """Assert IN and OUT octets did not decrease for each port in ports.
+
+    before, after: {port: (in_octets, out_octets)} dicts (from _counters_snapshot).
+    """
+    violations = []
+    for port in ports:
+        if port not in before or port not in after:
+            continue
+        b_in, b_out = before[port]
+        a_in, a_out = after[port]
+        if a_in < b_in:
+            violations.append(
+                f"{port} IF_IN_OCTETS went backwards: {b_in:,} → {a_in:,}"
+            )
+        if a_out < b_out:
+            violations.append(
+                f"{port} IF_OUT_OCTETS went backwards: {b_out:,} → {a_out:,}"
+            )
+    assert not violations, (
+        "Byte counter monotonicity violated:\n"
+        + "\n".join(f"  {v}" for v in violations)
+    )
+
+
+def _assert_bytes_bounded(phase1_snap, current_snap, speed_bps_by_port, elapsed_s):
+    """Assert counter deltas do not exceed physics ceiling since phase1.
+
+    phase1_snap, current_snap: {port: (in_octets, out_octets)}.
+    speed_bps_by_port: {port: bytes/sec ceiling}.
+    elapsed_s: seconds since phase1_snap was taken.
+
+    Catches counter explosion (87 MB/s on a 25G link) and wrong-port mapping.
+    """
+    violations = []
+    for port in set(phase1_snap) & set(current_snap):
+        ceiling = speed_bps_by_port.get(port, 3_125_000) * elapsed_s * 1.1
+        for idx, direction in enumerate(["IF_IN_OCTETS", "IF_OUT_OCTETS"]):
+            delta = current_snap[port][idx] - phase1_snap[port][idx]
+            if delta < 0:
+                violations.append(
+                    f"{port} {direction} went backwards: "
+                    f"{phase1_snap[port][idx]:,} → {current_snap[port][idx]:,}"
+                )
+            elif delta > ceiling:
+                speed_g = int(speed_bps_by_port.get(port, 3_125_000) * 8 / 1e9)
+                violations.append(
+                    f"{port} delta {delta/1e6:.1f} MB in {elapsed_s:.0f}s "
+                    f"exceeds {speed_g}G link capacity — counter corrupted"
+                )
+    assert not violations, (
+        "Physics bound violated (counter explosion detected):\n"
+        + "\n".join(f"  {v}" for v in violations)
+    )
+
+
+def _assert_bytes_growing(ssh, ports, wait_s=12):
+    """Assert at least one port in ports accumulated bytes over wait_s seconds.
+
+    Skips the check if no port in ports is currently link-up (avoids false fails
+    when all witnesses are link-down).
+    """
+    out, _, _ = ssh.run("show interfaces status 2>&1", timeout=20)
+    up_ports = [p for p in ports
+                if any(p in line and " up " in line for line in out.splitlines())]
+    if not up_ports:
+        print(f"  _assert_bytes_growing: no link-up ports in {ports} — skipping")
+        return
+
+    snap1 = _counters_snapshot(ssh, up_ports)
+    time.sleep(wait_s)
+    snap2 = _counters_snapshot(ssh, up_ports)
+
+    grew = [p for p in up_ports
+            if p in snap1 and p in snap2
+            and (snap2[p][0] > snap1[p][0] or snap2[p][1] > snap1[p][1])]
+    assert grew, (
+        f"No port in {up_ports} accumulated bytes over {wait_s}s — "
+        "daemon is not writing (check wedge100s-flex-counter-daemon status)"
+    )
+    print(f"  Bytes growing on: {grew} ✓")
+
 
 # ---------------------------------------------------------------------------
 # DPB transition test

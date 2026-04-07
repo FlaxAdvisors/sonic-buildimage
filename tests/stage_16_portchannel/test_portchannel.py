@@ -1,8 +1,10 @@
 """Stage 16 — Port Channel / LAG (LACP) — operational state assertions.
 
 Tests assert that PortChannel1 is already configured and operational,
-as established by tools/deploy.py. PortChannel1 is L2-only (VLAN 999
-access, no IP address).
+as established by tools/deploy.py. PortChannel1 is L2 access on VLAN 999.
+Vlan999 carries a /31 SVI on both sides for ping-based reachability testing:
+  SONiC  hare-lorax   Vlan999 10.99.1.1/31
+  EOS    rabbit-lorax Vlan999 10.99.1.0/31
 
 Hardware topology:
   Hare Ethernet  | Rabbit Port  | Role
@@ -21,9 +23,14 @@ PORTCHANNEL_NAME = "PortChannel1"
 LAG_MEMBERS = ["Ethernet16", "Ethernet32"]
 STANDALONE_PORTS = ["Ethernet48", "Ethernet112"]
 
+# Vlan999 SVI addresses — /31 point-to-point over the LAG.
+SONIC_SVI_IP  = "10.99.1.1"
+EOS_SVI_IP    = "10.99.1.0"
+
 TEAMDCTL_POLL_INTERVAL = 2
 TEAMDCTL_FAILOVER_TIMEOUT = 10   # seconds for one member to deselect
 TEAMDCTL_RECOVER_TIMEOUT = 30    # seconds for both members to reselect
+PING_FAILOVER_TIMEOUT = 15       # seconds for ping to recover after member restore
 
 
 # ------------------------------------------------------------------
@@ -106,6 +113,25 @@ def _wait_for_member_state(ssh, port, expected_state, timeout):
     return False
 
 
+def _ping_peer(ssh, count=3, timeout_per=2):
+    """Ping EOS Vlan999 SVI from SONiC. Returns (success_bool, output_str)."""
+    out, _, rc = ssh.run(
+        f"ping -c {count} -W {timeout_per} {EOS_SVI_IP}", timeout=count * timeout_per + 10
+    )
+    return rc == 0, out.strip()
+
+
+def _wait_for_ping(ssh, timeout, interval=2):
+    """Poll ping to EOS peer until it succeeds or timeout expires."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ok, _ = _ping_peer(ssh, count=1, timeout_per=2)
+        if ok:
+            return True
+        time.sleep(interval)
+    return False
+
+
 # ------------------------------------------------------------------
 # teamd feature state
 # ------------------------------------------------------------------
@@ -151,13 +177,32 @@ class TestPortChannelConfig:
         assert out.strip() == "up", f"admin_status={out.strip()!r}"
 
     def test_portchannel_has_no_ip(self, ssh):
-        """PortChannel1 has no IP address (L2 VLAN 999 only)."""
+        """PortChannel1 has no IP address (L2 VLAN 999 access, SVI is on Vlan999)."""
         out, _, _ = ssh.run(
             f"redis-cli -n 4 keys 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}|*'",
             timeout=10,
         )
         assert not out.strip(), (
             f"PortChannel1 has IP configured; expected L2-only: {out.strip()}"
+        )
+
+    def test_portchannel_in_vlan999(self, ssh):
+        """PortChannel1 is an untagged member of VLAN 999."""
+        out, _, _ = ssh.run(
+            f"redis-cli -n 4 hget 'VLAN_MEMBER|Vlan999|{PORTCHANNEL_NAME}' tagging_mode",
+            timeout=10,
+        )
+        assert out.strip() == "untagged", (
+            f"PortChannel1 VLAN 999 tagging_mode={out.strip()!r}; expected 'untagged'"
+        )
+
+    def test_vlan999_svi_ip(self, ssh):
+        """Vlan999 SVI has 10.99.1.1/31."""
+        out, _, _ = ssh.run(
+            "redis-cli -n 4 keys 'VLAN_INTERFACE|Vlan999|*'", timeout=10
+        )
+        assert "10.99.1.1/31" in out, (
+            f"Vlan999 SVI IP missing; expected 10.99.1.1/31. Keys: {out.strip()}"
         )
 
     def test_portchannel_members_in_config_db(self, ssh):
@@ -262,15 +307,26 @@ class TestASICDB:
 
 
 # ------------------------------------------------------------------
-# L2 connectivity — LLDP over LAG
+# L3 reachability over LAG — ping Vlan999 SVI
 # ------------------------------------------------------------------
 
-class TestLAGConnectivity:
-    """Verify L2 connectivity over the port channel via LLDP.
+class TestLAGReachability:
+    """Verify end-to-end reachability over PortChannel1 via Vlan999 SVI ping.
 
-    PortChannel1 is VLAN 999 access with no IP. LLDP is used as the
-    L2 connectivity signal instead of ping.
+    This tests the full stack: LACP bundling → L2 forwarding through
+    VLAN 999 → SVI → IP reachability to the EOS peer.
     """
+
+    def test_ping_eos_over_lag(self, ssh):
+        """SONiC can ping EOS Vlan999 SVI (10.99.1.0) over PortChannel1."""
+        ok, out = _ping_peer(ssh, count=5, timeout_per=2)
+        print(f"\n{out}")
+        assert ok, (
+            f"Cannot ping EOS ({EOS_SVI_IP}) over VLAN 999 LAG.\n"
+            "Check: Vlan999 SVI IP on both sides, PortChannel1 in VLAN 999, "
+            "LACP converged.\n"
+            f"ping output:\n{out}"
+        )
 
     def test_lldp_neighbor_on_lag_member(self, ssh):
         """LLDP neighbor (rabbit-lorax) is visible on Ethernet16 or Ethernet32."""
@@ -289,14 +345,16 @@ class TestLAGConnectivity:
 
 
 # ------------------------------------------------------------------
-# LAG failover — teamdctl polling (no IP, no ping)
+# LAG failover — ping-based convergence test
 # ------------------------------------------------------------------
 
 class TestLAGFailover:
     """Verify LAG survives a single member link failure.
 
-    Uses teamdctl state polling as the convergence signal.
-    No ping because PortChannel1 carries no IP (L2 VLAN 999).
+    Phases:
+      1. Baseline: ping EOS over LAG (both members up)
+      2. Shut Ethernet16: ping must continue (Ethernet32 carries traffic)
+      3. Restore Ethernet16: both members return to 'current', ping still works
     """
 
     @pytest.fixture(autouse=True)
@@ -310,17 +368,28 @@ class TestLAGFailover:
             if out.strip() != "up":
                 ssh.run(f"sudo config interface startup {port}", timeout=15)
                 time.sleep(2)
+        # Wait for both members to reconverge
+        deadline = time.time() + TEAMDCTL_RECOVER_TIMEOUT
+        while time.time() < deadline:
+            members = _teamdctl_members(ssh)
+            if all(members.get(p) == "current" for p in LAG_MEMBERS):
+                break
+            time.sleep(TEAMDCTL_POLL_INTERVAL)
 
     def test_failover_and_recovery(self, ssh):
-        """Shut Ethernet16, assert Ethernet32 stays selected; restore, assert both selected."""
+        """Shut Ethernet16 → ping survives; restore → both members reconverge."""
         fail_port = "Ethernet16"
         survive_port = "Ethernet32"
+
+        # Baseline: ping works
+        ok, out = _ping_peer(ssh, count=2, timeout_per=2)
+        assert ok, f"Baseline ping failed before failover test:\n{out}"
 
         # Phase 1: shut down fail_port
         _, _, rc = ssh.run(f"sudo config interface shutdown {fail_port}", timeout=15)
         assert rc == 0, f"Failed to shutdown {fail_port}"
 
-        # Wait for survive_port to remain 'current' in teamdctl (within 10s)
+        # Wait for survive_port to remain 'current' in teamdctl
         ok = _wait_for_member_state(ssh, survive_port, "current", TEAMDCTL_FAILOVER_TIMEOUT)
         members = _teamdctl_members(ssh)
         print(f"  After shutdown {fail_port}: teamdctl members={members}")
@@ -329,17 +398,25 @@ class TestLAGFailover:
             f"after shutting {fail_port}. Members: {members}"
         )
 
-        # Also verify PortChannel is still up
+        # PortChannel still up
         summary = _portchannel_summary(ssh)
         assert "Up" in summary.get(PORTCHANNEL_NAME, {}).get("protocol", ""), (
             f"{PORTCHANNEL_NAME} went down after shutting {fail_port}"
+        )
+
+        # Ping survives on remaining member
+        ok, out = _ping_peer(ssh, count=3, timeout_per=2)
+        print(f"  Ping during failover (1 member down):\n{out}")
+        assert ok, (
+            f"Ping failed with {fail_port} down — LAG should forward via {survive_port}.\n"
+            f"ping output:\n{out}"
         )
 
         # Phase 2: restore fail_port
         _, _, rc = ssh.run(f"sudo config interface startup {fail_port}", timeout=15)
         assert rc == 0, f"Failed to startup {fail_port}"
 
-        # Wait for both members to return to 'current' (within 30s)
+        # Wait for both members to return to 'current'
         deadline = time.time() + TEAMDCTL_RECOVER_TIMEOUT
         both_selected = False
         while time.time() < deadline:
@@ -355,6 +432,10 @@ class TestLAGFailover:
             f"Both members did not return to 'current' within {TEAMDCTL_RECOVER_TIMEOUT}s. "
             f"Members: {members}"
         )
+
+        # Ping still works after recovery
+        ok, out = _ping_peer(ssh, count=3, timeout_per=2)
+        assert ok, f"Ping failed after member recovery:\n{out}"
 
 
 # ------------------------------------------------------------------

@@ -15,6 +15,11 @@
       "subport_config": {"admin_status": "up", "speed": "10000", "fec": "none"}
     },
     {
+      "parent": "Ethernet20",
+      "mode": "2x50G",
+      "subport_config": {"admin_status": "up", "autoneg": "on", "adv_speeds": "50000"}
+    },
+    {
       "parent": "Ethernet80",
       "mode": "4x25G[10G]",
       "subport_config": {"admin_status": "up", "speed": "25000", "fec": "none"}
@@ -25,6 +30,8 @@
       "id": 10,
       "members": [
         "Ethernet0","Ethernet1","Ethernet2","Ethernet3",
+        "Ethernet20","Ethernet22",
+        "Ethernet24","Ethernet28",
         "Ethernet64","Ethernet65","Ethernet66","Ethernet67",
         "Ethernet80","Ethernet81","Ethernet82","Ethernet83"
       ]
@@ -50,9 +57,13 @@
   "hosts": [
     {"port": "Ethernet0",  "mgmt_ip": "192.168.88.243", "test_ip": "10.0.10.243"},
     {"port": "Ethernet1",  "mgmt_ip": "192.168.88.232", "test_ip": "10.0.10.232"},
+    {"port": "Ethernet20", "mgmt_ip": "192.168.88.236", "test_ip": "10.0.10.230"},
+    {"port": "Ethernet22", "mgmt_ip": "192.168.88.243", "test_ip": "10.0.10.244"},
+    {"port": "Ethernet24", "mgmt_ip": "192.168.88.243", "test_ip": "10.0.10.245"},
+    {"port": "Ethernet28", "mgmt_ip": "192.168.88.236", "test_ip": "10.0.10.231"},
     {"port": "Ethernet66", "mgmt_ip": "192.168.88.237", "test_ip": "10.0.10.237"},
     {"port": "Ethernet67", "mgmt_ip": "192.168.88.242", "test_ip": "10.0.10.242"},
     {"port": "Ethernet80", "mgmt_ip": "192.168.88.225", "test_ip": "10.0.10.225"},
-    {"port": "Ethernet81", "mgmt_ip": "192.168.88.230", "test_ip": "10.0.10.241"}
+    {"port": "Ethernet81", "mgmt_ip": "192.168.88.227", "test_ip": "10.0.10.241"}
   ]
 }

@@ -27,11 +27,24 @@ with open(_TOPO_PATH) as _f:
 
 _HOSTS = _TOPO.get('hosts', [])  # list of {port, mgmt_ip, test_ip}
 
-# Pairs as defined in test_throughput.py (port_a, port_b)
+# Pairs as defined in test_throughput.py (port_a, port_b).
+# Round 1 — same-speed:
+#   Ethernet24 ↔ Ethernet28  (100G↔100G)
+#   Ethernet20 ↔ Ethernet22  ( 50G↔ 50G)
+#   Ethernet0  ↔ Ethernet80  ( 25G↔ 25G)
+#   Ethernet66 ↔ Ethernet67  ( 10G↔ 10G)
+# Round 2 — cross-speed:
+#   Ethernet24 ↔ Ethernet20  (100G↔50G)
+#   Ethernet28 ↔ Ethernet66  (100G↔10G)
+#   Ethernet22 ↔ Ethernet80  ( 50G↔25G)
 _PAIRS = [
-    ("Ethernet66", "Ethernet67"),   # 10G
-    ("Ethernet80", "Ethernet81"),   # 25G pair1
-    ("Ethernet0",  "Ethernet1"),    # 25G pair2 (Ethernet1 may be dark — checked separately)
+    ("Ethernet24", "Ethernet28"),   # 100G↔100G
+    ("Ethernet20", "Ethernet22"),   # 50G↔50G
+    ("Ethernet0",  "Ethernet80"),   # 25G↔25G
+    ("Ethernet66", "Ethernet67"),   # 10G↔10G
+    ("Ethernet24", "Ethernet20"),   # 100G↔50G
+    ("Ethernet28", "Ethernet66"),   # 100G↔10G
+    ("Ethernet22", "Ethernet80"),   # 50G↔25G
 ]
 
 pytestmark = pytest.mark.skipif(

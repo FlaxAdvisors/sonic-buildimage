@@ -152,3 +152,150 @@ Once Python is stable and verified, port the daemon to C (daemon.c framework alr
 - Daemon BCM config on host: `/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/Accton-WEDGE100S-32X/th-wedge100s-32x-flex.config.bcm`
 - bcmcmd socket on host: `/var/run/docker-syncd/sswsyncd.socket`
 - **Bug fixed this session:** ps regex `(\S+)\((\d+)\)` → `(\S+)\(\s*(\d+)\)` to handle space-padded SDK port numbers in bcmcmd output (was only matching 32 of 128 ports)
+
+---
+
+## Update: 2026-04-07 — DPB Counter Continuity (stage_25 complete)
+
+The approach settled on Option A from above: the C daemon (`daemon.c`) handles all breakout ports, removes them from FlexCounter every cycle, and writes both COUNTERS and RATES to Redis DB2 directly. The SAI shim is no longer needed for the counter path.
+
+Two new bugs were discovered and fixed during stage_25 test development.
+
+### Bug 1: uint64 Underflow on BCM Counter Reset
+
+**Trigger:** syncd restart (which happens during DPB) resets BCM SDK port counters to 0.
+
+**Mechanism:**
+```
+last_in_oct = 40,000,000,000   (snapshot before syncd restart)
+in_oct      =              0   (BCM counter reset to 0 after restart)
+delta       = (uint64) 0 - 40,000,000,000
+            = 18,446,744,033,709,551,616  (wraps to ~1.84e19)
+rx_bps      = 1.84e19 / 3s = 456 TB/s    ← impossible
+```
+
+**Fix:** Before subtracting, compare: `in_oct >= last_in_oct ? delta/delta_s : 0.0`. Emit 0 for the reset cycle rather than an astronomic spike.
+
+**Location:** `daemon.c` `write_rates()`, rate_state≥1 path.
+
+### Bug 2: BCM Transient Zero During DPB → Rate Spike
+
+This is the subtler and more interesting bug.
+
+**Trigger:** Dynamic Port Breakout (changing Ethernet80 from 4×25G to 1×100G). Syncd restarts, causing:
+1. All port OIDs change → daemon calls `refresh_flex_ports()` → sets `rate_state=0` for all affected ports (including Ethernet0, which shares nothing with Ethernet80 but gets a new OID)
+2. BCM briefly reports `in_oct=0` for **unrelated** ports (xe87=Ethernet0) while it completes the port reconfiguration
+
+**Why BCM returns 0:** During DPB, BCM internally restructures port objects. For a brief window (one 3-second poll cycle), `show c all xe87` returns 0 bytes even though ~40 GB have been received on that port.
+
+**The spike mechanism, step by step:**
+
+| Cycle | BCM `in_oct` | `rate_state` | Action | `last_in_oct` |
+|-------|-------------|--------------|--------|----------------|
+| Pre-DPB | 40,000,000,000 | 2 (EWMA active) | normal rate ~4 B/s | 39,999,999,988 |
+| DPB fires | — | reset to **0** | OID changed, state cleared | — |
+| Cycle T+0 | **0** (transient) | 0 → baseline capture | stores 0 as baseline | **0** |
+| Cycle T+1 | 40,000,000,000 (real) | 1 → first rate | delta = 40 GB, Δt = 3s | — |
+| Rate T+1 | — | — | **40 GB / 3s = 5934 MB/s** ← spike | — |
+
+The underflow fix doesn't help here: `40 GB > 0` is TRUE (delta is positive), so the guard doesn't fire. The spike is real arithmetic, just from a bogus baseline.
+
+**What "missed cycles" means:** The 40 GB did not accumulate in 3 seconds. It accumulated over the entire port uptime (hours). The 3-second window we used was incorrect — it spans only the post-transient interval, not the actual traffic duration. Attributing all historical bytes to one poll cycle produces a physically impossible rate.
+
+**Fix (the cycle-count approach):** Add `int zero_cycles` to `flex_port_t`. In the `rate_state=0` baseline-capture path:
+
+```c
+if (in_oct == 0) {
+    fp->zero_cycles++;
+    fp->last_time = now;   /* extend window for when data returns */
+    return;                /* DO NOT commit 0 as baseline */
+}
+/* first non-zero reading: safe to use as baseline */
+fp->rate_state = 1;
+fp->zero_cycles = 0;
+```
+
+The key property: we never commit the transient zero. Next cycle BCM returns the real 40 GB, which becomes the baseline. The cycle after THAT shows a small delta (actual traffic in 3 seconds), producing a correct rate.
+
+**Why this is better than clamping:** A max-rate clamp would silently discard traffic that genuinely accumulated during a missed cycle. The zero-deferral approach is loss-free: we just delay the baseline by one cycle, then measure accurately from the first real reading.
+
+### Bug 3: LED Daemon bcmcmd Socket Monopolisation
+
+Not a counter bug, but it blocked the daemon from ever initialising.
+
+**Problem:** `wedge100s-ledup-linkstate` (LED synchronisation daemon) maintained a **persistent** connection to `/var/run/docker-syncd/sswsyncd.socket`. The bcmcmd diag shell only accepts one session at a time. In steady state (no port link changes), the LED daemon held the socket open indefinitely doing nothing, blocking the flex-counter-daemon from connecting to run its initial `ps` map and subsequent counter polls.
+
+**Evidence:** New flex-counter-daemon PIDs would log `bcmcmd banner timeout` every 3 seconds indefinitely. PID 1126823 (from a prior test run) succeeded because it started during a window where the LED daemon briefly dropped its connection on error.
+
+**Fix:** The LED daemon now opens bcmcmd only when it has actual work to send (link-state changes or `.set` file overrides). In steady state it holds no socket:
+
+```python
+# OLD: one persistent BcmcmdClient for the daemon lifetime
+with BcmcmdClient(...) as bcm:
+    while True:
+        time.sleep(1)
+        _process_set_files(bcm, current)      # may or may not use bcm
+        _apply_states(bcm, states, current)   # may or may not use bcm
+        # socket held even when nothing sent
+
+# NEW: connect only when there is work
+while True:
+    time.sleep(1)
+    if not (has_set_files or changes):
+        continue                              # socket released this cycle
+    with BcmcmdClient(...) as bcm:            # connect → work → disconnect
+        bcm._connect()
+        _process_set_files(bcm, current)
+        _apply_states(bcm, states, current)
+```
+
+This gives the flex-counter-daemon a window every poll cycle (3s) to connect, run `ps`, fetch counters, and disconnect — which takes well under 1 second.
+
+### `rate_state` Machine Reference
+
+| State | Meaning | Transitions |
+|-------|---------|-------------|
+| 0 | No baseline. OID just assigned or changed. | → stays 0 if BCM returns `in_oct=0` (transient); → 1 on first non-zero reading |
+| 1 | Baseline captured. One full delta window needed. | → 2 on next non-zero poll (first rate computed) |
+| 2 | EWMA active. Rates published every cycle. | → 0 if OID changes (syncd restart / DPB) |
+
+### Test Sequence: `test_dpb_counter_continuity`
+
+```
+Phase 1 (baseline): assert all flex ports have sane rates (< 110% link speed)
+Phase 2 (DPB):      config interface Ethernet80 breakout 1×100G
+                    wait 9s (3 poll cycles)
+Phase 3 (assert):   assert all flex ports (including Ethernet0–3) still sane
+Phase 4 (restore):  config interface Ethernet80 breakout 4×25G
+                    wait 9s
+Phase 5 (assert):   assert all flex ports sane again
+```
+
+The 9-second wait after DPB allows:
+- Cycle T+0: BCM transient zero → deferred (zero_cycles=1)
+- Cycle T+3s: BCM real value → baseline captured (rate_state=1)
+- Cycle T+6s: first delta → rates published (rate_state=2)
+- Test asserts at T+9s: rates valid ✓
+
+### Final Test Status (2026-04-07, verified on hardware)
+
+| Test | Result |
+|------|--------|
+| test_flex_counter_daemon_running | ✅ PASS |
+| test_flex_counter_daemon_bcm_config | ✅ PASS |
+| test_flex_counter_daemon_ps_map | ✅ PASS |
+| test_flex_ports_have_full_stats | ✅ PASS |
+| test_non_flex_ports_not_regressed | ✅ PASS |
+| test_flex_port_rx_bytes_nonzero | ✅ PASS |
+| test_flex_port_tx_bytes_nonzero | ✅ PASS |
+| test_startup_zeros_succeed | ✅ PASS |
+| test_flex_ports_removed_from_flex_counter | ✅ PASS |
+| test_flex_port_rates_sane | ✅ PASS |
+| test_breakout_transition | ✅ PASS |
+| test_nonbreakout_dpb_round_trip_retains_stats | ✅ PASS |
+| test_sonic_clear_counters_flex_and_nonbreakout | ✅ PASS |
+| test_counter_parity_via_iperf | ✅ PASS |
+| test_dpb_counter_continuity | ✅ PASS |
+| **stage_25_shim total** | **15/15** |
+
+Commits: `d25c3d6c6` (uint64 underflow), `7e3bcbd55` (transient-zero deferral + LED daemon socket fix)

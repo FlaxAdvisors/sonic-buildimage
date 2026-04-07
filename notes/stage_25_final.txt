@@ -1,0 +1,68 @@
+============================= test session starts ==============================
+platform linux -- Python 3.8.10, pytest-4.6.9, py-1.8.1, pluggy-0.13.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /export/sonic/sonic-buildimage.claude/tests, inifile: pytest.ini
+collecting ... collected 28 items
+
+stage_00_pretest/test_pretest.py::test_pmon_running PASSED               [  3%]
+stage_00_pretest/test_pretest.py::test_mgmt_vrf_present SKIPPED          [  7%]
+stage_00_pretest/test_pretest.py::test_breakout_subports_in_asic_db PASSED [ 10%]
+stage_00_pretest/test_pretest.py::test_portchannel1_in_config_db PASSED  [ 14%]
+stage_00_pretest/test_pretest.py::test_portchannel1_has_no_ip FAILED     [ 17%]
+stage_00_pretest/test_pretest.py::test_vlan10_and_999_exist PASSED       [ 21%]
+stage_00_pretest/test_pretest.py::test_vlan10_has_breakout_members PASSED [ 25%]
+stage_00_pretest/test_pretest.py::test_connected_ports_admin_up PASSED   [ 28%]
+stage_00_pretest/test_pretest.py::test_optical_ports_fec_configured PASSED [ 32%]
+stage_25_shim/test_shim.py::test_flex_counter_daemon_running PASSED      [ 35%]
+stage_25_shim/test_shim.py::test_flex_counter_daemon_bcm_config PASSED   [ 39%]
+stage_25_shim/test_shim.py::test_flex_counter_daemon_ps_map FAILED       [ 42%]
+stage_25_shim/test_shim.py::test_flex_ports_have_full_stats PASSED       [ 46%]
+stage_25_shim/test_shim.py::test_non_flex_ports_not_regressed PASSED     [ 50%]
+stage_25_shim/test_shim.py::test_flex_port_rx_bytes_nonzero PASSED       [ 53%]
+stage_25_shim/test_shim.py::test_flex_port_tx_bytes_nonzero PASSED       [ 57%]
+stage_25_shim/test_shim.py::test_startup_zeros_succeed PASSED            [ 60%]
+stage_25_shim/test_shim.py::test_flex_ports_removed_from_flex_counter FAILED [ 64%]
+stage_25_shim/test_shim.py::test_flex_port_rates_sane PASSED             [ 67%]
+stage_25_shim/test_shim.py::test_breakout_transition PASSED              [ 71%]
+stage_25_shim/test_shim.py::test_nonbreakout_dpb_round_trip_retains_stats PASSED [ 75%]
+stage_25_shim/test_shim.py::test_sonic_clear_counters_flex_and_nonbreakout PASSED [ 78%]
+stage_25_shim/test_shim.py::test_counter_parity_via_iperf PASSED         [ 82%]
+stage_25_shim/test_shim.py::test_dpb_counter_continuity PASSED           [ 85%]
+stage_nn_posttest/test_posttest.py::test_pmon_running PASSED             [ 89%]
+stage_nn_posttest/test_posttest.py::test_ssh_responsive PASSED           [ 92%]
+stage_nn_posttest/test_posttest.py::test_no_crashed_containers PASSED    [ 96%]
+stage_nn_posttest/test_posttest.py::test_portchannel1_still_active PASSED [100%]
+
+=================================== FAILURES ===================================
+_________________________ test_portchannel1_has_no_ip __________________________
+stage_00_pretest/test_pretest.py:61: in test_portchannel1_has_no_ip
+    assert not out.strip(), (
+E   AssertionError: PortChannel1 has IP configured (L2 only expected): PORTCHANNEL_INTERFACE|PortChannel1|10.0.1.1/31
+E     Fix: tools/deploy.py --task portchannel
+E   assert not 'PORTCHANNEL_INTERFACE|PortChannel1|10.0.1.1/31'
+E    +  where 'PORTCHANNEL_INTERFACE|PortChannel1|10.0.1.1/31' = <built-in method strip of str object at 0x7f4e3099e690>()
+E    +    where <built-in method strip of str object at 0x7f4e3099e690> = 'PORTCHANNEL_INTERFACE|PortChannel1|10.0.1.1/31\n'.strip
+_______________________ test_flex_counter_daemon_ps_map ________________________
+stage_25_shim/test_shim.py:48: in test_flex_counter_daemon_ps_map
+    assert "ps map" in out, (
+E   AssertionError: Daemon has not connected to bcmcmd (no 'ps map' in log).
+E     Check that syncd is running with diag shell enabled (dsserve).
+E     Socket: /var/run/docker-syncd/sswsyncd.socket
+E   assert 'ps map' in ''
+__________________ test_flex_ports_removed_from_flex_counter ___________________
+stage_25_shim/test_shim.py:219: in test_flex_ports_removed_from_flex_counter
+    assert not in_db5, (
+E   AssertionError: Breakout ports still in FLEX_COUNTER_TABLE (DB 5): ['Ethernet0', 'Ethernet1', 'Ethernet2', 'Ethernet3', 'Ethernet64', 'Ethernet65', 'Ethernet66', 'Ethernet67', 'Ethernet80', 'Ethernet81', 'Ethernet82', 'Ethernet83']
+E     Daemon should remove these to prevent SAI zero-overwrite race.
+E   assert not ['Ethernet0', 'Ethernet1', 'Ethernet2', 'Ethernet3', 'Ethernet64', 'Ethernet65', ...]
+------------------- generated xml file: /tmp/tmpp8r0fuer.xml -------------------
+=============== 3 failed, 24 passed, 1 skipped in 293.67 seconds ===============
+================================================================
+  Wedge 100S-32X SONiC Platform Test Suite
+  Stages: stage_00_pretest, stage_25_shim, stage_nn_posttest
+================================================================
+
+────────────────────────────────────────────────────────────────
+  stage_00_pretest: passed=7 failed=1 skipped=1 xfailed=0
+  stage_25_shim: passed=13 failed=2 skipped=0 xfailed=0
+  stage_nn_posttest: passed=4 failed=0 skipped=0 xfailed=0

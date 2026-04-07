@@ -916,87 +916,16 @@ _TOPO_PATH_REL = os.path.join(os.path.dirname(__file__), '..', '..', 'tools', 't
 _TARGET_CFG_REL = os.path.join(os.path.dirname(__file__), '..', 'target.cfg')
 
 _REPORT_IPERF_DURATION = 10  # seconds — brief spot-check for report mode
-_REPORT_IPERF_PARALLEL = 5   # parallel streams — matches test suite setting
-
-# (server_port, client_port, speed_label, threshold_gbps)
-_THROUGHPUT_ROUNDS = [
-    [
-        ("Ethernet0",  "Ethernet80", "25G cross-QSFP", 20.0),
-        ("Ethernet66", "Ethernet67", "10G same-QSFP",   8.0),
-    ],
-    [
-        ("Ethernet80", "Ethernet81", "25G same-QSFP",  20.0),
-        ("Ethernet66", "Ethernet0",  "10G×25G cross",   8.0),
-    ],
-]
-
-# Reverse rounds: server/client swapped — exercises OUT counters on the
-# ports that were servers in the forward rounds.
-_THROUGHPUT_ROUNDS_REVERSE = [
-    [
-        ("Ethernet80", "Ethernet0",  "25G cross-QSFP rev", 20.0),
-        ("Ethernet67", "Ethernet66", "10G same-QSFP rev",   8.0),
-    ],
-    [
-        ("Ethernet81", "Ethernet80", "25G same-QSFP rev",  20.0),
-        ("Ethernet0",  "Ethernet66", "10G×25G cross rev",   8.0),
-    ],
-]
-
-
-def _report_iperf_pair(host_a, host_b, creds, duration):
-    """Run iperf3: server on host_a bound to test_ip, client from host_b bound to its test_ip.
-
-    Both endpoints bind to 10.0.10.x (-B) so traffic routes through switch VLAN 10.
-    Returns bits_per_second (float) or raises on failure.
-    """
-    import paramiko, time as _time, json as _json
-
-    def _connect(ip):
-        c = paramiko.SSHClient()
-        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        kw = {"hostname": ip, "username": creds["ssh_user"], "timeout": 10}
-        if creds.get("key_file"):
-            kw["key_filename"] = os.path.expanduser(creds["key_file"])
-        c.connect(**kw)
-        return c
-
-    def _run(c, cmd, timeout=30):
-        _, stdout, stderr = c.exec_command(cmd, timeout=timeout)
-        out = stdout.read().decode()
-        err = stderr.read().decode()
-        rc  = stdout.channel.recv_exit_status()
-        return out, err, rc
-
-    srv = _connect(host_a["mgmt_ip"])
-    cli = _connect(host_b["mgmt_ip"])
-    try:
-        _run(srv, "pkill -f iperf3 2>/dev/null || true")
-        _run(srv,
-             f"nohup iperf3 -s -1 -B {host_a['test_ip']} </dev/null >/dev/null 2>&1 & "
-             f"sleep 1; ss -tlnp 2>/dev/null | grep -q 5201 && echo LISTENING",
-             timeout=5)
-        out, err, rc = _run(
-            cli,
-            f"iperf3 -c {host_a['test_ip']} -B {host_b['test_ip']}"
-            f" -t {duration} -P {_REPORT_IPERF_PARALLEL} --json",
-            timeout=duration + 15,
-        )
-        if rc != 0:
-            raise RuntimeError(f"iperf3 client failed: {err.strip()[:120]}")
-        data = _json.loads(out)
-        return data["end"]["sum_received"]["bits_per_second"]
-    finally:
-        _run(srv, "pkill -f iperf3 2>/dev/null || true")
-        srv.close()
-        cli.close()
 
 
 def report_throughput(ssh):
-    """Stage 23 — Live iperf3 throughput: 2 parallel rounds (host-to-host via VLAN 10)."""
+    """Stage 23 — Live iperf3 throughput: 2 rounds fwd + 2 rounds rev (host-to-host via VLAN 10)."""
     import json as _json
     import configparser as _cp
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from lib.iperf import (
+        ALL_ROUNDS, build_pairs, schedule_subrounds, run_iperf3_pair,
+    )
 
     # Load topology
     try:
@@ -1017,57 +946,80 @@ def report_throughput(ssh):
 
     all_rows = []
 
-    def _run_round(round_num, pairs, arrow):
-        """Run one round (two pairs concurrently) and append rows to all_rows."""
+    def _run_report_round(round_num, pair_defs, reverse=False):
+        """Build pairs, schedule sub-rounds, run iperf3, append rows."""
+        arrow = "→" if reverse else "↔"
+        pairs = build_pairs(pair_defs, host_map, reverse=reverse)
+        subrounds = schedule_subrounds(pairs)
         round_results = {}
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            futures = {}
-            for port_a, port_b, label, thresh in pairs:
-                ha = host_map.get(port_a)
-                hb = host_map.get(port_b)
-                key = (port_a, port_b, label, thresh)
-                if not ha or not hb:
-                    round_results[key] = ("SKIP", None, "hosts not in topology")
-                else:
-                    futures[ex.submit(_report_iperf_pair, ha, hb, creds,
-                                      _REPORT_IPERF_DURATION)] = key
-            for fut in as_completed(futures):
-                key = futures[fut]
-                try:
-                    bps = fut.result()
-                    round_results[key] = ("OK", bps, "")
-                except Exception as exc:
-                    round_results[key] = ("ERR", None, str(exc)[:60])
+        port_counter = 5201
 
-        for port_a, port_b, label, thresh in pairs:
-            key = (port_a, port_b, label, thresh)
-            status_code, bps, note = round_results.get(key, ("ERR", None, "future missing"))
-            pair_str = f"R{round_num}: {port_a}{arrow}{port_b}"
+        for subround in subrounds:
+            with ThreadPoolExecutor(max_workers=len(subround)) as ex:
+                futures = {}
+                for p in subround:
+                    ha = host_map.get(p["server_port"])
+                    hb = host_map.get(p["client_port"])
+                    key = p["label"]
+                    if not ha or not hb:
+                        round_results[key] = ("SKIP", None, "hosts not in topology",
+                                              p["server_port"], p["client_port"],
+                                              p["threshold"])
+                    else:
+                        futures[ex.submit(
+                            run_iperf3_pair,
+                            p["label"],
+                            ha["test_ip"], ha["mgmt_ip"],
+                            hb["test_ip"], hb["mgmt_ip"],
+                            creds, p["threshold"],
+                            duration=_REPORT_IPERF_DURATION,
+                            parallel=p["parallel"],
+                            port=port_counter,
+                            zerocopy=p.get("zerocopy", False),
+                            window=p.get("window"),
+                        )] = (key, p["server_port"], p["client_port"], p["threshold"])
+                    port_counter += 1
+                for fut in as_completed(futures):
+                    key, sp, cp, thresh = futures[fut]
+                    try:
+                        _, bps = fut.result()
+                        round_results[key] = ("OK", bps, "", sp, cp, thresh)
+                    except Exception as exc:
+                        round_results[key] = ("ERR", None, str(exc)[:60], sp, cp, thresh)
+
+        # Append rows in pair definition order
+        for p in pairs:
+            key = p["label"]
+            if key not in round_results:
+                continue
+            status_code, bps, note, sp, cp, thresh = round_results[key]
+            pair_str = f"R{round_num}: {sp}{arrow}{cp}"
             if status_code == "SKIP":
-                all_rows.append((pair_str, label, "—", "SKIP", note))
+                all_rows.append((pair_str, key, "—", "SKIP", note))
             elif status_code == "ERR":
-                all_rows.append((pair_str, label, "—", "ERROR", note))
+                all_rows.append((pair_str, key, "—", "ERROR", note))
             else:
-                gbps   = bps / 1e9
-                result = "PASS" if gbps >= thresh else "FAIL"
+                gbps = bps / 1e9
+                thresh_gbps = thresh / 1e9
+                result = "PASS" if gbps >= thresh_gbps else "FAIL"
                 all_rows.append((
-                    pair_str, label,
+                    pair_str, key,
                     f"{gbps:.2f} Gbps", result,
-                    f"threshold {thresh:.0f} Gbps",
+                    f"threshold {thresh_gbps:.0f} Gbps",
                 ))
 
-    for round_num, pairs in enumerate(_THROUGHPUT_ROUNDS, start=1):
-        _run_round(round_num, pairs, "↔")
+    for round_num, pair_defs in enumerate(ALL_ROUNDS, start=1):
+        _run_report_round(round_num, pair_defs, reverse=False)
 
-    all_rows.append(("", "", "", "", ""))   # blank separator row
+    all_rows.append(("", "", "", "", ""))
 
-    for round_num, pairs in enumerate(_THROUGHPUT_ROUNDS_REVERSE, start=1):
-        _run_round(round_num, pairs, "→")
+    for round_num, pair_defs in enumerate(ALL_ROUNDS, start=1):
+        _run_report_round(round_num, pair_defs, reverse=True)
 
     _table(
         ["Pair", "Link", "Measured", "Result", "Note"],
         all_rows,
-        title=(f"Host-to-host throughput ({_REPORT_IPERF_DURATION}s iperf3, -P {_REPORT_IPERF_PARALLEL},"
+        title=(f"Host-to-host throughput ({_REPORT_IPERF_DURATION}s iperf3,"
                f" 2 rounds fwd + 2 rounds rev)"),
     )
 

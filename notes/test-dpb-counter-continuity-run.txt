@@ -1,0 +1,35 @@
+============================= test session starts ==============================
+platform linux -- Python 3.8.10, pytest-4.6.9, py-1.8.1, pluggy-0.13.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /export/sonic/sonic-buildimage.claude/tests, inifile: pytest.ini
+collecting ... collected 1 item
+
+stage_25_shim/test_shim.py::test_dpb_counter_continuity 
+=== Phase 1: baseline ===
+  Baseline rates sane for all 12 FLEX_PORTS ✓
+  Bytes growing on: ['Ethernet0', 'Ethernet1', 'Ethernet66', 'Ethernet67'] ✓
+
+=== Phase 2: DPB Ethernet80 → 1x100G[40G] ===
+  Waiting 9s for daemon to re-stabilize after DPB...
+
+  [cleanup] Restoring Ethernet80 to 4x25G[10G]...
+  [cleanup] Ethernet80 restored to 4x25G[10G]
+  [cleanup] Re-added Ethernet80 to VLAN 10
+  [cleanup] Re-added Ethernet81 to VLAN 10
+  [cleanup] Re-added Ethernet82 to VLAN 10
+  [cleanup] Re-added Ethernet83 to VLAN 10
+FAILED
+
+=================================== FAILURES ===================================
+_________________________ test_dpb_counter_continuity __________________________
+stage_25_shim/test_shim.py:1172: in test_dpb_counter_continuity
+    _assert_rates_sane(ssh, WITNESSES)
+stage_25_shim/test_shim.py:353: in _assert_rates_sane
+    assert not violations, (
+E   AssertionError: Rate sanity check failed:
+E       Ethernet0 RX_BPS=449808119205.4 MB/s exceeds 3125.0 MB/s (25G link) — rate explosion
+E       Ethernet0 TX_BPS=449808140707.6 MB/s exceeds 3125.0 MB/s (25G link) — rate explosion
+E       Ethernet1 RX_BPS=449816530166.3 MB/s exceeds 3125.0 MB/s (25G link) — rate explosion
+E       Ethernet1 TX_BPS=449816530166.3 MB/s exceeds 3125.0 MB/s (25G link) — rate explosion
+E   assert not ['Ethernet0 RX_BPS=449808119205.4 MB/s exceeds 3125.0 MB/s (25G link) — rate explosion', 'Ethernet0 TX_BPS=44980814070...s (25G link) — rate explosion', 'Ethernet1 TX_BPS=449816530166.3 MB/s exceeds 3125.0 MB/s (25G link) — rate explosion']
+========================== 1 failed in 52.57 seconds ===========================

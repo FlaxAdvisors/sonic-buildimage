@@ -31,13 +31,22 @@ class VlanTask(ConfigTask):
                     changes.append(Change(
                         item=f"VLAN {vid} member {member}",
                         current="missing",
-                        desired="access member",
-                        cmd=(
-                            f"sudo config vlan member add {vid} {member}"
-                            if member.startswith("Ethernet")
-                            else f"sudo config vlan member add {vid} {member}"
-                        ),
+                        desired="untagged member",
+                        cmd=f"sudo config vlan member add --untagged {vid} {member}",
                     ))
+                else:
+                    # Verify tagging_mode is untagged
+                    out, _, _ = self.ssh.run(
+                        f"redis-cli -n 4 hget 'VLAN_MEMBER|Vlan{vid}|{member}' tagging_mode",
+                        timeout=10,
+                    )
+                    if out.strip() != "untagged":
+                        changes.append(Change(
+                            item=f"VLAN {vid} member {member} tagging",
+                            current=out.strip() or "unset",
+                            desired="untagged",
+                            cmd=f"sudo config vlan member del {vid} {member} && sudo config vlan member add --untagged {vid} {member}",
+                        ))
 
         return changes
 

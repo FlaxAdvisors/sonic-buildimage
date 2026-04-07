@@ -3,17 +3,28 @@ import time
 from .base import Change, ConfigTask
 
 
-def _expected_subports(breakout_ports: list) -> list:
-    """Expand breakout parent → list of expected sub-port names.
+def _subport_offsets(mode: str) -> list:
+    """Return list of lane offsets for a breakout mode.
 
-    After 4x breakout of EthernetN, SONiC creates EthernetN, EthernetN+1,
-    EthernetN+2, EthernetN+3.
+    4x modes (4x25G, 4x10G, etc.) → [0, 1, 2, 3]  (4 ports, 1 lane each)
+    2x modes (2x50G, etc.)         → [0, 2]          (2 ports, 2 lanes each)
+    1x modes (1x100G, default)     → [0]              (single port)
     """
+    if mode.startswith("4x"):
+        return [0, 1, 2, 3]
+    if mode.startswith("2x"):
+        return [0, 2]
+    return [0]
+
+
+def _expected_subports(breakout_ports: list) -> list:
+    """Expand breakout parent → list of expected sub-port names."""
     subports = []
     for bp in breakout_ports:
         parent = bp["parent"]
         base = int(parent.replace("Ethernet", ""))
-        subports.extend([f"Ethernet{base + i}" for i in range(4)])
+        offsets = _subport_offsets(bp["mode"])
+        subports.extend([f"Ethernet{base + i}" for i in offsets])
     return subports
 
 
@@ -46,7 +57,8 @@ class BreakoutTask(ConfigTask):
                 continue
             parent = bp["parent"]
             base = int(parent.replace("Ethernet", ""))
-            subports = [f"Ethernet{base + i}" for i in range(4)]
+            offsets = _subport_offsets(bp["mode"])
+            subports = [f"Ethernet{base + i}" for i in offsets]
 
             for port in subports:
                 # Skip if port doesn't exist in CONFIG_DB yet
@@ -97,6 +109,35 @@ class BreakoutTask(ConfigTask):
                             current=current or "unset",
                             desired=desired,
                             cmd=f"sudo config interface fec {port} {desired}",
+                        ))
+
+                if "autoneg" in sc:
+                    out, _, _ = self.ssh.run(
+                        f"redis-cli -n 4 hget 'PORT|{port}' autoneg", timeout=30
+                    )
+                    current = out.strip()
+                    desired = sc["autoneg"]
+                    if current != desired:
+                        an_mode = "enabled" if desired == "on" else "disabled"
+                        changes.append(Change(
+                            item=f"{port} autoneg",
+                            current=current or "unset",
+                            desired=desired,
+                            cmd=f"sudo config interface autoneg {port} {an_mode}",
+                        ))
+
+                if "adv_speeds" in sc:
+                    out, _, _ = self.ssh.run(
+                        f"redis-cli -n 4 hget 'PORT|{port}' adv_speeds", timeout=30
+                    )
+                    current = out.strip()
+                    desired = sc["adv_speeds"]
+                    if current != desired:
+                        changes.append(Change(
+                            item=f"{port} adv_speeds",
+                            current=current or "unset",
+                            desired=desired,
+                            cmd=f"sudo config interface advertised-speeds {port} {desired}",
                         ))
 
         return changes

@@ -390,18 +390,25 @@ static void write_rates(flex_port_t *fp, const port_row_t *row)
                        + (double)(now.tv_nsec - fp->last_time.tv_nsec) / 1e9;
         if (delta_s <= 0) delta_s = POLL_INTERVAL_S;
 
-        double rx_bps = (double)(in_oct - fp->last_in_oct) / delta_s;
-        double tx_bps = (double)(out_oct - fp->last_out_oct) / delta_s;
-        double rx_pps = (double)((in_uc + in_nuc) -
-                                 (fp->last_in_ucast + fp->last_in_non_ucast)) / delta_s;
-        double tx_pps = (double)((out_uc + out_nuc) -
-                                 (fp->last_out_ucast + fp->last_out_non_ucast)) / delta_s;
+        /* Guard against uint64 underflow when hardware counters are reset
+         * (e.g. syncd restart after DPB resets BCM port counters to 0).
+         * A naive (double)(a - b) with a < b wraps to ~1.84e19 and produces
+         * a multi-TB/s spike — positive, so no signed-clamp catches it.
+         * Compare before subtracting; emit 0 for that cycle on counter reset. */
+        double rx_bps = (in_oct  >= fp->last_in_oct)  ?
+            (double)(in_oct  - fp->last_in_oct)  / delta_s : 0.0;
+        double tx_bps = (out_oct >= fp->last_out_oct) ?
+            (double)(out_oct - fp->last_out_oct) / delta_s : 0.0;
 
-        /* Clamp negative (counter reset after syncd restart). */
-        if (rx_bps < 0) rx_bps = 0;
-        if (tx_bps < 0) tx_bps = 0;
-        if (rx_pps < 0) rx_pps = 0;
-        if (tx_pps < 0) tx_pps = 0;
+        uint64_t in_pkts      = in_uc  + in_nuc;
+        uint64_t last_in_pkts = fp->last_in_ucast  + fp->last_in_non_ucast;
+        uint64_t out_pkts     = out_uc + out_nuc;
+        uint64_t last_out_pkts= fp->last_out_ucast + fp->last_out_non_ucast;
+
+        double rx_pps = (in_pkts  >= last_in_pkts)  ?
+            (double)(in_pkts  - last_in_pkts)  / delta_s : 0.0;
+        double tx_pps = (out_pkts >= last_out_pkts) ?
+            (double)(out_pkts - last_out_pkts) / delta_s : 0.0;
 
         if (fp->rate_state >= 2) {
             /* EWMA smoothing. */

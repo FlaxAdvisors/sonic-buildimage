@@ -57,6 +57,7 @@ typedef struct {
     int      n_lanes;
     int      flex_removed;     /* already deleted from DB 5 */
     int      rate_state;       /* 0=none, 1=have_last, 2=rates_active */
+    int      zero_cycles;      /* cycles BCM returned 0 while awaiting baseline */
     struct timespec last_time;
     uint64_t last_in_oct, last_out_oct;
     uint64_t last_in_ucast, last_in_non_ucast;
@@ -300,6 +301,7 @@ static int refresh_flex_ports(void)
                 strncpy(fp->oid, oid, sizeof(fp->oid) - 1);
                 fp->flex_removed = 0;
                 fp->rate_state = 0;
+                fp->zero_cycles = 0;
                 memset(&fp->smooth_rx_bps, 0, 4 * sizeof(double));
                 oid_changed = 1;
             }
@@ -444,7 +446,26 @@ static void write_rates(flex_port_t *fp, const port_row_t *row)
         redisAppendCommand(g_rdb_counters,
             "HMSET RATES:%s:PORT INIT_DONE DONE", fp->oid);
     } else {
-        /* First cycle: store _last values only, no rates. */
+        /* First cycle: store _last values only, no rates.
+         *
+         * Guard against BCM transient zero: during DPB port reconfiguration
+         * the BCM shell briefly reports 0 bytes for unrelated ports.  If we
+         * commit 0 as the baseline here, the next cycle (with the real ~40 GB
+         * accumulated value) produces a physically impossible rate spike
+         * (e.g. 5934 MB/s on a 25G link) because delta = 40 GB / 3 s.
+         *
+         * Instead, treat in_oct==0 as a missed cycle: extend the waiting
+         * window (update last_time so the eventual delta_s is correct) and
+         * try again next poll.  The real accumulated value will appear once
+         * BCM finishes the port reconfiguration. */
+        if (in_oct == 0) {
+            fp->zero_cycles++;
+            fp->last_time = now;   /* keep window current for when data returns */
+            syslog(LOG_DEBUG, "%s: %s zero_cycle=%d, deferring baseline",
+                   DAEMON_NAME, fp->eth_name, fp->zero_cycles);
+            return;
+        }
+
         redisAppendCommand(g_rdb_counters,
             "HMSET RATES:%s "
             "RX_BPS 0 TX_BPS 0 RX_PPS 0 TX_PPS 0 "
@@ -462,6 +483,10 @@ static void write_rates(flex_port_t *fp, const port_row_t *row)
         redisAppendCommand(g_rdb_counters,
             "HMSET RATES:%s:PORT INIT_DONE COUNTERS_LAST", fp->oid);
 
+        if (fp->zero_cycles > 0)
+            syslog(LOG_INFO, "%s: %s baseline captured after %d zero cycle(s)",
+                   DAEMON_NAME, fp->eth_name, fp->zero_cycles);
+        fp->zero_cycles = 0;
         fp->rate_state = 1;
     }
 

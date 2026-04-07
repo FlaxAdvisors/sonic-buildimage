@@ -58,9 +58,9 @@ THRESH_100G = 90e9
 IPERF_DURATION = 30
 
 # Parallel TCP streams per iperf3 pair.  A single stream on an Intel Atom
-# C2558 tops out ~15-18 Gbps on a 25G link.  Four streams distribute the
+# C2558 tops out ~15-18 Gbps on a 25G link.  Five streams distribute the
 # per-core TCP stack load and consistently achieve >20 Gbps.
-IPERF_PARALLEL = 4
+IPERF_PARALLEL = 5
 
 
 def _host_ssh(mgmt_ip, creds):

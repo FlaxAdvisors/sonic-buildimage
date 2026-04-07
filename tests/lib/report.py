@@ -916,8 +916,9 @@ _TOPO_PATH_REL = os.path.join(os.path.dirname(__file__), '..', '..', 'tools', 't
 _TARGET_CFG_REL = os.path.join(os.path.dirname(__file__), '..', 'target.cfg')
 
 _REPORT_IPERF_DURATION = 10  # seconds — brief spot-check for report mode
+_REPORT_IPERF_PARALLEL = 5   # parallel streams — matches test suite setting
 
-# (server_port, client_port, speed_label, threshold_gbps, round_label)
+# (server_port, client_port, speed_label, threshold_gbps)
 _THROUGHPUT_ROUNDS = [
     [
         ("Ethernet0",  "Ethernet80", "25G cross-QSFP", 20.0),
@@ -926,6 +927,19 @@ _THROUGHPUT_ROUNDS = [
     [
         ("Ethernet80", "Ethernet81", "25G same-QSFP",  20.0),
         ("Ethernet66", "Ethernet0",  "10G×25G cross",   8.0),
+    ],
+]
+
+# Reverse rounds: server/client swapped — exercises OUT counters on the
+# ports that were servers in the forward rounds.
+_THROUGHPUT_ROUNDS_REVERSE = [
+    [
+        ("Ethernet80", "Ethernet0",  "25G cross-QSFP rev", 20.0),
+        ("Ethernet67", "Ethernet66", "10G same-QSFP rev",   8.0),
+    ],
+    [
+        ("Ethernet81", "Ethernet80", "25G same-QSFP rev",  20.0),
+        ("Ethernet0",  "Ethernet66", "10G×25G cross rev",   8.0),
     ],
 ]
 
@@ -957,12 +971,15 @@ def _report_iperf_pair(host_a, host_b, creds, duration):
     srv = _connect(host_a["mgmt_ip"])
     cli = _connect(host_b["mgmt_ip"])
     try:
-        _run(srv, "pkill -f 'iperf3 -s' 2>/dev/null || true")
-        _run(srv, f"nohup iperf3 -s -1 -B {host_a['test_ip']} -D 2>/dev/null &", timeout=5)
-        _time.sleep(1)
+        _run(srv, "pkill -f iperf3 2>/dev/null || true")
+        _run(srv,
+             f"nohup iperf3 -s -1 -B {host_a['test_ip']} </dev/null >/dev/null 2>&1 & "
+             f"sleep 1; ss -tlnp 2>/dev/null | grep -q 5201 && echo LISTENING",
+             timeout=5)
         out, err, rc = _run(
             cli,
-            f"iperf3 -c {host_a['test_ip']} -B {host_b['test_ip']} -t {duration} --json",
+            f"iperf3 -c {host_a['test_ip']} -B {host_b['test_ip']}"
+            f" -t {duration} -P {_REPORT_IPERF_PARALLEL} --json",
             timeout=duration + 15,
         )
         if rc != 0:
@@ -970,7 +987,7 @@ def _report_iperf_pair(host_a, host_b, creds, duration):
         data = _json.loads(out)
         return data["end"]["sum_received"]["bits_per_second"]
     finally:
-        _run(srv, "pkill -f 'iperf3 -s' 2>/dev/null || true")
+        _run(srv, "pkill -f iperf3 2>/dev/null || true")
         srv.close()
         cli.close()
 
@@ -1000,9 +1017,9 @@ def report_throughput(ssh):
 
     all_rows = []
 
-    for round_num, pairs in enumerate(_THROUGHPUT_ROUNDS, start=1):
+    def _run_round(round_num, pairs, arrow):
+        """Run one round (two pairs concurrently) and append rows to all_rows."""
         round_results = {}
-        # Run both pairs in the round concurrently
         with ThreadPoolExecutor(max_workers=2) as ex:
             futures = {}
             for port_a, port_b, label, thresh in pairs:
@@ -1025,23 +1042,33 @@ def report_throughput(ssh):
         for port_a, port_b, label, thresh in pairs:
             key = (port_a, port_b, label, thresh)
             status_code, bps, note = round_results.get(key, ("ERR", None, "future missing"))
+            pair_str = f"R{round_num}: {port_a}{arrow}{port_b}"
             if status_code == "SKIP":
-                all_rows.append((f"R{round_num}: {port_a}↔{port_b}", label, "—", "SKIP", note))
+                all_rows.append((pair_str, label, "—", "SKIP", note))
             elif status_code == "ERR":
-                all_rows.append((f"R{round_num}: {port_a}↔{port_b}", label, "—", "ERROR", note))
+                all_rows.append((pair_str, label, "—", "ERROR", note))
             else:
                 gbps   = bps / 1e9
                 result = "PASS" if gbps >= thresh else "FAIL"
                 all_rows.append((
-                    f"R{round_num}: {port_a}↔{port_b}", label,
+                    pair_str, label,
                     f"{gbps:.2f} Gbps", result,
                     f"threshold {thresh:.0f} Gbps",
                 ))
 
+    for round_num, pairs in enumerate(_THROUGHPUT_ROUNDS, start=1):
+        _run_round(round_num, pairs, "↔")
+
+    all_rows.append(("", "", "", "", ""))   # blank separator row
+
+    for round_num, pairs in enumerate(_THROUGHPUT_ROUNDS_REVERSE, start=1):
+        _run_round(round_num, pairs, "→")
+
     _table(
         ["Pair", "Link", "Measured", "Result", "Note"],
         all_rows,
-        title=f"Host-to-host throughput ({_REPORT_IPERF_DURATION}s iperf3, 2 rounds × 2 concurrent)",
+        title=(f"Host-to-host throughput ({_REPORT_IPERF_DURATION}s iperf3, -P {_REPORT_IPERF_PARALLEL},"
+               f" 2 rounds fwd + 2 rounds rev)"),
     )
 
 

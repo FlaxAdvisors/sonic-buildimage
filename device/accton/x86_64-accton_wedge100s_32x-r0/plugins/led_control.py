@@ -31,6 +31,44 @@ _RUN_DIR = '/run/wedge100s'
 _LED_OFF   = 0x00
 _LED_GREEN = 0x02
 
+# Interface → LEDUP1 DATA_RAM index (LED_port = (first_serdes - 1) / 4).
+# Must be kept in sync with _IFACE_TO_LED_PORT in wedge100s-ledup-linkstate.
+# Derived from th-wedge100s-32x-flex.config.bcm portmap entries.
+_IFACE_TO_LED_PORT = {
+    'Ethernet0':   29,
+    'Ethernet4':   28,
+    'Ethernet8':   31,
+    'Ethernet12':  30,
+    'Ethernet16':   1,
+    'Ethernet20':   0,
+    'Ethernet24':   3,
+    'Ethernet28':   2,
+    'Ethernet32':   5,
+    'Ethernet36':   4,
+    'Ethernet40':   7,
+    'Ethernet44':   6,
+    'Ethernet48':   9,
+    'Ethernet52':   8,
+    'Ethernet56':  11,
+    'Ethernet60':  10,
+    'Ethernet64':  13,
+    'Ethernet68':  12,
+    'Ethernet72':  15,
+    'Ethernet76':  14,
+    'Ethernet80':  17,
+    'Ethernet84':  16,
+    'Ethernet88':  19,
+    'Ethernet92':  18,
+    'Ethernet96':  21,
+    'Ethernet100': 20,
+    'Ethernet104': 23,
+    'Ethernet108': 22,
+    'Ethernet112': 25,
+    'Ethernet116': 24,
+    'Ethernet120': 27,
+    'Ethernet124': 26,
+}
+
 
 def _led_write(attr, val):
     """Write LED value to /run/wedge100s/; daemon handles CPLD write-through."""
@@ -87,3 +125,11 @@ class LedControl(LedControlBase):
         self._port_states[port] = (state == 'up')
         any_up = any(self._port_states.values())
         _led_write('led_sys2', _LED_GREEN if any_up else _LED_OFF)
+        # Fast-path LEDUP1 DATA_RAM coordination: write a .set file so
+        # wedge100s-ledup-linkstate picks up the change on its next poll
+        # iteration rather than waiting up to POLL_INTERVAL_S.
+        # The daemon is authoritative; this is only a hint to reduce latency.
+        led_port = _IFACE_TO_LED_PORT.get(port)
+        if led_port is not None:
+            _led_write('ledup1_port_%d.set' % led_port,
+                       '1' if state == 'up' else '0')

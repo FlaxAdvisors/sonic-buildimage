@@ -529,6 +529,13 @@ if command -v docker >/dev/null 2>&1; then
     fi
 fi
 
+# Enable and start LEDUP1 link-state synchronisation daemon.
+# Keeps BCM56960 LEDUP1 DATA_RAM in sync with STATE_DB oper_status so that
+# port LEDs show blue (down) instead of magenta (always-up) when no link.
+systemctl enable wedge100s-ledup-linkstate.service
+systemctl start  wedge100s-ledup-linkstate.service || true
+echo "wedge100s postinst: enabled wedge100s-ledup-linkstate.service"
+
 # Enable and start the flex-counter-daemon on the host.
 # The C daemon reads breakout port counters from bcmcmd (via the host-side
 # bind-mounted socket at /var/run/docker-syncd/sswsyncd.socket) and writes

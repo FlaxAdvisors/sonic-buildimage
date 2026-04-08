@@ -213,6 +213,11 @@ static redisContext *redis_connect(int db)
         if (c) redisFree(c);
         return NULL;
     }
+    /* Set I/O timeout so reads/writes never block indefinitely.
+     * Without this, a syncd restart that stalls Redis causes the daemon
+     * to hang in redisGetReply() (tcp_recvmsg) forever. */
+    struct timeval io_tv = { .tv_sec = 5, .tv_usec = 0 };
+    redisSetTimeout(c, io_tv);
     redisReply *r = redisCommand(c, "SELECT %d", db);
     if (r) freeReplyObject(r);
     return c;
@@ -290,8 +295,6 @@ static int refresh_flex_ports(void)
     redisReply *map = redisCommand(g_rdb_counters, "HGETALL COUNTERS_PORT_NAME_MAP");
     if (!map || map->type != REDIS_REPLY_ARRAY) {
         if (map) freeReplyObject(map);
-        /* Connection may be broken — redis_ensure() will reconnect next cycle
-         * because redis_check() inspects g_rdb_counters->err. */
         return 0;
     }
 
@@ -599,7 +602,9 @@ int main(void)
         }
 
         /* Refresh breakout port list from Redis (dynamic — adapts to DPB). */
-        refresh_flex_ports();
+        int rfp = refresh_flex_ports();
+        if (rfp)
+            syslog(LOG_INFO, "%s: flex ports refreshed (%d ports)", DAEMON_NAME, g_n_flex);
         if (g_n_flex == 0) continue;
 
         /* Remove breakout ports from FlexCounter every cycle.

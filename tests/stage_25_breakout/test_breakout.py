@@ -27,13 +27,13 @@ def test_flex_counter_daemon_running(ssh):
 def test_flex_counter_daemon_bcm_config(ssh):
     """The daemon has parsed the BCM config and loaded the lane map."""
     out, err, rc = ssh.run(
-        f"grep 'lane entries' /tmp/flex-daemon.log 2>/dev/null; "
-        f"sudo grep 'flex-counter-daemon.*lane entries' /var/log/syslog 2>/dev/null | tail -1",
+        "sudo journalctl -u wedge100s-flex-counter-daemon --no-pager -n 200 2>/dev/null "
+        "| grep 'lane entries' | tail -1",
         timeout=10
     )
     assert "lane entries" in out, (
         "Daemon has not logged BCM config parsing.\n"
-        "Check /tmp/flex-daemon.log or /var/log/syslog for 'lane entries' message."
+        "Check: sudo journalctl -u wedge100s-flex-counter-daemon | grep 'lane entries'"
     )
     print(f"\n{out.strip()}")
 
@@ -41,14 +41,15 @@ def test_flex_counter_daemon_bcm_config(ssh):
 def test_flex_counter_daemon_ps_map(ssh):
     """The daemon has loaded the bcmcmd ps map (connected to diag shell)."""
     out, err, rc = ssh.run(
-        f"grep 'ps map' /tmp/flex-daemon.log 2>/dev/null; "
-        f"sudo grep 'flex-counter-daemon.*ps map' /var/log/syslog 2>/dev/null | tail -1",
+        "sudo journalctl -u wedge100s-flex-counter-daemon --no-pager -n 200 2>/dev/null "
+        "| grep 'ps map' | tail -1",
         timeout=10
     )
     assert "ps map" in out, (
         "Daemon has not connected to bcmcmd (no 'ps map' in log).\n"
-        "Check that syncd is running with diag shell enabled (dsserve).\n"
-        "Socket: /var/run/docker-syncd/sswsyncd.socket"
+        "Check that syncd is running with diag shell enabled.\n"
+        "Socket: /var/run/docker-syncd/sswsyncd.socket\n"
+        "Run: sudo journalctl -u wedge100s-flex-counter-daemon -n 50"
     )
     print(f"\n{out.strip()}")
 
@@ -745,7 +746,7 @@ def test_sonic_clear_counters_flex_and_nonbreakout(ssh):
 
     assert flex_in_pre > 0 or flex_out_pre > 0, (
         f"{FLEX_PORT}: pre-clear COUNTERS_DB still zero after 60s. "
-        "Daemon may not be writing counters — check /tmp/flex-daemon.log."
+        "Daemon may not be writing counters — check: sudo journalctl -u wedge100s-flex-counter-daemon"
     )
     assert nonflex_in_pre > 0 or nonflex_out_pre > 0, (
         f"{NONFLEX_PORT}: pre-clear COUNTERS_DB still zero after 60s. "

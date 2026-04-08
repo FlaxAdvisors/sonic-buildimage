@@ -33,6 +33,15 @@ class Chassis(ChassisBase):
     REBOOT_CAUSE_FILE = "/var/log/sonic/reboot-cause/previous-reboot-cause.txt"
 
     def __init__(self):
+        """Initialize chassis and populate all subsystem lists.
+
+        Populates thermal sensors (8), fan drawers (5), PSUs (2), SFPs (32),
+        system EEPROM, watchdog stub, and firmware components (CPLD, BIOS).
+
+        The SFP list has a None sentinel at index 0 so that get_sfp(N)
+        returns Sfp(N-1) — matching the 1-based port_config.ini index column
+        used by xcvrd.
+        """
         ChassisBase.__init__(self)
         for i in range(NUM_THERMALS):
             self._thermal_list.append(Thermal(i))
@@ -91,6 +100,19 @@ class Chassis(ChassisBase):
     }
 
     def set_status_led(self, color):
+        """Set the system status LED color via the daemon run-file.
+
+        Writes the encoded LED value to /run/wedge100s/led_sys1.
+        The i2c-daemon picks up the value on its next 3-second tick
+        and writes it to the CPLD sysfs attribute.
+
+        Args:
+            color: One of 'green', 'red', 'amber', 'blue', 'off', or a
+                   blink variant ('green_blink', 'red_blink', 'blue_blink').
+
+        Returns:
+            bool: True on successful file write, False on unknown color or I/O error.
+        """
         val = self._LED_ENCODE.get(color)
         if val is None:
             return False
@@ -103,6 +125,13 @@ class Chassis(ChassisBase):
             return False
 
     def get_status_led(self):
+        """Return the current system status LED color string.
+
+        Reads /run/wedge100s/led_sys1 and decodes the CPLD register value.
+
+        Returns:
+            str: Color name matching _LED_DECODE, or STATUS_LED_COLOR_OFF on error.
+        """
         try:
             with open('{}/led_sys1'.format(self._RUN_DIR)) as f:
                 val = int(f.read().strip(), 0)
@@ -111,9 +140,18 @@ class Chassis(ChassisBase):
             return self.STATUS_LED_COLOR_OFF
 
     def get_name(self):
+        """Return the chassis model name."""
         return "Wedge 100S-32X"
 
     def get_system_eeprom_info(self):
+        """Return decoded system EEPROM TLV dictionary.
+
+        Delegates to SysEeprom.get_eeprom().  Keys are hex type-code strings
+        (e.g. '0x21' for Product Name).
+
+        Returns:
+            dict: TLV entries, or {} if the daemon cache is not yet available.
+        """
         return self._eeprom.get_eeprom()
 
     def _bulk_read_presence(self):
@@ -214,18 +252,35 @@ class Chassis(ChassisBase):
         return (self.REBOOT_CAUSE_POWER_LOSS, "")
 
     def get_port_or_cage_type(self, index):
-        """All 32 ports are QSFP28."""
+        """Return cage type for port index.  All 32 ports are QSFP28.
+
+        Args:
+            index: 1-based port index.
+
+        Returns:
+            SfpBase.SFP_PORT_TYPE_BIT_QSFP28 for valid ports, None otherwise.
+        """
         if 1 <= index <= NUM_SFPS:
             return SfpBase.SFP_PORT_TYPE_BIT_QSFP28
         return None
 
     def get_num_components(self):
+        """Return the number of firmware components (CPLD + BIOS = 2)."""
         return len(self._component_list)
 
     def get_all_components(self):
+        """Return the list of all firmware Component objects."""
         return self._component_list
 
     def get_component(self, index):
+        """Return the Component at the given 0-based index, or None if out of range.
+
+        Args:
+            index: 0-based component index.
+
+        Returns:
+            Component object or None.
+        """
         if 0 <= index < len(self._component_list):
             return self._component_list[index]
         return None

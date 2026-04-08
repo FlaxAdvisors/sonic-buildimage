@@ -79,6 +79,13 @@ _SSH_KEY        = '/etc/sonic/wedge100s-bmc-key'
 # ---------------------------------------------------------------------------
 
 def _tty_open():
+    """Open /dev/ttyACM0 at 57600 8N1 for BMC serial console access.
+
+    Retries up to 20 times with 100 ms delay.  Used for provisioning only.
+
+    Returns:
+        int: Open file descriptor on success, -1 on failure.
+    """
     for _ in range(20):
         try:
             fd = os.open(_TTY_DEVICE, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -101,6 +108,11 @@ def _tty_open():
 
 
 def _tty_close(fd):
+    """Close a TTY file descriptor, ignoring errors.
+
+    Args:
+        fd: File descriptor returned by _tty_open(), or -1 (no-op).
+    """
     if fd >= 0:
         try:
             os.close(fd)
@@ -109,6 +121,12 @@ def _tty_close(fd):
 
 
 def _drain(fd, settle=0.05):
+    """Read and discard all pending TTY input until the line is quiet.
+
+    Args:
+        fd: TTY file descriptor.
+        settle: Idle time in seconds after which the drain completes.
+    """
     last_read = time.time()
     while True:
         elapsed = time.time() - last_read
@@ -125,6 +143,16 @@ def _drain(fd, settle=0.05):
 
 
 def _read_until(fd, needle, timeout):
+    """Read from TTY until needle is found or timeout expires.
+
+    Args:
+        fd: TTY file descriptor.
+        needle: Byte sequence to search for (bytes).
+        timeout: Maximum wait time in seconds.
+
+    Returns:
+        bytes: All data read (may or may not contain needle).
+    """
     buf = b''
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -144,6 +172,17 @@ def _read_until(fd, needle, timeout):
 
 
 def _tty_login(fd):
+    """Attempt to reach the BMC shell prompt via TTY login sequence.
+
+    Sends CR; if a login prompt appears, logs in with root / 0penBmc.
+    Retries up to _TTY_RETRY times.
+
+    Args:
+        fd: Open TTY file descriptor.
+
+    Returns:
+        bool: True if the shell prompt was reached, False on timeout.
+    """
     for _ in range(_TTY_RETRY):
         os.write(fd, b'\r\x00')
         buf = _read_until(fd, _TTY_PROMPT, 1.0)

@@ -1,0 +1,20 @@
+[Unit]
+Description=Wedge100S LEDUP1 link-state synchronisation daemon
+Documentation=file:///usr/share/doc/wedge100s-ledup-linkstate
+# Needs platform init (driver + CPLD) and the bcmcmd socket (syncd).
+# We use Wants= (not Requires=) for syncd so a syncd restart does not
+# bring this service down — it reconnects via its own retry loop.
+After=wedge100s-platform-init.service syncd.service
+Requires=wedge100s-platform-init.service
+Wants=syncd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wedge100s-ledup-linkstate
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

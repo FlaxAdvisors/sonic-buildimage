@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""wedge100s-ledup-linkstate — LEDUP1 DATA_RAM link-state synchronisation daemon.
+
+Keeps BCM56960 LEDUP1 DATA_RAM in sync with actual port oper_status so that
+bi-color port LEDs correctly show:
+
+  BLUE only       link down  (LEDUP0 fires, LEDUP1 dark)
+  BLUE + ORANGE   link up    (both chains fire → magenta/pink)
+
+Without this daemon all 32 port LEDs are magenta because BCM SDK initialises
+DATA_RAM[0..63] with link=1 on both chains at SAI port-init time, and the BCM
+linkscan engine continuously overwrites DATA_RAM[0..63] at ~4 Hz.
+
+Architecture:
+  - The LEDUP1 bytecode program (led_proc_init.soc 'led 1 prog') is patched to
+    read port link data from DATA_RAM[led_port+64] instead of DATA_RAM[led_port].
+    Addresses 64..95 are never written by BCM SDK linkscan (safe zone).
+  - Maintains a persistent connection to the bcmcmd Unix socket
+    (/var/run/docker-syncd/sswsyncd.socket) and issues setreg commands
+    directly — same protocol the flex-counter-daemon uses.
+  - Polls STATE_DB PORT_TABLE every POLL_INTERVAL_S for oper_status changes.
+  - On change: issues setreg CMIC_LEDUP1_DATA_RAM(led_port+64) 0x80 (up) or 0x00 (down).
+  - Writes /run/wedge100s/ledup1_port_N (0 or 1) as observable status files.
+  - Watches /run/wedge100s/ledup1_port_N.set for forced overrides written by
+    led_control.py on ledd port_link_state_change() events (fast path, < 1s).
+  - Waits at startup until the bcmcmd socket appears (syncd must be up).
+
+Interface → LED_port mapping is derived from th-wedge100s-32x-flex.config.bcm:
+  LED_port = (first_serdes_lane - 1) / 4
+See led_proc_init.soc header for the authoritative derivation table.
+
+Requires: root, swsscommon Python bindings, syncd container running.
+"""
+
+import os
+import select
+import socket
+import sys
+import time
+import syslog
+
+# ── constants ─────────────────────────────────────────────────────────────────
+
+POLL_INTERVAL_S   = 1
+SOCKET_PATH_HOST  = '/var/run/docker-syncd/sswsyncd.socket'
+SOCKET_READY_WAIT = 180   # seconds to wait for syncd socket at startup
+RUN_DIR           = '/run/wedge100s'
+PROMPT            = b'drivshell>'
+
+# ── interface → LEDUP1 DATA_RAM index mapping ─────────────────────────────────
+# LED_port = (first_serdes - 1) / 4.  Derived from portmap entries in
+# th-wedge100s-32x-flex.config.bcm; authoritative table in led_proc_init.soc.
+
+_IFACE_TO_LED_PORT = {
+    'Ethernet0':   29,
+    'Ethernet4':   28,
+    'Ethernet8':   31,
+    'Ethernet12':  30,
+    'Ethernet16':   1,
+    'Ethernet20':   0,
+    'Ethernet24':   3,
+    'Ethernet28':   2,
+    'Ethernet32':   5,
+    'Ethernet36':   4,
+    'Ethernet40':   7,
+    'Ethernet44':   6,
+    'Ethernet48':   9,
+    'Ethernet52':   8,
+    'Ethernet56':  11,
+    'Ethernet60':  10,
+    'Ethernet64':  13,
+    'Ethernet68':  12,
+    'Ethernet72':  15,
+    'Ethernet76':  14,
+    'Ethernet80':  17,
+    'Ethernet84':  16,
+    'Ethernet88':  19,
+    'Ethernet92':  18,
+    'Ethernet96':  21,
+    'Ethernet100': 20,
+    'Ethernet104': 23,
+    'Ethernet108': 22,
+    'Ethernet112': 25,
+    'Ethernet116': 24,
+    'Ethernet120': 27,
+    'Ethernet124': 26,
+}
+
+# Reverse map for .set file processing
+_LED_PORT_TO_IFACE = {v: k for k, v in _IFACE_TO_LED_PORT.items()}
+
+
+# ── logging ───────────────────────────────────────────────────────────────────
+
+def _log(msg, priority=syslog.LOG_INFO):
+    syslog.syslog(priority, 'ledup-linkstate: ' + msg)
+
+
+# ── bcmcmd socket client ──────────────────────────────────────────────────────
+
+class BcmcmdClient:
+    """Persistent Unix socket connection to bcmcmd diag shell.
+
+    Protocol: connect → read until 'drivshell>' → send cmd\\n →
+              read until 'drivshell>' → return captured output.
+
+    Reconnects automatically on broken pipe / timeout.
+    """
+
+    RECV_TIMEOUT_S = 5
+    READ_BUF = 8192
+
+    def __init__(self, socket_path=SOCKET_PATH_HOST):
+        self._path = socket_path
+        self._sock = None
+
+    def _connect(self):
+        """Open the socket and consume the initial prompt.
+
+        The bcmcmd diag shell does not send a banner on connect; a newline
+        must be sent first to provoke the 'drivshell>' prompt (same behaviour
+        as bcmcmd_client.c::bcmcmd_connect() which calls write_all(fd, "\\n")).
+        """
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.RECV_TIMEOUT_S)
+        sock.connect(self._path)
+        self._sock = sock
+        self._sock.sendall(b'\n')   # provoke initial drivshell> prompt
+        self._read_until_prompt()   # consume it
+
+    def _read_until_prompt(self):
+        """Read bytes from socket until 'drivshell>' appears. Returns full output."""
+        buf = b''
+        while PROMPT not in buf:
+            chunk = self._sock.recv(self.READ_BUF)
+            if not chunk:
+                raise ConnectionResetError('bcmcmd socket closed')
+            buf += chunk
+        # Return everything before the final prompt
+        idx = buf.rfind(PROMPT)
+        return buf[:idx].decode('ascii', errors='replace')
+
+    def cmd(self, command):
+        """Send a single bcmcmd command. Returns output string.
+
+        Reconnects on first failure and retries once.
+        """
+        for attempt in range(2):
+            try:
+                if self._sock is None:
+                    self._connect()
+                self._sock.sendall((command + '\n').encode())
+                return self._read_until_prompt()
+            except (OSError, ConnectionResetError, socket.timeout) as e:
+                if attempt == 0:
+                    _log('socket error (%s), reconnecting' % e, syslog.LOG_WARNING)
+                    self._sock = None
+                    try:
+                        self._connect()
+                    except Exception:
+                        pass
+                else:
+                    raise
+
+    def close(self):
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+def _wait_for_socket(path, timeout_s):
+    """Block until the bcmcmd socket file exists (syncd is ready)."""
+    _log('waiting up to %ds for bcmcmd socket %s' % (timeout_s, path))
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            return True
+        time.sleep(1)
+    return False
+
+
+# ── LEDUP1 DATA_RAM write ─────────────────────────────────────────────────────
+
+def _set_ledup1(bcm, led_port, up):
+    """Write LEDUP1 DATA_RAM[led_port+64] via bcmcmd. Returns True on success.
+
+    The LEDUP1 bytecode program is patched (see led_proc_init.soc 'led 1 prog')
+    to read link state from DATA_RAM[led_port+64] instead of DATA_RAM[led_port].
+    BCM SDK linkscan continuously overwrites DATA_RAM[0..63]; addresses 64..95
+    are never touched by linkscan, so writes here persist across SDK update cycles.
+
+    Must use 'DATA=value' field-qualified syntax.  'setreg REG 0x00' silently
+    fails (no error, value unchanged) while 'setreg REG DATA=0x00' performs a
+    read-modify-write on the DATA field and lands correctly.
+    """
+    val = '0x80' if up else '0x00'
+    cmd = 'setreg CMIC_LEDUP1_DATA_RAM(%d) DATA=%s' % (led_port + 64, val)
+    try:
+        out = bcm.cmd(cmd)
+        # setreg produces no output on success; a BCM error starts with '***'
+        if '***' in out or 'Error' in out:
+            _log('bcmcmd error for %s: %s' % (cmd, out.strip()), syslog.LOG_WARNING)
+            return False
+        return True
+    except Exception as e:
+        _log('bcmcmd exception: %s' % e, syslog.LOG_WARNING)
+        return False
+
+
+def _write_status(led_port, up):
+    """Write /run/wedge100s/ledup1_port_N status file."""
+    path = os.path.join(RUN_DIR, 'ledup1_port_%d' % led_port)
+    try:
+        with open(path, 'w') as f:
+            f.write('1\n' if up else '0\n')
+    except OSError as e:
+        _log('status write %s: %s' % (path, e), syslog.LOG_DEBUG)
+
+
+# ── STATE_DB polling ──────────────────────────────────────────────────────────
+
+def _read_state_db():
+    """Return {iface: bool} for all PORT_TABLE entries in STATE_DB.
+
+    Checks 'oper_status' first; falls back to 'netdev_oper_status'.
+    Returns empty dict on swsscommon failure.
+    """
+    try:
+        from swsscommon.swsscommon import DBConnector, Table
+        db  = DBConnector('STATE_DB', 0)
+        tbl = Table(db, 'PORT_TABLE')
+        states = {}
+        for key in tbl.getKeys():
+            _, fvs = tbl.get(key)
+            fv_map = dict(fvs)
+            status = fv_map.get('oper_status') or fv_map.get('netdev_oper_status')
+            if status is not None:
+                states[key] = (status == 'up')
+        return states
+    except Exception as e:
+        _log('STATE_DB read: %s' % e, syslog.LOG_DEBUG)
+        return {}
+
+
+# ── forced override (.set files) ──────────────────────────────────────────────
+
+def _process_set_files(bcm, current):
+    """Check for ledup1_port_N.set override files. Process and remove them.
+
+    Files are written by led_control.py on ledd port_link_state_change()
+    events for immediate (<1s) response between STATE_DB poll cycles.
+    """
+    try:
+        entries = os.listdir(RUN_DIR)
+    except OSError:
+        return
+
+    for name in entries:
+        if not (name.startswith('ledup1_port_') and name.endswith('.set')):
+            continue
+        path = os.path.join(RUN_DIR, name)
+        try:
+            with open(path) as f:
+                val = f.read().strip()
+            os.unlink(path)
+        except OSError:
+            continue
+
+        try:
+            led_port = int(name[len('ledup1_port_'):-len('.set')])
+        except ValueError:
+            continue
+
+        if not (0 <= led_port <= 31):
+            continue
+
+        up = (val != '0')
+        if _set_ledup1(bcm, led_port, up):
+            _write_status(led_port, up)
+            iface = _LED_PORT_TO_IFACE.get(led_port, '?')
+            _log('override: %s LED_port %d → %s' % (iface, led_port, 'up' if up else 'down'))
+            current[iface] = up
+
+
+# ── state application ─────────────────────────────────────────────────────────
+
+def _apply_states(bcm, new_states, current):
+    """Write DATA_RAM for every changed port. Updates current in place."""
+    changed = 0
+    for iface, up in new_states.items():
+        led_port = _IFACE_TO_LED_PORT.get(iface)
+        if led_port is None:
+            continue   # breakout sub-port or unknown — skip
+        if current.get(iface) == up:
+            continue   # no change
+        if _set_ledup1(bcm, led_port, up):
+            _write_status(led_port, up)
+            _log('%s LED_port %d → %s' % (iface, led_port, 'up' if up else 'down'))
+            current[iface] = up
+            changed += 1
+    return changed
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    syslog.openlog('wedge100s-ledup-linkstate', syslog.LOG_PID)
+    _log('starting')
+
+    os.makedirs(RUN_DIR, exist_ok=True)
+
+    if not _wait_for_socket(SOCKET_PATH_HOST, SOCKET_READY_WAIT):
+        _log('bcmcmd socket not found after %ds — exiting' % SOCKET_READY_WAIT,
+             syslog.LOG_ERR)
+        sys.exit(1)
+
+    _log('bcmcmd socket ready — connecting')
+
+    # Initial sweep: sync all 32 ports to current STATE_DB state.
+    # We hold bcmcmd only for the duration of the initial sweep, then release it.
+    # In steady state we only open bcmcmd when we actually have changes to push,
+    # so that the flex-counter-daemon (which also uses bcmcmd) can interleave.
+    current = {}
+    states = _read_state_db()
+    if states:
+        with BcmcmdClient(SOCKET_PATH_HOST) as bcm:
+            bcm._connect()
+            _log('bcmcmd connected for initial sweep')
+            n = _apply_states(bcm, states, current)
+            _log('initial sweep: %d ports updated (%d changed)' % (len(states), n))
+    else:
+        _log('STATE_DB empty at startup — will sync on next poll',
+             syslog.LOG_WARNING)
+
+    _log('running (poll every %ds, watching %s for overrides)' % (
+         POLL_INTERVAL_S, RUN_DIR))
+
+    while True:
+        time.sleep(POLL_INTERVAL_S)
+        states = _read_state_db()
+        # Detect pending set-file overrides without touching bcmcmd.
+        has_set_files = any(
+            n.startswith('ledup1_port_') and n.endswith('.set')
+            for n in (os.listdir(RUN_DIR) if os.path.isdir(RUN_DIR) else [])
+        )
+        changes = {
+            iface: up for iface, up in states.items()
+            if current.get(iface) != up and iface in _IFACE_TO_LED_PORT
+        }
+        if not (has_set_files or changes):
+            continue  # nothing to do — don't touch bcmcmd this cycle
+        # Open bcmcmd only when we have actual work, release immediately after.
+        with BcmcmdClient(SOCKET_PATH_HOST) as bcm:
+            try:
+                bcm._connect()
+            except Exception as e:
+                _log('bcmcmd connect failed: %s' % e, syslog.LOG_WARNING)
+                continue
+            _process_set_files(bcm, current)
+            _apply_states(bcm, states, current)
+
+
+if __name__ == '__main__':
+    main()

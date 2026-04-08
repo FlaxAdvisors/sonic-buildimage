@@ -1,0 +1,15 @@
+[Unit]
+Description=Wedge100S BMC sensor persistent daemon (SSH-based)
+After=wedge100s-platform-init.service
+Requires=wedge100s-platform-init.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wedge100s-bmc-daemon
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

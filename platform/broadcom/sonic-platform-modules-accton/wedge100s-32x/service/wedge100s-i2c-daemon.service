@@ -1,0 +1,15 @@
+[Unit]
+Description=Wedge100S QSFP I2C persistent daemon (presence + EEPROM cache)
+Documentation=file:///usr/bin/wedge100s-i2c-daemon.c
+After=wedge100s-platform-init.service
+Requires=wedge100s-platform-init.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wedge100s-i2c-daemon
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

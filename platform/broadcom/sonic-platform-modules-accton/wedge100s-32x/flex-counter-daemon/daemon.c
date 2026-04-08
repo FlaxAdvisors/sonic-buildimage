@@ -218,11 +218,23 @@ static redisContext *redis_connect(int db)
     return c;
 }
 
+static void redis_check(redisContext **ctx, int db)
+{
+    if (!*ctx) { *ctx = redis_connect(db); return; }
+    /* Detect broken connections: hiredis sets c->err on I/O failure but
+     * the daemon never clears it.  All subsequent redisCommand() calls
+     * return NULL on a broken context, silently losing OID updates. */
+    if ((*ctx)->err) {
+        redisFree(*ctx);
+        *ctx = redis_connect(db);
+    }
+}
+
 static int redis_ensure(void)
 {
-    if (!g_rdb_counters) g_rdb_counters = redis_connect(2);
-    if (!g_rdb_config)   g_rdb_config   = redis_connect(4);
-    if (!g_rdb_flex)     g_rdb_flex     = redis_connect(5);
+    redis_check(&g_rdb_counters, 2);
+    redis_check(&g_rdb_config,   4);
+    redis_check(&g_rdb_flex,     5);
     return (g_rdb_counters && g_rdb_config && g_rdb_flex) ? 0 : -1;
 }
 
@@ -278,6 +290,8 @@ static int refresh_flex_ports(void)
     redisReply *map = redisCommand(g_rdb_counters, "HGETALL COUNTERS_PORT_NAME_MAP");
     if (!map || map->type != REDIS_REPLY_ARRAY) {
         if (map) freeReplyObject(map);
+        /* Connection may be broken — redis_ensure() will reconnect next cycle
+         * because redis_check() inspects g_rdb_counters->err. */
         return 0;
     }
 

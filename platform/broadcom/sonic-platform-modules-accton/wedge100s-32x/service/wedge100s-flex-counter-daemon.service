@@ -1,0 +1,14 @@
+[Unit]
+Description=Wedge100S flex-counter daemon (breakout sub-port counters via bcmcmd)
+After=syncd.service database.service
+Wants=database.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wedge100s-flex-counter-daemon
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

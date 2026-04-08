@@ -1,3 +1,5 @@
+> **Note:** This fork is based on the `202511` release branch of [sonic-net/sonic-buildimage](https://github.com/sonic-net/sonic-buildimage), not `master`. The GitHub "commits ahead/behind" comparison is against upstream `master` and is misleading.
+
 *master builds*:
 
 [![Broadcom](https://dev.azure.com/mssonic/build/_apis/build/status/broadcom/Azure.sonic-buildimage.official.broadcom?branchName=master&label=Broadcom)](https://dev.azure.com/mssonic/build/_build/latest?definitionId=138&branchName=master)

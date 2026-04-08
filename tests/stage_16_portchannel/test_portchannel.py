@@ -35,12 +35,18 @@ PING_FAILOVER_TIMEOUT = 15       # seconds for ping to recover after member rest
 
 @pytest.fixture(scope="session", autouse=True)
 def stage16_ensure_l2(ssh):
-    """Remove any L3 IP addresses from PortChannel1 so it operates as L2.
+    """Ensure PortChannel1 operates as a pure L2 member of VLAN 999.
 
     Prior L3/BGP configuration may have added a routed IP (e.g. 10.0.1.1/31)
     to PortChannel1. With a routed IP, the port becomes L3 and doesn't
     participate in VLAN 999 L2 forwarding — breaking LAG reachability tests.
+
+    After removing L3 IPs, we must re-apply the VLAN 999 untagged membership
+    to force orchagent to re-program the bridge port PVID.  Without this,
+    untagged frames from the EOS peer arrive as internal VLAN 4095 and are
+    never classified into VLAN 999.
     """
+    changed = False
     out, _, _ = ssh.run(
         f"redis-cli -n 4 keys 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}|*'",
         timeout=10,
@@ -49,7 +55,6 @@ def stage16_ensure_l2(ssh):
         line = line.strip()
         if not line:
             continue
-        # Extract IP from key like PORTCHANNEL_INTERFACE|PortChannel1|10.0.1.1/31
         parts = line.split("|")
         if len(parts) >= 3:
             ip = parts[-1]
@@ -58,11 +63,35 @@ def stage16_ensure_l2(ssh):
                 f"sudo config interface ip remove {PORTCHANNEL_NAME} {ip}",
                 timeout=15,
             )
-    # Also remove the bare PORTCHANNEL_INTERFACE entry if it exists (L3 mode marker)
-    ssh.run(
-        f"redis-cli -n 4 del 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}'",
+            changed = True
+
+    # Remove the bare PORTCHANNEL_INTERFACE entry if it exists (L3 mode marker)
+    bare_out, _, _ = ssh.run(
+        f"redis-cli -n 4 exists 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}'",
         timeout=10,
     )
+    if bare_out.strip() == "1":
+        ssh.run(
+            f"redis-cli -n 4 del 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}'",
+            timeout=10,
+        )
+        changed = True
+
+    # Re-apply VLAN 999 untagged membership to force orchagent to reprogram
+    # the bridge port PVID (necessary after L3→L2 transition).
+    vlan_mode, _, _ = ssh.run(
+        f"redis-cli -n 4 hget 'VLAN_MEMBER|Vlan999|{PORTCHANNEL_NAME}' tagging_mode",
+        timeout=10,
+    )
+    if changed or vlan_mode.strip() != "untagged":
+        print(f"  [setup] Re-applying {PORTCHANNEL_NAME} as untagged member of VLAN 999")
+        ssh.run(f"sudo config vlan member del 999 {PORTCHANNEL_NAME} 2>/dev/null",
+                timeout=10)
+        time.sleep(1)
+        ssh.run(f"sudo config vlan member add --untagged 999 {PORTCHANNEL_NAME}",
+                timeout=10)
+        time.sleep(2)
+
     yield
 
 

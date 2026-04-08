@@ -88,4 +88,17 @@ Environment=TERM=linux
 EOF
 echo "wedge100s postinst: installed serial-getty@ttyS0 drop-in (TERM=linux)"
 
+# Enable BMC sensor persistent daemon.
+# Replaced timer+oneshot with timerfd-driven persistent process.
+mkdir -p /run/wedge100s
+systemctl enable wedge100s-bmc-daemon.service
+systemctl start  wedge100s-bmc-daemon.service || true
+echo "wedge100s postinst: enabled wedge100s-bmc-daemon.service"
+
+# Enable QSFP I2C persistent daemon.
+# Replaced timer+oneshot with timerfd+inotify driven persistent process.
+systemctl enable wedge100s-i2c-daemon.service
+systemctl start  wedge100s-i2c-daemon.service || true
+echo "wedge100s postinst: enabled wedge100s-i2c-daemon.service"
+
 exit 0

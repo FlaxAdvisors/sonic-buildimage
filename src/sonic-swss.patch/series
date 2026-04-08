@@ -1,0 +1,3 @@
+0001-build-use-relative-path-when-building-cargo-dependen.patch
+0002-Remove-lock-option-when-cargo-build.patch
+0003-fix-vxlanorch-expose-doTask-using-declaration.patch

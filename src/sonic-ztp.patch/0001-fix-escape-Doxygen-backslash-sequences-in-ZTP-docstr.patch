@@ -1,0 +1,209 @@
+From dd943981b109601cbe71fdb9f0f40b149ed43ac9 Mon Sep 17 00:00:00 2001
+From: db-at-work <22159364+db-at-work@users.noreply.github.com>
+Date: Sat, 28 Mar 2026 21:52:20 -0700
+Subject: [PATCH] fix: escape Doxygen backslash sequences in ZTP docstrings for
+ Python 3.12+
+
+Python 3.12 promotes SyntaxWarning to visible output for unrecognized escape
+sequences in non-raw strings. ZTP docstrings used Doxygen-style \brief,
+\code, \endcode markers and one grep pattern with \- that triggered this.
+Fix: double the backslashes in docstrings, use raw string for grep pattern.
+---
+ src/usr/lib/python3/dist-packages/ztp/DecodeSysEeprom.py | 2 +-
+ src/usr/lib/python3/dist-packages/ztp/Downloader.py      | 6 +++---
+ src/usr/lib/python3/dist-packages/ztp/JsonReader.py      | 6 +++---
+ src/usr/lib/python3/dist-packages/ztp/Logger.py          | 6 +++---
+ src/usr/lib/python3/dist-packages/ztp/ZTPCfg.py          | 6 +++---
+ src/usr/lib/python3/dist-packages/ztp/ZTPLib.py          | 2 +-
+ src/usr/lib/python3/dist-packages/ztp/ZTPObjects.py      | 6 +++---
+ src/usr/lib/python3/dist-packages/ztp/ZTPSections.py     | 4 ++--
+ 8 files changed, 19 insertions(+), 19 deletions(-)
+
+diff --git a/src/usr/lib/python3/dist-packages/ztp/DecodeSysEeprom.py b/src/usr/lib/python3/dist-packages/ztp/DecodeSysEeprom.py
+index d822cb4..4c2a15d 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/DecodeSysEeprom.py
++++ b/src/usr/lib/python3/dist-packages/ztp/DecodeSysEeprom.py
+@@ -23,7 +23,7 @@ from ztp.ZTPLib import runCommand, printable
+ class DecodeSysEeprom:
+ 
+     '''!
+-    \brief This class allow to log data to stdout and/or to a file.
++    \\brief This class allow to log data to stdout and/or to a file.
+     '''
+ 
+     def __init__(self):
+diff --git a/src/usr/lib/python3/dist-packages/ztp/Downloader.py b/src/usr/lib/python3/dist-packages/ztp/Downloader.py
+index 7f3348d..aa36094 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/Downloader.py
++++ b/src/usr/lib/python3/dist-packages/ztp/Downloader.py
+@@ -27,11 +27,11 @@ from ztp.ZTPLib import runCommand, get_sonic_version, getCfg
+ class Downloader:
+ 
+     '''!
+-    \brief This class allow to use curl to retrieve data from a server.
++    \\brief This class allow to use curl to retrieve data from a server.
+ 
+     Examples of class usage:
+ 
+-    \code
++    \\code
+     ztpDownload = Downloader()
+ 
+     # Success
+@@ -41,7 +41,7 @@ class Downloader:
+     # Failure
+     rc,data = ztpDownload.getUrl('http://10.27.219.247:8081/content/test.txt', 'test.txt');
+     print rc, data
+-    \endcode
++    \\endcode
+     '''
+ 
+     def __init__(self, url=None, dst_file=None, incl_http_headers=None, is_secure=None, timeout=None, retry=None, curl_args=None, encrypted=None):
+diff --git a/src/usr/lib/python3/dist-packages/ztp/JsonReader.py b/src/usr/lib/python3/dist-packages/ztp/JsonReader.py
+index 4b6c6d1..d400038 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/JsonReader.py
++++ b/src/usr/lib/python3/dist-packages/ztp/JsonReader.py
+@@ -23,18 +23,18 @@ from functools import partial
+ class JsonReader(object):
+ 
+     '''!
+-    \brief This class allow to download a json file, and convert it into a Python dict object.
++    \\brief This class allow to download a json file, and convert it into a Python dict object.
+ 
+     When the data change in the dict variable, it can be automatically rewritten either in the original file,
+     or optionaly in a different file.
+ 
+     Examples of class usage:
+-    \code
++    \\code
+     objJson, json_dict = JsonReader("example.json", "saved.json", indent=4)
+     url_dict = json_dict.get('url')
+     data_dict = url_dict.get('data')
+     objJson.set(data_dict, 'first_name', "William", save=True)
+-    \endcode
++    \\endcode
+     '''
+ 
+     def __init__(self, src_json_file=None, dst_json_file=None, create_dst_file_parent_dirs=True, indent=None):
+diff --git a/src/usr/lib/python3/dist-packages/ztp/Logger.py b/src/usr/lib/python3/dist-packages/ztp/Logger.py
+index a89a71f..02025bf 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/Logger.py
++++ b/src/usr/lib/python3/dist-packages/ztp/Logger.py
+@@ -23,7 +23,7 @@ from ztp.ZTPLib import isString, getTimestamp, getCfg, runCommand
+ class Logger:
+ 
+     '''!
+-    \brief This class allow to log data to syslog and/or to a file.
++    \\brief This class allow to log data to syslog and/or to a file.
+ 
+     There are five logging levels, from Debug to Critical.
+     The default mode is to show logs from INFO level and above
+@@ -35,12 +35,12 @@ class Logger:
+ 
+     Examples of class usage:
+ 
+-    \code
++    \\code
+     logger = Logger()
+     logger.setLevel(Logger.ERROR)
+     logger.debug('cmd="%s"' % (cmd))
+     logger.error('An error happened  here')
+-    \endcode
++    \\endcode
+     '''
+ 
+     ## Debug level logging
+diff --git a/src/usr/lib/python3/dist-packages/ztp/ZTPCfg.py b/src/usr/lib/python3/dist-packages/ztp/ZTPCfg.py
+index ba9ff57..59b1220 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/ZTPCfg.py
++++ b/src/usr/lib/python3/dist-packages/ztp/ZTPCfg.py
+@@ -50,17 +50,17 @@ except NameError:
+ class ZTPCfg:
+ 
+     '''!
+-    \brief This class allow to load data from a configuration jason file.
++    \\brief This class allow to load data from a configuration jason file.
+ 
+     The .configuration jason file has only a single level, and contain configurations items structured as
+     key = value
+ 
+     Examples of class usage:
+ 
+-    \code
++    \\code
+     ztpCfg = ZTPCfg()
+     status = ztpCfg.get('status')
+-    \endcode
++    \\endcode
+     '''
+ 
+     ## Constructor for the class
+diff --git a/src/usr/lib/python3/dist-packages/ztp/ZTPLib.py b/src/usr/lib/python3/dist-packages/ztp/ZTPLib.py
+index bea60b0..b492c67 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/ZTPLib.py
++++ b/src/usr/lib/python3/dist-packages/ztp/ZTPLib.py
+@@ -268,7 +268,7 @@ def systemReboot():
+     '''!
+     Helper API to reboot the device.
+     '''
+-    (rc, reboot_help, errStr)  = runCommand('reboot -h | grep "\-y"', use_shell=True)
++    (rc, reboot_help, errStr)  = runCommand(r'reboot -h | grep "\-y"', use_shell=True)
+     if rc == 0:
+         os.system('reboot -y')
+     else:
+diff --git a/src/usr/lib/python3/dist-packages/ztp/ZTPObjects.py b/src/usr/lib/python3/dist-packages/ztp/ZTPObjects.py
+index 5b2b7e9..a2ae460 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/ZTPObjects.py
++++ b/src/usr/lib/python3/dist-packages/ztp/ZTPObjects.py
+@@ -27,7 +27,7 @@ from ztp.ZTPLib import isString, get_sonic_version, runCommand, getField, getCfg
+ 
+ class Identifier:
+     '''!
+-    \brief This class is used to resolve switch identifier string to be used by DynamicURL.
++    \\brief This class is used to resolve switch identifier string to be used by DynamicURL.
+     '''
+ 
+     def getIdentifier(self):
+@@ -89,7 +89,7 @@ class Identifier:
+ 
+ class URL:
+     '''!
+-    \brief This class is used to describe a file that needs to be downloaded.
++    \\brief This class is used to describe a file that needs to be downloaded.
+     '''
+     def getSource(self):
+         '''!
+@@ -158,7 +158,7 @@ class URL:
+ 
+ class DynamicURL:
+     '''!
+-    \brief This class is used to describe a file that needs to be downloaded. The source URL
++    \\brief This class is used to describe a file that needs to be downloaded. The source URL
+      of the remote file is evaluated at runtime wile it is being downloaded.
+     '''
+ 
+diff --git a/src/usr/lib/python3/dist-packages/ztp/ZTPSections.py b/src/usr/lib/python3/dist-packages/ztp/ZTPSections.py
+index 0da76d3..efd16b6 100644
+--- a/src/usr/lib/python3/dist-packages/ztp/ZTPSections.py
++++ b/src/usr/lib/python3/dist-packages/ztp/ZTPSections.py
+@@ -25,7 +25,7 @@ from ztp.Logger import logger
+ 
+ class ConfigSection:
+     '''!
+-    \brief This class is use to store and access input JSON data provided to a configuration section.
++    \\brief This class is use to store and access input JSON data provided to a configuration section.
+     '''
+     def updateStatus(self, obj, status):
+         '''!
+@@ -144,7 +144,7 @@ class ConfigSection:
+ 
+ class ZTPJson(ConfigSection):
+     '''!
+-    \brief This class is use to store and access ZTP JSON data downloaded by ZTP service.
++    \\brief This class is use to store and access ZTP JSON data downloaded by ZTP service.
+     '''
+ 
+     def updateStatus(self, obj, status):
+-- 
+2.25.1
+

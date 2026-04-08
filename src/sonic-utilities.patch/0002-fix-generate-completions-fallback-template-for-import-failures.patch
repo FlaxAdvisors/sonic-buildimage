@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: wedge100s-port <wedge100s@local>
+Date: 2026-03-28
+Subject: [PATCH] fix: generate_completions fallback template when CLI module import fails
+
+generate_completions.py silently drops completion files when a CLI
+module cannot be imported at build time (e.g. transitive dependencies
+not installed in the trixie slave container).  The except block just
+prints a warning and moves on, leaving no completion file for that
+command.
+
+Add a _FALLBACK_TMPL that generates a functionally equivalent Click 8
+bash completion stub: at runtime the shell function sets the
+_<CMD>_COMPLETE=bash_complete env var and invokes the CLI to produce
+completions, which is exactly what Click's own source() method does.
+
+On import failure the fallback template is filled with the command's
+name, env var, and prog string and written to the output file.  The
+result is a completion file that works correctly at runtime where all
+dependencies are present, instead of no file at all.
+---
+ sonic-utilities-data/generate_completions.py | 41 +++++++++++++++++++++++++++-
+ 1 file changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/sonic-utilities-data/generate_completions.py b/sonic-utilities-data/generate_completions.py
+index dfa2ff75..dda736de 100755
+--- a/sonic-utilities-data/generate_completions.py
++++ b/sonic-utilities-data/generate_completions.py
+@@ -7,6 +7,35 @@ from click import BaseCommand
+ from click.shell_completion import get_completion_class
+ import os.path
+
++# Fallback Click 8 bash completion template used when a CLI module cannot be
++# imported at build time (e.g. transitive deps missing in the slave container).
++# The generated shell function is functionally identical to what Click's own
++# source() method would produce: it sets _<CMD>_COMPLETE=bash_complete at
++# runtime so Click performs the actual completion in the user's shell.
++_FALLBACK_TMPL = """\
++_{func}() {{
++    local IFS=$'\\n'
++    local response
++    response=$(env COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD=$COMP_CWORD \\
++               {envvar}=bash_complete {prog} 2>/dev/null)
++    for completion in $response; do
++        IFS=',' read type value <<< "$completion"
++        if [[ $type == 'plain' ]]; then
++            COMPREPLY+=($value)
++        elif [[ $type == 'dir' ]]; then
++            COMPREPLY=(); compopt -o dirnames
++        elif [[ $type == 'file' ]]; then
++            COMPREPLY=(); compopt -o default
++        fi
++    done
++    return 0
++}}
++_{func}_setup() {{
++    complete -o nosort -F _{func} {prog}
++}}
++_{func}_setup;
++"""
++
+
+ def generate_completions(output_dir):
+     entry_points = importlib.metadata.distribution("sonic_utilities").entry_points
+@@ -32,7 +61,17 @@ def generate_completions(output_dir):
+                 with open(os.path.join(output_dir, prog), "w", newline="") as f:
+                     f.write(content)
+         except Exception:
+-            print(f"Cannot generate completion for {path}!")
++            # Import failed (transitive dependency not installed in the build
++            # environment).  Fall back to a static Click 8 template so the
++            # completion file is still shipped.  The generated function is
++            # equivalent to what Click would produce and works at runtime
++            # where all dependencies are present.
++            print(f"Cannot import {path} — using fallback template for {prog}")
++            envvar = f"_{prog.upper().replace('-', '_')}_COMPLETE"
++            func = prog.lower().replace("-", "_") + "_completion"
++            content = _FALLBACK_TMPL.format(func=func, envvar=envvar, prog=prog)
++            with open(os.path.join(output_dir, prog), "w", newline="") as f:
++                f.write(content)
+
+
+ if __name__ == "__main__":

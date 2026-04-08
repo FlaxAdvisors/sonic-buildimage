@@ -1,0 +1,28 @@
+From 18752666b9bf902a72515b92c516ae5210bd78b1 Mon Sep 17 00:00:00 2001
+From: wedge100s-port <wedge100s@local>
+Date: 2026-03-17
+Subject: [PATCH] fix: vxlanorch.h expose doTask via using declaration
+
+VxlanTunnel inherits from both Orch and OrchDaemon.  Orch defines
+multiple doTask() overloads; without a using declaration the private
+virtual doTask(swss::SelectableTimer&) hides Orch::doTask(Consumer&),
+causing a compilation ambiguity with newer compilers (GCC 12+).
+
+Add `using Orch::doTask;` in the private section to make all Orch
+overloads visible alongside the specialised timer variant.
+---
+ orchagent/vxlanorch.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/orchagent/vxlanorch.h b/orchagent/vxlanorch.h
+index ae7cd85..8bd0d24 100644
+--- a/orchagent/vxlanorch.h
++++ b/orchagent/vxlanorch.h
+@@ -372,6 +372,7 @@ public:
+
+
+ private:
++    using Orch::doTask;
+     virtual bool addOperation(const Request& request);
+     virtual bool delOperation(const Request& request);
+     void doTask(swss::SelectableTimer&);

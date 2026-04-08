@@ -1,0 +1,91 @@
+From dd7a9deb5114fe0ffbf6373f5a55d8bf79ed6222 Mon Sep 17 00:00:00 2001
+From: db-at-work <22159364+db-at-work@users.noreply.github.com>
+Date: Sat, 28 Mar 2026 21:42:06 -0700
+Subject: [PATCH] fix(sonic-package-manager): defer Docker init in migrate when
+ socket unavailable
+
+When sonic-installer runs 'sonic-package-manager migrate --dockerd-socket ...'
+inside a chroot, the default Docker socket does not exist. The cli() group
+callback called PackageManager.get_manager() -> docker.from_env() unconditionally,
+causing DockerException before the --dockerd-socket argument could be used.
+
+Fix: catch DockerException in cli() and set ctx.obj=None; in migrate(), create
+the PackageManager with the explicit --dockerd-socket when ctx.obj is None.
+Also add optional dockerd_sock parameter to get_manager() for this path.
+---
+ sonic_package_manager/main.py    | 13 ++++++++++++-
+ sonic_package_manager/manager.py | 14 ++++++++++++--
+ 2 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/sonic_package_manager/main.py b/sonic_package_manager/main.py
+index d305e3c9..e82283fa 100644
+--- a/sonic_package_manager/main.py
++++ b/sonic_package_manager/main.py
+@@ -8,6 +8,7 @@ import typing
+ 
+ import click
+ import click_log
++import docker.errors
+ import tabulate
+ from natsort import natsorted
+ 
+@@ -147,7 +148,10 @@ def get_package_status(package: PackageEntry):
+ def cli(ctx):
+     """ SONiC Package Manager """
+ 
+-    ctx.obj = PackageManager.get_manager()
++    try:
++        ctx.obj = PackageManager.get_manager()
++    except docker.errors.DockerException:
++        ctx.obj = None
+ 
+ 
+ @cli.group()
+@@ -577,6 +581,13 @@ def migrate(ctx, database, force, yes, dockerd_socket):
+     """ Migrate packages from the given database file. """
+ 
+     manager: PackageManager = ctx.obj
++    if manager is None:
++        if not dockerd_socket:
++            exit_cli('Docker is not available. Use --dockerd-socket to specify a Docker socket path.', fg='red')
++        try:
++            manager = PackageManager.get_manager(dockerd_socket)
++        except Exception as err:
++            exit_cli(f'Failed to initialize package manager: {err}', fg='red')
+ 
+     if not yes and not force:
+         click.confirm('Continue with package migration?', abort=True, show_default=True)
+diff --git a/sonic_package_manager/manager.py b/sonic_package_manager/manager.py
+index 32430567..b18ef4b9 100644
+--- a/sonic_package_manager/manager.py
++++ b/sonic_package_manager/manager.py
+@@ -1334,14 +1334,24 @@ class PackageManager:
+                 click.echo("- {}".format(file))
+ 
+     @staticmethod
+-    def get_manager() -> 'PackageManager':
++    def get_manager(dockerd_sock=None) -> 'PackageManager':
+         """ Creates and returns PackageManager instance.
+ 
++        Args:
++            dockerd_sock: Optional path to Docker socket. When provided, connects
++                to that socket instead of the default docker.from_env() path.
++                Used by 'migrate' when running inside a chroot where the default
++                Docker socket is not available.
++
+         Returns:
+             PackageManager
+         """
+ 
+-        docker_api = DockerApi(docker.from_env(), ProgressManager())
++        if dockerd_sock:
++            docker_client = docker.DockerClient(base_url='unix://{}'.format(dockerd_sock))
++        else:
++            docker_client = docker.from_env()
++        docker_api = DockerApi(docker_client, ProgressManager())
+         registry_resolver = RegistryResolver()
+         metadata_resolver = MetadataResolver(docker_api, registry_resolver)
+         cfg_mgmt = config_mgmt.ConfigMgmt(source=INIT_CFG_JSON, sonicYangOptions=ly.LY_CTX_DISABLE_SEARCHDIR_CWD)
+-- 
+2.25.1
+

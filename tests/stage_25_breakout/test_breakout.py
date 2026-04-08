@@ -626,14 +626,17 @@ def test_breakout_transition(ssh):
             _wait_for_oids(ssh, SUB_PORTS, present=True, timeout_s=30)
             print(f"  [cleanup] {PARENT} restored to 4x25G[10G]")
 
-        # DPB removes sub-ports from VLAN 10; re-add them so subsequent tests
-        # (e.g. counter parity via iperf) have L2 connectivity.
+        # DPB removes sub-ports from VLAN 10; re-add as untagged (hosts send
+        # untagged frames).  Plain 'config vlan member add' defaults to tagged,
+        # which silently drops all untagged host traffic.
         for sp in SUB_PORTS:
             vlan_check, _, _ = ssh.run(
-                f"redis-cli -n 4 exists 'VLAN_MEMBER|Vlan10|{sp}'", timeout=5)
-            if vlan_check.strip() != "1":
-                ssh.run(f"sudo config vlan member add 10 {sp}", timeout=10)
-                print(f"  [cleanup] Re-added {sp} to VLAN 10")
+                f"redis-cli -n 4 hget 'VLAN_MEMBER|Vlan10|{sp}' tagging_mode",
+                timeout=5)
+            if vlan_check.strip() != "untagged":
+                ssh.run(f"sudo config vlan member del 10 {sp} 2>/dev/null; "
+                        f"sudo config vlan member add --untagged 10 {sp}", timeout=10)
+                print(f"  [cleanup] Re-added {sp} to VLAN 10 (untagged)")
 
 
 def test_nonbreakout_dpb_round_trip_retains_stats(ssh):
@@ -1246,12 +1249,15 @@ def test_dpb_counter_continuity(ssh):
             except AssertionError as e:
                 print(f"  [cleanup] WARNING: OID wait after restore failed: {e}")
 
-        # DPB removes sub-ports from VLAN 10; re-add them so subsequent tests
-        # (sonic-clear counters, iperf parity) have L2 connectivity.
+        # DPB removes sub-ports from VLAN 10; re-add as untagged (hosts send
+        # untagged frames).  Plain 'config vlan member add' defaults to tagged,
+        # which silently drops all untagged host traffic.
         for sp in DPB_PORTS:
             vlan_check, _, _ = ssh.run(
-                f"redis-cli -n 4 exists 'VLAN_MEMBER|Vlan10|{sp}'", timeout=5
+                f"redis-cli -n 4 hget 'VLAN_MEMBER|Vlan10|{sp}' tagging_mode",
+                timeout=5
             )
-            if vlan_check.strip() != "1":
-                ssh.run(f"sudo config vlan member add 10 {sp}", timeout=10)
+            if vlan_check.strip() != "untagged":
+                ssh.run(f"sudo config vlan member del 10 {sp} 2>/dev/null; "
+                        f"sudo config vlan member add --untagged 10 {sp}", timeout=10)
                 print(f"  [cleanup] Re-added {sp} to VLAN 10")

@@ -33,6 +33,39 @@ TEAMDCTL_RECOVER_TIMEOUT = 30    # seconds for both members to reselect
 PING_FAILOVER_TIMEOUT = 15       # seconds for ping to recover after member restore
 
 
+@pytest.fixture(scope="session", autouse=True)
+def stage16_ensure_l2(ssh):
+    """Remove any L3 IP addresses from PortChannel1 so it operates as L2.
+
+    Prior L3/BGP configuration may have added a routed IP (e.g. 10.0.1.1/31)
+    to PortChannel1. With a routed IP, the port becomes L3 and doesn't
+    participate in VLAN 999 L2 forwarding — breaking LAG reachability tests.
+    """
+    out, _, _ = ssh.run(
+        f"redis-cli -n 4 keys 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}|*'",
+        timeout=10,
+    )
+    for line in out.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Extract IP from key like PORTCHANNEL_INTERFACE|PortChannel1|10.0.1.1/31
+        parts = line.split("|")
+        if len(parts) >= 3:
+            ip = parts[-1]
+            print(f"  [setup] Removing L3 IP {ip} from {PORTCHANNEL_NAME}")
+            ssh.run(
+                f"sudo config interface ip remove {PORTCHANNEL_NAME} {ip}",
+                timeout=15,
+            )
+    # Also remove the bare PORTCHANNEL_INTERFACE entry if it exists (L3 mode marker)
+    ssh.run(
+        f"redis-cli -n 4 del 'PORTCHANNEL_INTERFACE|{PORTCHANNEL_NAME}'",
+        timeout=10,
+    )
+    yield
+
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------

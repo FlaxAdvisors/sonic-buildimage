@@ -1,5 +1,6 @@
-/*
- * wedge100s-bmc-daemon.c — BMC sensor polling daemon (SSH-based).
+/**
+ * @file wedge100s-bmc-daemon.c
+ * @brief BMC sensor polling daemon for the Wedge 100S-32X (SSH-based).
  *
  * Establishes an SSH ControlMaster session to the BMC over the CDC-ECM
  * USB link (usb0, IPv6 link-local fe80::ff:fe00:1%usb0), reads all sensors
@@ -81,9 +82,15 @@ static const char SSH_EXIT[] =
     "-O exit root@fe80::ff:fe00:1%usb0 2>/dev/null";
 
 /* ── write_file ──────────────────────────────────────────────────────────── */
-/*
- * Write a decimal integer (and newline) to path.
- * On failure the previous file value is preserved.
+/**
+ * @brief Write a decimal integer followed by a newline to a file.
+ *
+ * On failure the previous file content is preserved (the file is not
+ * truncated before the write attempt).
+ *
+ * @param path  Absolute path of the file to write.
+ * @param value Integer value to write.
+ * @return 0 on success, -1 if fopen() failed.
  */
 static int write_file(const char *path, int value)
 {
@@ -95,10 +102,19 @@ static int write_file(const char *path, int value)
 }
 
 /* ── build_ssh_cmd ───────────────────────────────────────────────────────── */
-/*
- * Construct a full SSH command by concatenating the static SSH_CTL prefix
- * with the quoted BMC command.  Avoids using SSH_CTL as a printf format
- * string (which would misinterpret the literal '%' in the IPv6 zone-id).
+/**
+ * @brief Construct a complete SSH command string for a BMC remote command.
+ *
+ * Concatenates the static SSH_CTL prefix (ControlMaster=no socket reuse)
+ * with the quoted BMC command and an optional suffix. Avoids using SSH_CTL
+ * as a printf format string to prevent misinterpretation of the literal '%'
+ * in the IPv6 zone-id.
+ *
+ * @param buf     Output buffer for the assembled shell command.
+ * @param bufsz   Size of buf in bytes.
+ * @param bmc_cmd BMC shell command to execute (will be single-quoted).
+ * @param suffix  Optional string appended after the quoted command (e.g.
+ *                " >/dev/null 2>&1"), or NULL for none.
  */
 static void build_ssh_cmd(char *buf, size_t bufsz,
                            const char *bmc_cmd, const char *suffix)
@@ -116,7 +132,14 @@ static const char SSH_CHECK[] =
     "-O check root@fe80::ff:fe00:1%usb0 2>/dev/null";
 
 /* ── bmc_run ─────────────────────────────────────────────────────────────── */
-/* Run a BMC shell command via the ControlMaster socket; ignore output. */
+/**
+ * @brief Execute a BMC shell command via the SSH ControlMaster socket.
+ *
+ * Output (stdout and stderr) is discarded. Used for fire-and-forget
+ * commands such as i2cset and LED diagnostic script invocations.
+ *
+ * @param bmc_cmd Shell command to run on the BMC.
+ */
 static void bmc_run(const char *bmc_cmd)
 {
     char shell_cmd[512];
@@ -125,10 +148,17 @@ static void bmc_run(const char *bmc_cmd)
 }
 
 /* ── bmc_read_int ────────────────────────────────────────────────────────── */
-/*
- * Run bmc_cmd via SSH, parse the first output line as an integer.
- * base: 10 for decimal sysfs, 0 for auto (handles "0x…" i2cget output).
- * Returns 0 on success, -1 on SSH failure or parse failure.
+/**
+ * @brief Run a BMC command via SSH and parse its first output line as an integer.
+ *
+ * Uses popen() over the ControlMaster socket. Strips trailing newline before
+ * parsing with strtol().
+ *
+ * @param bmc_cmd Shell command to run on the BMC.
+ * @param base    Numeric base for strtol(): 10 for decimal sysfs values,
+ *                0 for auto-detect (handles "0x..." i2cget output).
+ * @param result  Out-parameter populated with the parsed integer on success.
+ * @return 0 on success, -1 on SSH failure, empty output, or parse error.
  */
 static int bmc_read_int(const char *bmc_cmd, int base, int *result)
 {
@@ -159,6 +189,14 @@ static int bmc_read_int(const char *bmc_cmd, int base, int *result)
 
 /* ── connection management ─────────────────────────────────────────────── */
 
+/**
+ * @brief Establish the SSH ControlMaster session to the BMC.
+ *
+ * Runs ssh with ControlMaster=yes and -f -N to background the master.
+ * Sleeps 200 ms after the system() call to allow the socket to become ready.
+ *
+ * @return 0 on success, -1 if ssh exits non-zero.
+ */
 static int ssh_master_connect(void)
 {
     if (system(SSH_MASTER) != 0) return -1;
@@ -166,23 +204,35 @@ static int ssh_master_connect(void)
     return 0;
 }
 
+/**
+ * @brief Send an ssh -O exit command to terminate the ControlMaster socket.
+ */
 static void ssh_control_exit(void)
 {
     (void)system(SSH_EXIT);
 }
 
-/* Returns 0 if the ControlMaster socket is alive, non-zero otherwise. */
+/**
+ * @brief Check whether the SSH ControlMaster socket is still alive.
+ *
+ * Uses ssh -O check against the ControlPath socket.
+ *
+ * @return 0 if the socket is alive, non-zero otherwise.
+ */
 static int ssh_control_check(void)
 {
     return system(SSH_CHECK);
 }
 
-/*
- * bmc_connect — push SSH key via TTY, establish ControlMaster, read
- * one-time values.
+/**
+ * @brief Push the SSH public key to the BMC and establish the ControlMaster.
  *
- * Called on startup and on every reconnect.  Always re-pushes the key
- * because the BMC clears authorized_keys on every BMC reboot.
+ * Calls wedge100s-bmc-auth to push the key via /dev/ttyACM0, then starts the
+ * SSH ControlMaster session. Always re-pushes the key because the BMC clears
+ * authorized_keys on every BMC reboot. Also reads and caches qsfp_led_position
+ * (gpio59 board strap) on every (re)connect.
+ *
+ * @return 0 on success, -1 if key push or ControlMaster setup fails.
  */
 static int bmc_connect(void)
 {
@@ -214,10 +264,14 @@ static int bmc_connect(void)
     return 0;
 }
 
-/*
- * bmc_ensure_connected — check socket liveness; reconnect if dead.
- * Returns 0 if connected (or reconnect succeeded), -1 on failure.
- * On failure, existing /run/wedge100s/ files retain their last-good values.
+/**
+ * @brief Ensure the BMC SSH ControlMaster socket is alive, reconnecting if needed.
+ *
+ * Calls ssh_control_check(); if the socket is dead, closes it, removes the
+ * stale socket file, and calls bmc_connect() to re-establish. On failure,
+ * existing /run/wedge100s/ files retain their last-good values.
+ *
+ * @return 0 if connected (or reconnect succeeded), -1 on reconnect failure.
  */
 static int bmc_ensure_connected(void)
 {
@@ -236,6 +290,16 @@ static const struct {
     { "clear_led_diag.set", "/usr/local/bin/clear_led_diag.sh" },
 };
 
+/**
+ * @brief Drain inotify events and dispatch pending write-request files to the BMC.
+ *
+ * Reads IN_CLOSE_WRITE events from inotify_fd. For each .set file detected,
+ * handles named special cases (cpld_led_ctrl.set, led_ctrl_write.set,
+ * led_color_read.set) then falls through to the write_requests[] dispatch
+ * table. Request files are unlinked after processing.
+ *
+ * @param inotify_fd File descriptor returned by inotify_init1().
+ */
 static void dispatch_write_requests(int inotify_fd)
 {
     char ibuf[sizeof(struct inotify_event) + NAME_MAX + 1];

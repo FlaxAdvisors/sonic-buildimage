@@ -30,7 +30,14 @@ _lock = threading.Lock()
 
 
 def _ensure_bus(bus_num):
-    """Open bus if not already attempted.  Called with _lock held."""
+    """Open bus_num if not already in the pool.  Called with _lock held.
+
+    Args:
+        bus_num: I2C bus number to open (/dev/i2c-N).
+
+    Returns:
+        smbus2.SMBus instance or None if open failed or smbus2 unavailable.
+    """
     if bus_num not in _pool:
         if not _SMBUS2_AVAILABLE:
             _pool[bus_num] = None

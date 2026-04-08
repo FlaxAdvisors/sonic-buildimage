@@ -26,8 +26,16 @@ _ONIE_MAGIC             = b'TlvInfo\x00'
 
 
 class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
+    """System EEPROM reader for Accton Wedge 100S-32X.
+
+    Reads the ONIE TlvInfo EEPROM from the daemon cache file at
+    /run/wedge100s/syseeprom, written by wedge100s-i2c-daemon on first boot.
+    Caches the parsed TLV dictionary permanently after a successful read
+    since the EEPROM content is static hardware identity data.
+    """
 
     def __init__(self):
+        """Initialize SysEeprom.  Reads are deferred until get_eeprom() is called."""
         # TlvInfoDecoder base path is not used (read_eeprom is fully overridden).
         super(SysEeprom, self).__init__('', 0, '', False)
         self._eeprom_cache = None
@@ -88,4 +96,5 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
         return result
 
     def system_eeprom_info(self):
+        """Alias for get_eeprom() — satisfies the syseepromd API surface."""
         return self.get_eeprom()

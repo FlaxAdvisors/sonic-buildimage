@@ -1,5 +1,14 @@
-/* stat_map.c — SAI port stat -> bcmcmd counter name mapping.
- * Moved from sai-stat-shim to flex-counter-daemon. */
+/**
+ * @file stat_map.c
+ * @brief SAI port stat to bcmcmd counter name mapping table.
+ *
+ * Defines g_stat_map[] mapping sai_port_stat_t values to BCM 'show c all'
+ * counter names.  Compound stats (e.g. IF_IN_NON_UCAST_PKTS) use name2
+ * to specify a second counter to add.  Also provides field name strings
+ * for COUNTERS_DB HSET operations.
+ *
+ * Moved from sai-stat-shim to flex-counter-daemon.
+ */
 #include "stat_map.h"
 
 #include <string.h>

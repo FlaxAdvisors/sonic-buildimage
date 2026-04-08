@@ -97,6 +97,15 @@ mknod = [
 
 
 def main():
+    """Parse command-line arguments and dispatch to the appropriate subcommand.
+
+    Subcommands:
+        install   Load kernel modules and register I2C devices.
+        clean     Unregister I2C devices and unload kernel modules.
+        show      Display PSU presence, QSFP presence, and BMC sensor state.
+        sff <N>   Dump QSFP EEPROM bytes for port N (1-32).
+        set ...   Set fan speed, LED color, or QSFP tx_disable state.
+    """
     global DEBUG, args, FORCE
 
     if len(sys.argv) < 2:
@@ -161,11 +170,25 @@ def show_eeprom_help():
 
 
 def my_log(txt):
+    """Print a debug message prefixed with '[DBG]' when DEBUG is enabled.
+
+    Args:
+        txt: Message text to print.
+    """
     if DEBUG:
         print("[DBG] " + txt)
 
 
 def log_os_system(cmd, show):
+    """Run a shell command and log its output in debug mode.
+
+    Args:
+        cmd: Shell command string to execute.
+        show: If True, print a 'Failed:' message on non-zero exit.
+
+    Returns:
+        tuple: (exit_status, output_string) from subprocess.getstatusoutput.
+    """
     logging.info('Run :' + cmd)
     status, output = subprocess.getstatusoutput(cmd)
     my_log(cmd + " => " + str(status))
@@ -192,10 +215,23 @@ def device_exist():
 
 
 def system_ready():
+    """Return True if drivers are loaded and I2C devices are registered.
+
+    Returns:
+        bool: True if both driver_check() and device_exist() pass.
+    """
     return driver_check() and device_exist()
 
 
 def driver_install():
+    """Load all required kernel modules listed in the kos array.
+
+    Runs 'depmod' first, then each modprobe command in order.
+    Stops on the first failure unless FORCE is set.
+
+    Returns:
+        int: 0 on success, non-zero exit code on first failure.
+    """
     global FORCE
     log_os_system("depmod", 1)
     for ko in kos:
@@ -206,6 +242,11 @@ def driver_install():
 
 
 def driver_uninstall():
+    """Unload kernel modules in reverse order from the kos array.
+
+    Returns:
+        int: 0 on success, non-zero exit code on first failure.
+    """
     global FORCE
     for ko in reversed(kos):
         rm = ko.replace("modprobe", "modprobe -rq")
@@ -216,6 +257,14 @@ def driver_uninstall():
 
 
 def device_install():
+    """Register I2C devices by writing to new_device sysfs entries.
+
+    Executes each command in the mknod list.  Stops on the first failure
+    unless FORCE is set.
+
+    Returns:
+        int: 0 on success, non-zero exit code on first failure.
+    """
     global FORCE
     for cmd in mknod:
         if 'pca954' in cmd:

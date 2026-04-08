@@ -1,4 +1,6 @@
-/* daemon.c — Flex counter daemon for Wedge100S-32X.
+/**
+ * @file daemon.c
+ * @brief Flex counter daemon for Wedge 100S-32X.
  *
  * Replaces FlexCounter for breakout sub-ports (<4 lanes) where SAI
  * get_port_stats fails on Tomahawk.  Polls bcmcmd 'show c all' every
@@ -95,6 +97,13 @@ static counter_cache_t g_cache;
 
 static volatile sig_atomic_t g_running = 1;
 
+/**
+ * @brief Signal handler for SIGTERM and SIGINT.
+ *
+ * Sets g_running to 0 so the main loop exits cleanly on the next iteration.
+ *
+ * @param sig Signal number (unused).
+ */
 static void sig_handler(int sig)
 {
     (void)sig;
@@ -107,6 +116,14 @@ static const char *g_socket_path = BCMCMD_SOCKET_HOST;
 
 /* ---- BCM config parser ---- */
 
+/**
+ * @brief Parse portmap_N.0=lane:speed entries from a BCM config file.
+ *
+ * Populates g_lane_map[] with (physical_lane, sdk_port) pairs used to
+ * map COUNTERS:LANES entries to BCM port names.
+ *
+ * @param path Path to the .config.bcm file.
+ */
 static void parse_bcm_config(const char *path)
 {
     FILE *f = fopen(path, "r");
@@ -128,6 +145,14 @@ static void parse_bcm_config(const char *path)
            DAEMON_NAME, g_lane_map_size, path);
 }
 
+/**
+ * @brief Auto-detect the BCM config file path by glob search.
+ *
+ * Checks the container path first, then the host device path.
+ *
+ * @return Pointer to a static string with the resolved path,
+ *         or NULL if no .config.bcm file is found.
+ */
 static const char *auto_detect_bcm_config(void)
 {
     static char path[256];
@@ -151,6 +176,12 @@ static const char *auto_detect_bcm_config(void)
 
 /* ---- lookup helpers ---- */
 
+/**
+ * @brief Look up the SDK port number for a physical lane.
+ *
+ * @param lane Physical lane number from COUNTERS:LANES.
+ * @return SDK port number, or -1 if not found in g_lane_map[].
+ */
 static int sdk_port_for_lane(uint32_t lane)
 {
     for (int i = 0; i < g_lane_map_size; i++)
@@ -159,6 +190,12 @@ static int sdk_port_for_lane(uint32_t lane)
     return -1;
 }
 
+/**
+ * @brief Look up the BCM port name for an SDK port number.
+ *
+ * @param sdk_port SDK port number from the 'ps' command output.
+ * @return BCM port name string (e.g. "xe0"), or NULL if not found.
+ */
 static const char *port_name_for_sdk(int sdk_port)
 {
     for (int i = 0; i < g_ps_map_size; i++)
@@ -167,6 +204,12 @@ static const char *port_name_for_sdk(int sdk_port)
     return NULL;
 }
 
+/**
+ * @brief Count the number of comma-separated lane values in string s.
+ *
+ * @param s Lane list string (e.g. "5,6,7,8" for a 4-lane port).
+ * @return Number of lanes (always >= 1).
+ */
 static int count_lanes(const char *s)
 {
     int n = 1;

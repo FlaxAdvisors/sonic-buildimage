@@ -159,6 +159,12 @@ class LedupAccess:
     """
 
     def __init__(self):
+        """Open /dev/mem and map BCM56960 BAR2 for LEDUP register access.
+
+        Raises:
+            RuntimeError: If the BCM56960 PCI device is not found.
+            OSError: If /dev/mem cannot be opened (requires root).
+        """
         self._bar_addr, self._bar_size = find_bcm_bar2()
         self._fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
         self._mm = mmap.mmap(
@@ -168,6 +174,7 @@ class LedupAccess:
         )
 
     def close(self):
+        """Unmap /dev/mem and close the file descriptor."""
         if self._mm:
             self._mm.close()
             self._mm = None
@@ -176,9 +183,11 @@ class LedupAccess:
             self._fd = -1
 
     def __enter__(self):
+        """Return self for use as a context manager."""
         return self
 
     def __exit__(self, *exc):
+        """Close the mapping on context manager exit."""
         self.close()
 
     def bar2_info(self):
@@ -196,24 +205,78 @@ class LedupAccess:
         self._mm.write(struct.pack("<I", value & 0xFFFFFFFF))
 
     def read_ctrl(self, proc):
+        """Read the LEDUP_CTRL register for processor proc (0 or 1).
+
+        Args:
+            proc: LED processor number (0 = LEDUP0, 1 = LEDUP1).
+
+        Returns:
+            int: 32-bit register value.
+        """
         return self.reg_read32(_CTRL_BASES[proc])
 
     def write_ctrl(self, proc, value):
+        """Write the LEDUP_CTRL register for processor proc.
+
+        Args:
+            proc: LED processor number.
+            value: 32-bit value to write.
+        """
         self.reg_write32(_CTRL_BASES[proc], value)
 
     def read_status(self, proc):
+        """Read the LEDUP_STATUS register for processor proc.
+
+        Args:
+            proc: LED processor number.
+
+        Returns:
+            int: 32-bit status register value.
+        """
         return self.reg_read32(_STATUS_BASES[proc])
 
     def read_data_ram(self, proc, index):
+        """Read one byte from DATA_RAM[index] for processor proc.
+
+        Args:
+            proc: LED processor number.
+            index: DATA_RAM index (0-255).
+
+        Returns:
+            int: Byte value (0-255).
+        """
         return self.reg_read32(data_ram_offset(proc, index)) & 0xFF
 
     def write_data_ram(self, proc, index, value):
+        """Write one byte to DATA_RAM[index] for processor proc.
+
+        Args:
+            proc: LED processor number.
+            index: DATA_RAM index (0-255).
+            value: Byte value to write (0-255).
+        """
         self.reg_write32(data_ram_offset(proc, index), value & 0xFF)
 
     def read_program_ram(self, proc, index):
+        """Read one byte from PROGRAM_RAM[index] for processor proc.
+
+        Args:
+            proc: LED processor number.
+            index: PROGRAM_RAM index (0-255).
+
+        Returns:
+            int: Byte value (0-255).
+        """
         return self.reg_read32(program_ram_offset(proc, index)) & 0xFF
 
     def write_program_ram(self, proc, index, value):
+        """Write one byte to PROGRAM_RAM[index] for processor proc.
+
+        Args:
+            proc: LED processor number.
+            index: PROGRAM_RAM index (0-255).
+            value: Byte value to write (0-255).
+        """
         self.reg_write32(program_ram_offset(proc, index), value & 0xFF)
 
     def load_bytecode(self, proc, bytecodes):

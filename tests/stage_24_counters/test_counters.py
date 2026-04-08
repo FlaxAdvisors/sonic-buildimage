@@ -111,7 +111,7 @@ def test_counters_key_fields_present(ssh):
     """COUNTERS_DB has all expected RX and TX stat fields for a non-breakout 100G port.
 
     Tested on Ethernet16 (non-breakout 100G).  Flex sub-ports (Ethernet0-3 etc.)
-    also have the full IF counter set via the SAI stat shim (libsai-stat-shim.so).
+    also have the full IF counter set via the flex-counter daemon (bcmcmd path).
     """
     EXPECTED_STATS = [
         "SAI_PORT_STAT_IF_IN_OCTETS",

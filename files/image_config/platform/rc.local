@@ -312,11 +312,18 @@ if [ -f $FIRST_BOOT_FILE ]; then
     if [ -d /host/image-$SONIC_VERSION/platform/$platform ]; then
         if [ -f /host/image-$SONIC_VERSION/platform/common/Packages.gz ]; then
             # Use only the trivial repo and apt to support lazy package dependencies
+            # Move aside both sources.list AND sources.list.d to prevent any
+            # external apt sources (e.g. docker.com) from being queried during
+            # first-boot platform install — DNS is not yet up at this point.
             mv /etc/apt/sources.list /etc/apt/sources.list.rc-local
+            mv /etc/apt/sources.list.d /etc/apt/sources.list.d.rc-local
+            mkdir -p /etc/apt/sources.list.d
             echo "deb [trusted=yes] file:///host/image-$SONIC_VERSION/platform/common /" > /etc/apt/sources.list.d/sonic_debian_extension.list
             LANG=C DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 update
             LANG=C DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Path=$PATH:/usr/local/bin -y install /host/image-$SONIC_VERSION/platform/$platform/*.deb
             # Cleanup
+            rm -rf /etc/apt/sources.list.d
+            mv /etc/apt/sources.list.d.rc-local /etc/apt/sources.list.d
             rm -f /etc/apt/sources.list.d/sonic_debian_extension.list
             rm -f /var/lib/apt/lists/_host_image-${SONIC_VERSION}_platform_common_Packages.lz4
             # This is first boot so there should be no package lists or indices to restore, just the sources

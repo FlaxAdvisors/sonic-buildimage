@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+
+# Stop and disable flex-counter-daemon.
+systemctl stop  wedge100s-flex-counter-daemon.service 2>/dev/null || true
+systemctl disable wedge100s-flex-counter-daemon.service 2>/dev/null || true
+
+# Remove syncd.sh LD_PRELOAD shim patch (legacy — may still be present from
+# earlier installs that used the LD_PRELOAD shim approach).
+SYNCD_SH="/usr/bin/syncd.sh"
+if [ -f "$SYNCD_SH" ] && grep -q "libsai-stat-shim" "$SYNCD_SH"; then
+    python3 - <<'PYEOF'
+import sys, re
+SYNCD_SH = "/usr/bin/syncd.sh"
+with open(SYNCD_SH) as fh:
+    text = fh.read()
+text = re.sub(
+    r'        --env "LD_PRELOAD=/usr/share/sonic/platform/libsai-stat-shim\.so" \\\n'
+    r'        --env "WEDGE100S_BCM_CONFIG=[^"]*" \\\n',
+    '', text
+)
+with open(SYNCD_SH, 'w') as fh:
+    fh.write(text)
+print("wedge100s prerm: removed shim LD_PRELOAD from " + SYNCD_SH)
+PYEOF
+fi
+
+exit 0

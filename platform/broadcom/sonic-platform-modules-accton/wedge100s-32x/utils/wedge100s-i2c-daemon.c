@@ -1,5 +1,6 @@
-/*
- * wedge100s-i2c-daemon.c — Event-driven QSFP presence + EEPROM cache daemon.
+/**
+ * @file wedge100s-i2c-daemon.c
+ * @brief Event-driven QSFP presence and EEPROM cache daemon for Wedge 100S-32X.
  *
  * Usage: wedge100s-i2c-daemon poll-presence
  *
@@ -148,7 +149,11 @@ static int g_hidraw_fd = -1;
 #define LP_MODE_READY_NS  2500000000LL   /* 2.5 s: SFF-8636 module MCU init */
 static long long g_lp_deassert_ns[NUM_PORTS];  /* 0 = no recent deassert */
 
-/* Return current CLOCK_MONOTONIC time in nanoseconds. */
+/**
+ * @brief Return the current CLOCK_MONOTONIC time in nanoseconds.
+ *
+ * @return Nanoseconds since an arbitrary epoch (monotonic clock).
+ */
 static long long now_ns(void)
 {
     struct timespec ts;
@@ -158,7 +163,13 @@ static long long now_ns(void)
 
 /* ── hidraw transport ────────────────────────────────────────────────────── */
 
-/* Send a HID output report (padded to 64 bytes). */
+/**
+ * @brief Send a HID output report to the CP2112, padded to 64 bytes.
+ *
+ * @param report Pointer to report bytes (report ID is report[0]).
+ * @param len    Number of meaningful bytes in report.
+ * @return 0 on success, -1 if the write did not transfer all 64 bytes.
+ */
 static int hid_send(const uint8_t *report, int len)
 {
     uint8_t buf[CP2112_REPORT_SIZE] = {0};
@@ -168,7 +179,13 @@ static int hid_send(const uint8_t *report, int len)
     return (r == CP2112_REPORT_SIZE) ? 0 : -1;
 }
 
-/* Receive a HID input report with timeout in milliseconds. Returns bytes read, -1 on timeout/error. */
+/**
+ * @brief Receive one HID input report from the CP2112 with a timeout.
+ *
+ * @param buf        Buffer of at least CP2112_REPORT_SIZE (64) bytes.
+ * @param timeout_ms Maximum milliseconds to wait for a report.
+ * @return Number of bytes read on success, -1 on timeout or read error.
+ */
 static int hid_recv(uint8_t *buf, int timeout_ms)
 {
     fd_set rfds;
@@ -182,7 +199,12 @@ static int hid_recv(uint8_t *buf, int timeout_ms)
     return (int)read(g_hidraw_fd, buf, CP2112_REPORT_SIZE);
 }
 
-/* Cancel any outstanding CP2112 transfer and drain pending input reports. */
+/**
+ * @brief Cancel any outstanding CP2112 transfer and drain pending input reports.
+ *
+ * Sends a CANCEL_TRANSFER report then reads up to 8 stale input reports
+ * (5 ms timeout each) to clear the USB input buffer.
+ */
 static void cp2112_cancel(void)
 {
     uint8_t req[2] = {CP2112_CANCEL_TRANSFER, 0x01};
@@ -194,16 +216,17 @@ static void cp2112_cancel(void)
     }
 }
 
-/*
- * Poll TRANSFER_STATUS_REQUEST until status is Complete or Error.
- * Returns 0 on Complete/Idle, -1 on Error or timeout.
+/**
+ * @brief Poll TRANSFER_STATUS_REQUEST until the CP2112 reports Complete or Error.
  *
- * The CP2112 can only execute one I2C transfer at a time.  We poll with
- * TRANSFER_STATUS_REQUEST and inspect status byte[1]:
- *   0x00 = Idle   (no transfer — treat as OK for write-only ops)
- *   0x01 = Busy   (in progress — retry)
- *   0x02 = Complete
- *   0x03 = Error
+ * The CP2112 executes one I2C transfer at a time. Polls up to 100 times with
+ * 2 ms sleeps between Busy responses. Cancels and returns -1 on Error or
+ * if 100 iterations expire without completion.
+ *
+ * Status byte[1] values: 0x00=Idle (OK for write-only), 0x01=Busy,
+ * 0x02=Complete, 0x03=Error.
+ *
+ * @return 0 on Complete or Idle, -1 on Error or timeout.
  */
 static int cp2112_wait_complete(void)
 {
@@ -227,10 +250,16 @@ static int cp2112_wait_complete(void)
     return -1;  /* timeout */
 }
 
-/*
- * Write len bytes of data to 7-bit I2C addr via CP2112.
- * Report: [0x14][addr<<1][len][data[0..len-1]]
- * Returns 0 on success, -1 on error.
+/**
+ * @brief Write up to 61 bytes to a 7-bit I2C device via the CP2112.
+ *
+ * Issues a DATA_WRITE_REQUEST report [0x14][addr<<1][len][data...] and
+ * waits for transfer completion.
+ *
+ * @param addr 7-bit I2C device address.
+ * @param data Bytes to write.
+ * @param len  Number of bytes (1–61).
+ * @return 0 on success, -1 on invalid length, send failure, or transfer error.
  */
 static int cp2112_write(uint8_t addr, const uint8_t *data, int len)
 {
@@ -244,15 +273,19 @@ static int cp2112_write(uint8_t addr, const uint8_t *data, int len)
     return cp2112_wait_complete();
 }
 
-/*
- * Collect read data after a completed read or write-read request.
- * Issues DATA_READ_FORCE_SEND reports (up to 61 bytes each) until
+/**
+ * @brief Collect read data from the CP2112 after a completed read or write-read.
+ *
+ * Issues DATA_READ_FORCE_SEND reports in up to 61-byte chunks until
  * read_len bytes are accumulated in buf.
  *
- * Force-send report: [0x12][len_hi][len_lo]  (__be16 — high byte first)
- * Read-response:     [0x13][status][valid_len][data...]
+ * Force-send report format: [0x12][len_hi][len_lo] (__be16, high byte first).
+ * Read-response format:     [0x13][status][valid_len][data...].
  *
- * Returns total bytes collected, or -1 on error.
+ * @param buf      Output buffer; must be at least read_len bytes.
+ * @param read_len Total number of bytes to collect.
+ * @return Total bytes collected on success, -1 on send/receive error or
+ *         unexpected report ID.
  */
 static int cp2112_collect(uint8_t *buf, int read_len)
 {
@@ -280,13 +313,20 @@ static int cp2112_collect(uint8_t *buf, int read_len)
     return received;
 }
 
-/*
- * I2C write-then-read via CP2112 (repeated start).
- * Writes write_data (sets register/address pointer), then reads read_len bytes.
+/**
+ * @brief Perform an I2C write-then-read (repeated-start) via the CP2112.
  *
- * Report: [0x11][addr<<1][read_len_hi][read_len_lo][write_len][write_data...]
+ * Sends a DATA_WRITE_READ_REQUEST report to set the register/address pointer,
+ * waits for completion, then collects read_len bytes via cp2112_collect().
  *
- * Returns bytes read on success, -1 on error.
+ * Report format: [0x11][addr<<1][read_len_hi][read_len_lo][write_len][write_data...].
+ *
+ * @param addr       7-bit I2C device address.
+ * @param write_data Bytes to write (typically a register offset).
+ * @param write_len  Number of bytes to write (1–16).
+ * @param read_buf   Output buffer for read data.
+ * @param read_len   Number of bytes to read (1–512).
+ * @return Number of bytes read on success, -1 on error.
  */
 static int cp2112_write_read(uint8_t addr,
                               const uint8_t *write_data, int write_len,
@@ -317,6 +357,15 @@ static int cp2112_write_read(uint8_t addr,
  *   0x74 ch0-7 → buses 34-41  (ch2→36 PCA9535 0x22, ch3→37 PCA9535 0x23,
  *                               ch6→40 syseeprom 24c64 0x50)
  */
+/**
+ * @brief Return the PCA9548 mux I2C address that owns a given virtual bus number.
+ *
+ * The five PCA9548 muxes fan out from CP2112 i2c-1:
+ *   0x70 → buses 2–9, 0x71 → 10–17, 0x72 → 18–25, 0x73 → 26–33, 0x74 → 34–41.
+ *
+ * @param bus Virtual bus number (2–41).
+ * @return 7-bit I2C address of the owning PCA9548, or -1 for out-of-range bus.
+ */
 static int bus_to_mux_addr(int bus)
 {
     if (bus >=  2 && bus <=  9) return 0x70;
@@ -327,6 +376,15 @@ static int bus_to_mux_addr(int bus)
     return -1;
 }
 
+/**
+ * @brief Return the PCA9548 channel number for a given virtual bus number.
+ *
+ * Each PCA9548 controls 8 downstream buses; the channel is (bus % 8) within
+ * each mux's base address range.
+ *
+ * @param bus Virtual bus number (2–41).
+ * @return Channel number (0–7), or -1 for out-of-range bus.
+ */
 static int bus_to_mux_channel(int bus)
 {
     if (bus >=  2 && bus <=  9) return bus -  2;
@@ -337,24 +395,42 @@ static int bus_to_mux_channel(int bus)
     return -1;
 }
 
-/* Select a single PCA9548 channel (bitmask = 1 << channel). */
+/**
+ * @brief Select a single channel on a PCA9548 mux via CP2112.
+ *
+ * Writes a one-byte bitmask (1 << channel) to the mux to enable exactly
+ * that downstream bus and disable all others.
+ *
+ * @param mux_addr 7-bit I2C address of the PCA9548.
+ * @param channel  Channel number to select (0–7).
+ * @return 0 on success, -1 on I2C write failure.
+ */
 static int mux_select(int mux_addr, int channel)
 {
     uint8_t mask = (uint8_t)(1 << channel);
     return cp2112_write((uint8_t)mux_addr, &mask, 1);
 }
 
-/* Deselect all channels on a mux. */
+/**
+ * @brief Deselect all channels on a PCA9548 mux (write 0x00).
+ *
+ * @param mux_addr 7-bit I2C address of the PCA9548.
+ * @return 0 on success, -1 on I2C write failure.
+ */
 static int mux_deselect(int mux_addr)
 {
     uint8_t off = 0x00;
     return cp2112_write((uint8_t)mux_addr, &off, 1);
 }
 
-/* Deselect all channels on all five PCA9548 muxes.
- * Called at startup/restart for crash-recovery: a prior crash may have
- * left a mux channel selected, mis-routing all subsequent I2C addresses.
- * Returns 0 if all deselects succeed, -1 if any fail.
+/**
+ * @brief Deselect all channels on all five PCA9548 muxes.
+ *
+ * Called at daemon startup and after a crash recovery. A prior crash may have
+ * left a mux channel selected, mis-routing subsequent I2C addresses. Writing
+ * 0x00 to each mux brings the bus tree to a known-good idle state.
+ *
+ * @return 0 if all five deselects succeed, -1 if any fail.
  */
 static int mux_deselect_all(void)
 {
@@ -368,10 +444,16 @@ static int mux_deselect_all(void)
 
 /* ── i2c helpers (Phase 1 fallback) ─────────────────────────────────────── */
 
-/*
- * Read a single byte from I2C device at (bus, addr, reg) via SMBus ioctl.
- * Uses I2C_SMBUS_BYTE_DATA (write register pointer, then read one byte).
- * Returns byte value [0..255] on success, -1 on error.
+/**
+ * @brief Read a single byte from an I2C device via SMBus ioctl (Phase 1 fallback).
+ *
+ * Opens /dev/i2c-N, sets the slave address with I2C_SLAVE_FORCE, then issues
+ * an I2C_SMBUS_BYTE_DATA read to write the register pointer and read one byte.
+ *
+ * @param bus  Linux I2C bus number (N in /dev/i2c-N).
+ * @param addr 7-bit I2C device address.
+ * @param reg  Register offset to read.
+ * @return Byte value [0..255] on success, -1 on open/ioctl failure.
  */
 static int i2c_read_byte_data(int bus, int addr, int reg)
 {
@@ -403,9 +485,17 @@ static int i2c_read_byte_data(int bus, int addr, int reg)
     return (int)(data.byte & 0xFF);
 }
 
-/*
- * Write a single byte to I2C device at (bus, addr, reg) via SMBus ioctl.
- * Returns 0 on success, -1 on error.
+/**
+ * @brief Write a single byte to an I2C device via SMBus ioctl (Phase 1 fallback).
+ *
+ * Opens /dev/i2c-N, sets the slave address with I2C_SLAVE_FORCE, then issues
+ * an I2C_SMBUS_BYTE_DATA write.
+ *
+ * @param bus  Linux I2C bus number (N in /dev/i2c-N).
+ * @param addr 7-bit I2C device address.
+ * @param reg  Register offset to write.
+ * @param val  Byte value to write.
+ * @return 0 on success, -1 on open/ioctl failure.
  */
 static int i2c_write_byte_data(int bus, int addr, int reg, uint8_t val)
 {
@@ -444,6 +534,13 @@ static int i2c_write_byte_data(int bus, int addr, int reg, uint8_t val)
 
 /* ── file helpers ───────────────────────────────────────────────────────── */
 
+/**
+ * @brief Write a null-terminated string to a file, creating or truncating it.
+ *
+ * @param path Absolute path of the file.
+ * @param str  String to write (not newline-terminated by this function).
+ * @return 0 on success, -1 if fopen() failed.
+ */
 static int write_str_file(const char *path, const char *str)
 {
     FILE *f = fopen(path, "w");
@@ -453,6 +550,14 @@ static int write_str_file(const char *path, const char *str)
     return 0;
 }
 
+/**
+ * @brief Write binary data to a file, creating or truncating it.
+ *
+ * @param path Absolute path of the file.
+ * @param buf  Data to write.
+ * @param len  Number of bytes to write.
+ * @return 0 on success, -1 if fopen() failed or fewer than len bytes were written.
+ */
 static int write_binary_file(const char *path, const unsigned char *buf, int len)
 {
     FILE *f = fopen(path, "wb");
@@ -464,19 +569,21 @@ static int write_binary_file(const char *path, const unsigned char *buf, int len
 
 /* ── EEPROM refresh helper ───────────────────────────────────────────────── */
 
-/*
- * Refresh the lower page (bytes 0–127, live DOM data) of the EEPROM cache
- * for port via CP2112 hidraw.
+/**
+ * @brief Refresh the lower-page EEPROM cache for a QSFP port via CP2112 hidraw.
  *
- * Lower page contains live DOM monitoring registers (temperature, voltage,
- * Tx/Rx power, bias current) that change continuously and must be re-read
- * on every daemon tick so xcvrd sees fresh values.
+ * Reads bytes 0–127 (lower page, live DOM monitoring data) from the module
+ * EEPROM at 0x50 on the port's mux channel. If a cache file already exists,
+ * the upper-page bytes (128–255, static vendor/type info) are preserved from
+ * the cache to avoid an extra I2C round-trip. If no cache exists, the upper
+ * page is read from hardware; however if the LP_MODE deassert lock has not
+ * expired (LP_MODE_READY_NS = 2.5 s), the function returns 0 immediately so
+ * the caller retries on the next tick.
  *
- * Upper page 00h (bytes 128–255) contains static vendor/type info.  If the
- * cache file already exists its upper-page bytes are preserved; otherwise the
- * upper page is also read from hardware (first insertion or cache absent).
- *
- * Returns 1 if the cache was written, 0 on any I2C error or invalid id byte.
+ * @param port        Port index (0–31).
+ * @param eeprom_path Absolute path of the EEPROM cache file in /run/wedge100s/.
+ * @return 1 if the cache file was written successfully, 0 on any I2C error,
+ *         invalid identifier byte, or LP_MODE lock not yet expired.
  */
 static int refresh_eeprom_lower_page(int port, const char *eeprom_path)
 {
@@ -525,17 +632,24 @@ static int refresh_eeprom_lower_page(int port, const char *eeprom_path)
     return ok;
 }
 
-/*
- * Apply LP_MODE state for one port via CP2112 hidraw.
+/**
+ * @brief Apply LP_MODE state for one QSFP port via CP2112 hidraw.
  *
- * lpmode=0: deassert (allow high power) — drive PCA9535 pin LOW as output.
- * lpmode=1: assert (force low power)   — release pin to INPUT (pull-up → HIGH).
+ * Controls the LP_MODE pin via PCA9535 on mux 0x74 ch0 (ports 0–15) or
+ * ch1 (ports 16–31). Uses the ONL XOR-1 interleave: line = (port % 16) ^ 1.
  *
- * XOR-1 interleave: line = (port % 16) ^ 1
- * Config regs: 0x06 (port0 bits 0-7), 0x07 (port1 bits 8-15)
- * Output regs: 0x02 (port0 bits 0-7), 0x03 (port1 bits 8-15)
+ * lpmode=0 (deassert, allow high power): drives the PCA9535 pin LOW as an
+ * output and records the deassert timestamp in g_lp_deassert_ns[] to gate
+ * upper-page EEPROM reads until the module MCU has initialised (2.5 s).
  *
- * Returns 0 on success, -1 on error (including readback mismatch).
+ * lpmode=1 (assert, force low power): releases the pin to INPUT so the
+ * pull-up drives it HIGH.
+ *
+ * Verifies the config register readback after each write.
+ *
+ * @param port   Port index (0–31).
+ * @param lpmode 0 = deassert LP_MODE, 1 = assert LP_MODE.
+ * @return 0 on success, -1 on I2C error or readback mismatch.
  */
 static int set_lpmode_hidraw(int port, int lpmode)
 {
@@ -603,14 +717,19 @@ static int set_lpmode_hidraw(int port, int lpmode)
     return 0;
 }
 
-/*
- * cp2112_write_eeprom — write bytes to QSFP EEPROM via the mux tree.
+/**
+ * @brief Write bytes to a QSFP EEPROM via the CP2112 mux tree.
  *
- * The CP2112 DATA_WRITE_REQUEST supports up to 61 bytes total.
- * reg_buf[0] = offset (1 byte), so max data bytes per call = 60.
- * Callers must split writes larger than 60 bytes.
+ * Selects the port's mux channel, sends [offset][data...] as a single
+ * DATA_WRITE_REQUEST (max 60 data bytes due to the 1-byte offset prefix),
+ * then deselects the mux.
  *
- * Returns 0 on success, -1 on error.
+ * @param mux_addr I2C address of the PCA9548 mux.
+ * @param mux_chan Channel to select on the mux.
+ * @param offset   Byte offset within the EEPROM to begin writing.
+ * @param data     Data bytes to write.
+ * @param len      Number of bytes to write (1–60).
+ * @return 0 on success, -1 on mux select failure or I2C write error.
  */
 static int cp2112_write_eeprom(int mux_addr, int mux_chan, int offset,
                                 const uint8_t *data, int len)
@@ -629,6 +748,15 @@ static int cp2112_write_eeprom(int mux_addr, int mux_chan, int offset,
 
 /* ── poll_write_requests_hidraw — process pending sfp_N_write_req files ─── */
 
+/**
+ * @brief Process pending sfp_N_write_req files and write EEPROM bytes via hidraw.
+ *
+ * For each port, checks for a sfp_N_write_req JSON file containing offset,
+ * length, and data_hex fields. Parses the hex payload, writes the bytes to
+ * the QSFP EEPROM via cp2112_write_eeprom(), refreshes the EEPROM lower-page
+ * cache, and writes an ack file (sfp_N_write_ack = "ok" or "err:...").
+ * The request file is unlinked after processing.
+ */
 static void poll_write_requests_hidraw(void)
 {
     char req_path[128], ack_path[128], eeprom_path[128];
@@ -700,6 +828,14 @@ static void poll_write_requests_hidraw(void)
 
 /* ── poll_read_requests_hidraw — process pending sfp_N_read_req files ───── */
 
+/**
+ * @brief Process pending sfp_N_read_req files and return lower-page data via hidraw.
+ *
+ * For each port, checks for a sfp_N_read_req JSON file. Only offset=0,
+ * length=128 (lower-page DOM read) is supported. Performs a cp2112_write_read()
+ * to read 128 bytes from EEPROM 0x50, encodes the result as a 256-char hex
+ * string, and writes it to sfp_N_read_resp. The request file is unlinked.
+ */
 static void poll_read_requests_hidraw(void)
 {
     char req_path[128], resp_path[128];
@@ -770,22 +906,22 @@ static void poll_read_requests_hidraw(void)
     }
 }
 
-/*
- * Process LP_MODE state on each daemon invocation (hidraw path).
+/**
+ * @brief Process LP_MODE state changes for all ports via CP2112 hidraw.
  *
- * Two actions in order:
+ * Runs two passes in order:
  *
- * 1. Request files: for each sfp_N_lpmode_req, apply the requested lpmode
- *    state to hardware, update the sfp_N_lpmode state file, and delete the
- *    request file.  Req file content: "0" = deassert, "1" = assert.
+ * 1. Request files: for each sfp_N_lpmode_req file, reads the desired state
+ *    ("0" = deassert, "1" = assert), calls set_lpmode_hidraw(), updates
+ *    sfp_N_lpmode, and removes the request file.
  *
- * 2. Initial deassert: for each present port with no sfp_N_lpmode file,
- *    drive LP_MODE LOW (allow high power) and write sfp_N_lpmode="0".
- *    This fires once per port on first boot or hot-plug, overriding the
- *    hardware default of all-asserted (all-inputs, pull-up HIGH).
+ * 2. Initial deassert: for each present port whose sfp_N_lpmode state file
+ *    does not yet exist, drives LP_MODE LOW and writes sfp_N_lpmode="0",
+ *    overriding the hardware power-on default of all-asserted (pull-up HIGH).
+ *    EEPROM is not read here; the module MCU needs 2.5 s after LP_MODE exit.
  *
- * Presence state is read from the sfp_N_present files written earlier in
- * this same invocation by poll_presence_hidraw().
+ * Presence state is read from sfp_N_present files written earlier in the
+ * same tick by poll_presence_hidraw().
  */
 static void poll_lpmode_hidraw(void)
 {
@@ -867,6 +1003,17 @@ static void poll_lpmode_hidraw(void)
 /* File-scope constant: LP_MODE bus numbers for Phase 1 sysfs fallback. */
 static const int LP_BUS[2] = { 34, 35 };
 
+/**
+ * @brief Apply LP_MODE state for one port via i2c-dev SMBus ioctl (Phase 1 fallback).
+ *
+ * Uses the kernel I2C bus infrastructure (requires i2c_mux_pca954x loaded).
+ * LP_MODE PCA9535 chips are at addresses 0x20/0x21 on buses 34/35.
+ * Uses the same ONL XOR-1 interleave as set_lpmode_hidraw().
+ *
+ * @param port   Port index (0–31).
+ * @param lpmode 0 = deassert LP_MODE, 1 = assert LP_MODE.
+ * @return 0 on success, -1 on I2C read or write failure.
+ */
 static int set_lpmode_sysfs(int port, int lpmode)
 {
     int group = port / 16;
@@ -897,6 +1044,12 @@ static int set_lpmode_sysfs(int port, int lpmode)
     }
 }
 
+/**
+ * @brief Process LP_MODE state changes for all ports via i2c-dev SMBus (Phase 1 fallback).
+ *
+ * Same two-pass logic as poll_lpmode_hidraw() but using set_lpmode_sysfs()
+ * instead of set_lpmode_hidraw(). Used when /dev/hidraw0 is unavailable.
+ */
 static void poll_lpmode_sysfs(void)
 {
     int port;
@@ -951,13 +1104,17 @@ static void poll_lpmode_sysfs(void)
 
 /* ── poll_cpld — mirror read-only CPLD sysfs attrs to /run/wedge100s/ ────── */
 
-/*
- * Copy read-only wedge100s_cpld sysfs attributes to RUN_DIR so that Python
- * consumers (psu.py, component.py) have a single canonical read path that
- * does not touch the kernel i2c sysfs tree directly.
+/**
+ * @brief Mirror read-only wedge100s_cpld sysfs attributes to /run/wedge100s/.
+ *
+ * Provides a single canonical read path for Python consumers (psu.py,
+ * component.py) so they never touch the kernel I2C sysfs tree directly.
+ *
+ * cpld_version is read once at first tick (static hardware value).
+ * PSU state (psu1/psu2 present and pgood) is read on every tick.
  *
  * LED attributes (led_sys1, led_sys2) are NOT mirrored here; they are
- * managed exclusively by apply_led_writes() below.
+ * managed exclusively by apply_led_writes().
  */
 static void poll_cpld(void)
 {
@@ -1006,20 +1163,20 @@ static void poll_cpld(void)
 
 /* ── apply_led_writes — write-through LED state to CPLD ─────────────────── */
 
-/*
- * Manages /run/wedge100s/led_sys{1,2} as the sole path for LED state.
- * chassis.py writes the desired value to RUN_DIR; this function pushes
- * it through to the wedge100s_cpld sysfs attribute (and hence the CPLD
- * hardware) on every poll tick — no Python code touches CPLD sysfs.
+/**
+ * @brief Synchronise /run/wedge100s/led_sys{1,2} with wedge100s_cpld sysfs.
  *
- * Seed path (file absent): on the first tick after boot, the run-dir file
- * does not yet exist.  Read the hardware's current value from CPLD sysfs
- * and write it to RUN_DIR so get_status_led() returns the correct state
- * before the first set_status_led() call.
+ * Provides write-through LED control: chassis.py writes the desired color
+ * string to RUN_DIR; this function pushes it to the CPLD sysfs attribute
+ * on every poll tick so no Python code touches CPLD sysfs directly.
  *
- * Write-through path (file present): read the value chassis.py wrote to
- * RUN_DIR and write it to CPLD sysfs.  Idempotent — writing the same
- * value repeatedly is harmless.
+ * Seed path (file absent on first tick): reads the current hardware value
+ * from CPLD sysfs and seeds the RUN_DIR file so get_status_led() returns
+ * the correct state before the first set_status_led() call.
+ *
+ * Write-through path (file present): reads the value chassis.py wrote and
+ * writes it to CPLD sysfs. Idempotent — repeated writes of the same value
+ * are harmless.
  */
 static void apply_led_writes(void)
 {
@@ -1064,12 +1221,14 @@ static void apply_led_writes(void)
 
 /* ── syseeprom — hidraw path (Phase 2) ──────────────────────────────────── */
 
-/*
- * Read the 24c64 system EEPROM (mux 0x74 ch6, 0x50) via hidraw.
+/**
+ * @brief Read the 24c64 system EEPROM via CP2112 hidraw and cache it.
  *
- * 24c64 uses 2-byte (16-bit) addressing: write [addr_hi][addr_lo] then read.
- * CP2112 max per write-read transfer = 512 bytes; read in 512-byte chunks.
- * Validates ONIE TlvInfo magic before writing cache.
+ * Reads up to SYSEEPROM_SIZE (8192) bytes from the 24c64 at mux 0x74 ch6,
+ * address 0x50, using 2-byte (16-bit) addressing in 512-byte chunks.
+ * Validates the ONIE TlvInfo magic at offset 0 before writing the cache
+ * to /run/wedge100s/syseeprom. Skips silently if the cache file already
+ * exists (system EEPROM is static data; written once per boot).
  */
 static void poll_syseeprom_hidraw(void)
 {
@@ -1120,6 +1279,13 @@ static void poll_syseeprom_hidraw(void)
 
 /* ── syseeprom — sysfs path (Phase 1 fallback) ──────────────────────────── */
 
+/**
+ * @brief Read the system EEPROM via at24 sysfs and cache it (Phase 1 fallback).
+ *
+ * Reads from /sys/bus/i2c/devices/40-0050/eeprom (requires at24 driver).
+ * Validates ONIE TlvInfo magic and writes the cache to /run/wedge100s/syseeprom.
+ * Skips if the cache file already exists.
+ */
 static void poll_syseeprom(void)
 {
     char cache_path[64];
@@ -1169,22 +1335,21 @@ static void poll_syseeprom(void)
 
 /* ── poll_presence — hidraw path (Phase 2) ──────────────────────────────── */
 
-/*
- * Read PCA9535 presence and QSFP EEPROMs via CP2112 hidraw.
+/**
+ * @brief Poll QSFP presence and refresh EEPROM caches via CP2112 hidraw.
  *
- * PCA9535 presence reads:
- *   mux 0x74 ch2 → PCA9535 0x22 (ports 0-15)
- *   mux 0x74 ch3 → PCA9535 0x23 (ports 16-31)
- *   Read INPUT0 (reg 0) and INPUT1 (reg 1) from each chip.
- *   Decode XOR-1 interleave and active-low polarity per ONL sfpi.c.
+ * Reads INPUT0 and INPUT1 from PCA9535 0x22 (mux 0x74 ch2, ports 0–15) and
+ * 0x23 (ch3, ports 16–31). Decodes active-low polarity with the ONL XOR-1
+ * interleave (line ^ 1) to build a per-port presence array.
  *
- * QSFP EEPROM reads (on insertion or retry):
- *   Select port's mux channel, read 128 bytes lower page (addr 0x00)
- *   and 128 bytes upper page 0 (addr 0x80) from EEPROM at 0x50.
- *   QSFP28 EEPROMs use 1-byte addressing within a 256-byte memory map.
- *   Default page is 00h; no explicit page-select write is needed on insertion.
+ * For each port:
+ *   - absent: unlinks sfp_N_eeprom, writes sfp_N_present="0".
+ *   - present with valid cache (id byte in [0x01, 0x7f]): writes
+ *     sfp_N_present="1", skips EEPROM I2C (stable path).
+ *   - present with missing/invalid cache: calls refresh_eeprom_lower_page()
+ *     to read lower + upper EEPROM pages, writes sfp_N_present="1".
  *
- * Deselects each mux immediately after use.
+ * Mux channels are deselected immediately after each chip read.
  */
 static void poll_presence_hidraw(void)
 {
@@ -1261,11 +1426,18 @@ static void poll_presence_hidraw(void)
 
 /* ── poll_presence — sysfs/i2c-dev path (Phase 1 fallback) ─────────────── */
 
-/*
- * Read PCA9535 presence bitmaps; update /run/wedge100s/sfp_N_present files.
- * On insertion or first-boot with module present: read 256-byte EEPROM page 0
- * from optoe1 sysfs and write /run/wedge100s/sfp_N_eeprom.
- * On removal: delete sfp_N_eeprom immediately (stale data must not be served).
+/**
+ * @brief Poll QSFP presence and refresh EEPROM caches via i2c-dev SMBus (Phase 1 fallback).
+ *
+ * Reads PCA9535 INPUT registers via i2c_read_byte_data() to build presence
+ * bitmaps. Updates sfp_N_present files for all 32 ports.
+ *
+ * On insertion or first-boot with a module present: reads the 256-byte EEPROM
+ * page 0 from the optoe1 sysfs node (/sys/bus/i2c/devices/N-0050/eeprom) and
+ * writes the cache to /run/wedge100s/sfp_N_eeprom.
+ *
+ * On removal: unlinks sfp_N_eeprom immediately to prevent stale data from
+ * being served to xcvrd.
  */
 static void poll_presence(void)
 {
@@ -1353,7 +1525,14 @@ static void poll_presence(void)
 
 /* ── persistent daemon helpers ──────────────────────────────────────────── */
 
-/* Drain all pending inotify events (prevents thundering-herd on burst writes). */
+/**
+ * @brief Drain all pending inotify events from inotify_fd.
+ *
+ * Reads and discards events until the fd returns EAGAIN. Prevents
+ * thundering-herd processing on burst writes to /run/wedge100s/.
+ *
+ * @param inotify_fd File descriptor returned by inotify_init1().
+ */
 static void drain_inotify(int inotify_fd)
 {
     char ibuf[sizeof(struct inotify_event) + NAME_MAX + 1];
@@ -1361,13 +1540,18 @@ static void drain_inotify(int inotify_fd)
         ;
 }
 
-/*
- * service_write_requests — scan /run/wedge100s/ for pending request files.
+/**
+ * @brief Service all pending write/read/lpmode request files in /run/wedge100s/.
  *
- * Called on inotify IN_CLOSE_WRITE events (~50 ms latency).
- * Scans the directory rather than replaying inotify filenames:
- * inotify coalesces duplicate events, so directory scan is the only
- * reliable way to find all pending work on burst writes.
+ * Called on inotify IN_CLOSE_WRITE events (~50 ms latency). Scans the
+ * directory for all pending request files rather than replaying inotify
+ * filenames, because inotify coalesces duplicate events.
+ *
+ * Also drains stale CP2112 HID input reports before any hidraw operation to
+ * prevent cp2112_wait_complete() from receiving a stale STATUS_ERROR from a
+ * prior CPLD sysfs access.
+ *
+ * No-op if g_hidraw_fd < 0 (Phase 1 fallback active).
  */
 static void service_write_requests(void)
 {
@@ -1388,17 +1572,22 @@ static void service_write_requests(void)
     apply_led_writes();   /* respond to led_sys{1,2} writes ~50ms */
 }
 
-/*
- * daemon_init — open hidraw0, drain stale reports, deselect all muxes.
+/**
+ * @brief Initialize the daemon: open hidraw0, cancel stale transfers, deselect muxes.
  *
- * On crash recovery (Restart=on-failure), a prior run may have left
- * the CP2112 in mid-transaction and a PCA9548 mux channel selected.
- * Draining stale HID reports and writing 0x00 to all five mux addresses
- * resets the bus to a known-good state before the main loop starts.
+ * On crash recovery (systemd Restart=on-failure), a prior run may have left
+ * the CP2112 in mid-transaction and a PCA9548 mux channel selected. This
+ * function restores the bus to a known-good state.
  *
- * If the first attempt fails, try BMC escalation (i2c_flush + mux reset
- * via SSH), then retry once.  If still failing, return -1 so systemd
- * Restart=on-failure handles the backoff.
+ * Tries up to two attempts. On the second attempt, escalates via SSH to the
+ * BMC to run cp2112_i2c_flush.sh and reset_qsfp_mux.sh before retrying.
+ *
+ * On success, removes all stale sfp_N_lpmode state files so that
+ * poll_lpmode_hidraw() re-deasserts LP_MODE for all ports on the first tick.
+ * EEPROM cache files are intentionally preserved.
+ *
+ * @return 0 on success (hidraw0 open, all muxes deselected, LP_MODE deasserted
+ *         for all ports), -1 if both attempts fail.
  */
 static int daemon_init(void)
 {

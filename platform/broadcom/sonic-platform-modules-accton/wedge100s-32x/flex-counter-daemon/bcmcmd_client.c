@@ -1,5 +1,11 @@
-/* bcmcmd_client.c — BCM diag shell Unix socket client.
- * Moved from sai-stat-shim to flex-counter-daemon. */
+/**
+ * @file bcmcmd_client.c
+ * @brief BCM diagnostic shell Unix socket client implementation.
+ *
+ * Implements connect/close/ps/fetch_counters functions that communicate
+ * with the BCM diagnostic shell (sswsyncd) via a Unix domain socket.
+ * Moved from sai-stat-shim to flex-counter-daemon.
+ */
 #include "bcmcmd_client.h"
 #include "stat_map.h"
 
@@ -21,6 +27,15 @@
 #define RECV_TIMEOUT_MS 3000
 #define COUNTER_RECV_TIMEOUT_MS 8000
 
+/**
+ * @brief Read from fd until the drivshell> prompt appears or timeout expires.
+ *
+ * @param fd         Socket file descriptor.
+ * @param buf        Output buffer for received data.
+ * @param bufsz      Size of buf.
+ * @param timeout_ms Receive timeout per poll call in milliseconds.
+ * @return Total bytes read on success, -1 on timeout or error.
+ */
 static int read_until_prompt(int fd, char *buf, int bufsz, int timeout_ms)
 {
     int  total = 0;
@@ -41,6 +56,13 @@ static int read_until_prompt(int fd, char *buf, int bufsz, int timeout_ms)
     return -1;
 }
 
+/**
+ * @brief Write all bytes of string s to fd, retrying on short writes.
+ *
+ * @param fd Socket file descriptor.
+ * @param s  Null-terminated string to write.
+ * @return 0 on success, -1 on write error.
+ */
 static int write_all(int fd, const char *s)
 {
     size_t len = strlen(s);
@@ -171,10 +193,16 @@ static port_row_t *cache_row(counter_cache_t *cache, const char *port_name)
     return row;
 }
 
-/* Parse counter lines from bcmcmd output into cache rows.
- * Format: COUNTERNAME.PORTNAME : VALUE  [+DELTA  RATE/s]
- * Accumulates name1 matches into val[] via += (for name2 second-pass).
- * Does NOT clear val[] — caller must zero rows before a new cycle. */
+/**
+ * @brief Parse 'show c all' output lines into counter_cache_t rows.
+ *
+ * Expected line format: "COUNTERNAME.PORTNAME : VALUE [+DELTA RATE/s]"
+ * Accumulates name1 matches into val[] (for later name2 resolution).
+ * Does NOT clear val[] — caller must zero rows before a new cycle.
+ *
+ * @param buf   NUL-terminated bcmcmd output string.
+ * @param cache Counter cache to populate.
+ */
 static void parse_lines(const char *buf, counter_cache_t *cache)
 {
     const char *p = buf;
@@ -237,8 +265,15 @@ static void parse_lines(const char *buf, counter_cache_t *cache)
     }
 }
 
-/* Resolve name2 (second BCM counter) for compound stats like NON_UCAST = RMCA + RBCA.
- * Must be called after all lines are parsed so raw[] is complete. */
+/**
+ * @brief Resolve name2 (second BCM counter) for compound SAI stats.
+ *
+ * For stats like IF_IN_NON_UCAST_PKTS = RMCA + RBCA, the name2 counter
+ * must be added to the val[] entry after all lines are parsed so that
+ * the raw[] lookup table is fully populated.
+ *
+ * @param cache Counter cache with fully parsed raw[] arrays.
+ */
 static void resolve_name2(counter_cache_t *cache)
 {
     for (int r = 0; r < cache->n_rows; r++) {

@@ -1,5 +1,6 @@
-/*
- * wedge100s-bmc-auth.c — Push SSH public key to BMC via /dev/ttyACM0.
+/**
+ * @file wedge100s-bmc-auth.c
+ * @brief Push SSH public key to OpenBMC via the /dev/ttyACM0 serial console.
  *
  * Opens the BMC serial console (57600 8N1), logs in as root/0penBmc,
  * appends /etc/sonic/wedge100s-bmc-key.pub to /root/.ssh/authorized_keys
@@ -33,6 +34,14 @@
 
 static int g_tty_fd = -1;
 
+/**
+ * @brief Open /dev/ttyACM0 and configure it for 57600 8N1 raw mode.
+ *
+ * Sets the global g_tty_fd on success. Configures the port with cfmakeraw()
+ * and 57600 baud. Non-blocking I/O is enabled; VMIN=0/VTIME=0.
+ *
+ * @return 0 on success, -1 on open or tcgetattr/tcsetattr failure.
+ */
 static int tty_open(void)
 {
     struct termios tio;
@@ -58,11 +67,17 @@ static int tty_open(void)
     return 0;
 }
 
-/*
- * Read from TTY until needle found or timeout_sec elapses.
- * Returns 1 if needle found, 0 on timeout.
- * Accumulates up to bufsz-1 bytes; rolls the tail to avoid missing
- * needles that span two reads.
+/**
+ * @brief Read from the TTY until a needle string is found or a timeout elapses.
+ *
+ * Polls g_tty_fd in 200 ms increments. Accumulates received bytes in buf,
+ * rolling the tail window to avoid missing needle strings that span two reads.
+ *
+ * @param needle      String to search for in received data.
+ * @param timeout_sec Maximum seconds to wait before giving up.
+ * @param buf         Caller-supplied buffer for accumulated TTY output.
+ * @param bufsz       Size of buf in bytes.
+ * @return 1 if needle was found within the timeout, 0 on timeout.
  */
 static int tty_wait_for(const char *needle, int timeout_sec,
                         char *buf, int bufsz)
@@ -96,6 +111,11 @@ static int tty_wait_for(const char *needle, int timeout_sec,
     return 0;
 }
 
+/**
+ * @brief Write a string to the BMC TTY without waiting for acknowledgement.
+ *
+ * @param s Null-terminated string to transmit.
+ */
 static void tty_send(const char *s)
 {
     write(g_tty_fd, s, strlen(s));

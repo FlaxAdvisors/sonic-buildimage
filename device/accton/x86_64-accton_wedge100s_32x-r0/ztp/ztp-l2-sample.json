@@ -1,0 +1,13 @@
+{
+    "ztp": {
+        "01-configdb-json": {
+            "dynamic-url": {
+                "source": {
+                    "prefix": "http://192.0.2.1/ztp/",
+                    "identifier": "system_mac",
+                    "suffix": "_config_db.json"
+                }
+            }
+        }
+    }
+}

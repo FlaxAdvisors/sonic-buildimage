@@ -6,7 +6,7 @@ Wants=database.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/wedge100s-flex-counter-daemon
-Restart=on-failure
+Restart=always
 RestartSec=5s
 TimeoutStopSec=5s
 

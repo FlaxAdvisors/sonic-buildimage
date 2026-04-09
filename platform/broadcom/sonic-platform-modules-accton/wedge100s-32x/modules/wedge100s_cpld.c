@@ -14,13 +14,19 @@
  *   psu1_alarm    (RO) — 1 = normal, 0 = alarm     (bit 3 of 0x10, active-high)
  *   psu2_input_ok (RO) — 1 = input OK, 0 = bad    (bit 6 of 0x10, active-high)
  *   psu2_alarm    (RO) — 1 = normal, 0 = alarm     (bit 7 of 0x10, active-high)
+ *   board_rev     (RO) — 4-bit board revision       (bits [3:0] of 0x00)
+ *   model_id      (RO) — 2-bit model ID             (bits [5:4] of 0x00; 0=wedge100 TOR)
+ *   pwr_stby_ok   (RO) — 1 = standby power OK       (bit 0 of 0x11)
+ *   pwr_status2   (RO) — power rail status byte      (reg 0x12, hex)
  *   led_sys1      (RW) — SYS LED 1 byte (reg 0x3e): 0=off,1=red,2=green,4=blue,+8=blink
  *   led_sys2      (RW) — SYS LED 2 byte (reg 0x3f): same encoding
  *
  * Register map (from ONL ledi.c / psui.c, verified on hardware 2026-02-25):
- *   0x00  CPLD version major
+ *   0x00  CPLD version major / board rev [3:0] / model ID [5:4]
  *   0x01  CPLD version minor
  *   0x10  PSU presence/status
+ *   0x11  Power status 1 (standby power OK)
+ *   0x12  Power status 2 (VCORE/VANLOG/V3V3 ready + hot)
  *   0x3e  SYS LED 1
  *   0x3f  SYS LED 2
  *
@@ -45,6 +51,10 @@
 #define REG_VERSION_MAJOR  0x00
 #define REG_VERSION_MINOR  0x01
 #define REG_PSU_STATUS     0x10
+#define REG_BOARD_REV      0x00  /* D[3:0]=BRD_REV, D[5:4]=MODEL_ID */
+#define REG_PWR_STATUS1    0x11  /* D[0]=PWR_STBY_OK */
+#define REG_PWR_STATUS2    0x12  /* D[0]=VCORE_VRDY, D[1]=VCORE_HOT, D[2]=VANLOG_VRDY,
+                                  * D[3]=VANLOG_HOT, D[4]=V3V3_VRDY, D[5]=V3V3_HOT */
 #define REG_LED_SYS1       0x3e
 #define REG_LED_SYS2       0x3f
 
@@ -279,6 +289,74 @@ static ssize_t show_psu2_input_ok(struct device *dev,
 			 (val >> PSU2_INPUT_OK_BIT) & 1);
 }
 
+/** @brief Show board revision (4-bit BRD_REV from bits [3:0] of reg 0x00). */
+static ssize_t show_board_rev(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_BOARD_REV);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", val & 0x0f);
+}
+
+/** @brief Show model ID (2-bit MODEL_ID from bits [5:4] of reg 0x00; 0=wedge100 TOR). */
+static ssize_t show_model_id(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_BOARD_REV);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", (val >> 4) & 0x03);
+}
+
+/** @brief Show standby power OK status (1=OK). Bit 0 of reg 0x11. */
+static ssize_t show_pwr_stby_ok(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_PWR_STATUS1);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", val & 1);
+}
+
+/** @brief Show power status 2 register (reg 0x12) as hex — caller decodes bits. */
+static ssize_t show_pwr_status2(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_PWR_STATUS2);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
+}
+
 /** @brief Show SYS LED 1 register value (reg 0x3e) as hex. */
 static ssize_t show_led_sys1(struct device *dev,
 			      struct device_attribute *attr, char *buf)
@@ -372,6 +450,10 @@ static DEVICE_ATTR(psu1_alarm,    S_IRUGO, show_psu1_alarm,    NULL);
 static DEVICE_ATTR(psu1_input_ok, S_IRUGO, show_psu1_input_ok, NULL);
 static DEVICE_ATTR(psu2_alarm,    S_IRUGO, show_psu2_alarm,    NULL);
 static DEVICE_ATTR(psu2_input_ok, S_IRUGO, show_psu2_input_ok, NULL);
+static DEVICE_ATTR(board_rev,    S_IRUGO, show_board_rev,    NULL);
+static DEVICE_ATTR(model_id,     S_IRUGO, show_model_id,     NULL);
+static DEVICE_ATTR(pwr_stby_ok,  S_IRUGO, show_pwr_stby_ok,  NULL);
+static DEVICE_ATTR(pwr_status2,  S_IRUGO, show_pwr_status2,  NULL);
 static DEVICE_ATTR(led_sys1, S_IRUGO | S_IWUSR, show_led_sys1, store_led_sys1);
 static DEVICE_ATTR(led_sys2, S_IRUGO | S_IWUSR, show_led_sys2, store_led_sys2);
 
@@ -385,6 +467,10 @@ static struct attribute *wedge100s_cpld_attrs[] = {
 	&dev_attr_psu1_input_ok.attr,
 	&dev_attr_psu2_alarm.attr,
 	&dev_attr_psu2_input_ok.attr,
+	&dev_attr_board_rev.attr,
+	&dev_attr_model_id.attr,
+	&dev_attr_pwr_stby_ok.attr,
+	&dev_attr_pwr_status2.attr,
 	&dev_attr_led_sys1.attr,
 	&dev_attr_led_sys2.attr,
 	NULL,

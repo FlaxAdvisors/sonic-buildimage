@@ -1,6 +1,6 @@
 /**
  * @file wedge100s-i2c-daemon.c
- * @brief Event-driven QSFP presence and EEPROM cache daemon for Wedge 100S-32X.
+ * @brief Event-driven QSFP presence, RXLOSS, and EEPROM cache daemon for Wedge 100S-32X.
  *
  * Usage: wedge100s-i2c-daemon poll-presence
  *
@@ -94,6 +94,10 @@ static const int PCA9535_ADDR[2] = { 0x22, 0x23 };
 
 /* PCA9535 mux channels (mux 0x74: ch2 → bus 36, ch3 → bus 37) */
 static const int PCA9535_MUX_CHAN[2] = { 2, 3 };
+
+/* PCA9535 RXLOSS chips (mux 0x74 ch4/ch5) */
+static const int RXLOSS_PCA9535_ADDR[2] = { 0x24, 0x25 };
+static const int RXLOSS_PCA9535_CHAN[2] = { 4,    5    };
 
 /* PCA9535 LP_MODE chips (mux 0x74 ch0/ch1) */
 static const int LP_PCA9535_ADDR[2] = { 0x20, 0x21 };
@@ -1108,24 +1112,32 @@ static void poll_lpmode_sysfs(void)
  * @brief Mirror read-only wedge100s_cpld sysfs attributes to /run/wedge100s/.
  *
  * Provides a single canonical read path for Python consumers (psu.py,
- * component.py) so they never touch the kernel I2C sysfs tree directly.
+ * component.py, chassis.py) so they never touch the kernel I2C sysfs tree
+ * directly.
  *
- * cpld_version is read once at first tick (static hardware value).
- * PSU state (psu1/psu2 present and pgood) is read on every tick.
+ * Static attrs (cpld_version, board_rev, model_id, come_status) are hardware
+ * constants — read once at first tick and never again.
+ *
+ * Dynamic attrs (PSU state, power rails, ROV, reset reason/sources) are read
+ * on every tick.
  *
  * LED attributes (led_sys1, led_sys2) are NOT mirrored here; they are
  * managed exclusively by apply_led_writes().
  */
 static void poll_cpld(void)
 {
-    /* cpld_version: static hardware info — read once at first tick only. */
-    {
+    /* Static attrs: hardware constants — read once, never again. */
+    static const char *static_attrs[] = {
+        "cpld_version", "board_rev", "model_id", "come_status",
+        NULL
+    };
+    for (int i = 0; static_attrs[i]; i++) {
         char dst[128];
         struct stat st;
-        snprintf(dst, sizeof(dst), RUN_DIR "/cpld_version");
+        snprintf(dst, sizeof(dst), RUN_DIR "/%s", static_attrs[i]);
         if (stat(dst, &st) != 0) {
             char src[128], val[64];
-            snprintf(src, sizeof(src), CPLD_SYSFS "/cpld_version");
+            snprintf(src, sizeof(src), CPLD_SYSFS "/%s", static_attrs[i]);
             FILE *f = fopen(src, "r");
             if (f) {
                 if (fgets(val, (int)sizeof(val), f)) {
@@ -1139,16 +1151,18 @@ static void poll_cpld(void)
         }
     }
 
-    /* PSU state: dynamic — read every tick. */
-    static const char *psu_attrs[] = {
-        "psu1_present", "psu1_pgood",
-        "psu2_present", "psu2_pgood",
+    /* Dynamic attrs: can change at runtime — read every tick. */
+    static const char *dynamic_attrs[] = {
+        "psu1_present", "psu1_pgood", "psu1_alarm", "psu1_input_ok",
+        "psu2_present", "psu2_pgood", "psu2_alarm", "psu2_input_ok",
+        "pwr_stby_ok",  "pwr_status2", "rov_status",
+        "reset_reason", "reset_source1", "reset_source2",
         NULL
     };
-    for (int i = 0; psu_attrs[i]; i++) {
+    for (int i = 0; dynamic_attrs[i]; i++) {
         char src[128], dst[128], val[64];
-        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", psu_attrs[i]);
-        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", psu_attrs[i]);
+        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", dynamic_attrs[i]);
+        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", dynamic_attrs[i]);
         FILE *f = fopen(src, "r");
         if (!f) continue;
         if (fgets(val, (int)sizeof(val), f)) {
@@ -1333,6 +1347,62 @@ static void poll_syseeprom(void)
     }
 }
 
+/* ── CPLD I2C bus flush via BMC ─────────────────────────────────────────── */
+
+/**
+ * @brief Trigger CPLD I2C bus flush via BMC SSH to recover a stuck CP2112 bus.
+ *
+ * The CPLD register 0x38 bit 7 triggers an I2C flush sequence: setting the bit
+ * causes the CPLD to send 9 SCL clocks to unstick any slave holding SDA low.
+ * Since the CP2112 bus itself may be stuck, this function reaches the CPLD
+ * through the BMC's I2C bus 12 (BMC_I2C_13) at address 0x31, bypassing the
+ * CP2112 entirely.
+ *
+ * Sequence: set bit 7, wait 10 ms, clear bit 7.
+ *
+ * This is emergency recovery — called when PCA9535 presence reads fail,
+ * indicating the CP2112 I2C bus may be stuck.  The next poll tick retries
+ * naturally; no additional retry logic is needed here.
+ *
+ * @return 0 on success (both SSH commands returned 0), -1 on failure.
+ */
+static int cpld_i2c_flush(void)
+{
+    static const char SSH_FLUSH_SET[] =
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%%usb0 "
+        "'i2cset -y -f 12 0x31 0x38 0x80' >/dev/null 2>&1";
+    static const char SSH_FLUSH_CLR[] =
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%%usb0 "
+        "'i2cset -y -f 12 0x31 0x38 0x00' >/dev/null 2>&1";
+
+    syslog(LOG_WARNING,
+           "wedge100s-i2c-daemon: triggering CPLD I2C flush via BMC");
+
+    int rc = system(SSH_FLUSH_SET);
+    if (rc != 0) {
+        syslog(LOG_WARNING,
+               "wedge100s-i2c-daemon: CPLD flush set bit 7 failed (rc=%d)", rc);
+        return -1;
+    }
+
+    usleep(10000);  /* 10 ms for CPLD to clock out 9 SCL pulses */
+
+    rc = system(SSH_FLUSH_CLR);
+    if (rc != 0) {
+        syslog(LOG_WARNING,
+               "wedge100s-i2c-daemon: CPLD flush clear bit 7 failed (rc=%d)", rc);
+        return -1;
+    }
+
+    syslog(LOG_WARNING,
+           "wedge100s-i2c-daemon: CPLD I2C flush complete");
+    return 0;
+}
+
 /* ── poll_presence — hidraw path (Phase 2) ──────────────────────────────── */
 
 /**
@@ -1354,12 +1424,14 @@ static void poll_syseeprom(void)
 static void poll_presence_hidraw(void)
 {
     int curr_present[NUM_PORTS] = {0};
+    int pca9535_failures = 0;
 
     /* Read PCA9535 presence (mux 0x74 ch2 and ch3) */
     for (int g = 0; g < 2; g++) {
         if (mux_select(0x74, PCA9535_MUX_CHAN[g]) < 0) {
             fprintf(stderr,
                     "wedge100s-i2c-daemon: PCA9535[%d] mux select failed\n", g);
+            pca9535_failures++;
             continue;
         }
         for (int r = 0; r < 2; r++) {
@@ -1371,6 +1443,7 @@ static void poll_presence_hidraw(void)
                 fprintf(stderr,
                         "wedge100s-i2c-daemon: PCA9535[%d] reg %d read failed\n",
                         g, r);
+                pca9535_failures++;
                 continue;
             }
             for (int bit = 0; bit < 8; bit++) {
@@ -1380,6 +1453,17 @@ static void poll_presence_hidraw(void)
             }
         }
         mux_deselect(0x74);
+    }
+
+    /*
+     * If all PCA9535 reads failed, the CP2112 bus is likely stuck.
+     * Trigger a CPLD I2C flush via BMC and cancel the stale CP2112 transfer.
+     * The next poll tick will retry presence reads naturally.
+     */
+    if (pca9535_failures >= 4) {
+        cpld_i2c_flush();
+        cp2112_cancel();
+        return;
     }
 
     /* Process each port: update presence file and refresh EEPROM lower page */
@@ -1421,6 +1505,59 @@ static void poll_presence_hidraw(void)
         refresh_eeprom_lower_page(port, eeprom_path);
 
         write_str_file(present_path, "1");
+    }
+}
+
+/* ── poll_rxloss — hidraw path (Phase 2 only) ─────────────────────────── */
+
+/**
+ * @brief Poll QSFP RXLOSS signals from PCA9535 at 0x24/0x25 via hidraw.
+ *
+ * Reads PCA9535 INPUT registers on PCA9548 0x74 channels 4/5 to determine
+ * per-port receive-loss-of-signal status.  Writes "0" (OK) or "1" (loss
+ * detected) to /run/wedge100s/sfp_N_rxlos for each of the 32 ports.
+ *
+ * RXLOSS is active-low on the PCA9535: bit=0 means loss detected.
+ * The same XOR-1 interleave used for presence applies here.
+ */
+static void poll_rxloss_hidraw(void)
+{
+    int curr_rxlos[NUM_PORTS] = {0};
+
+    /* Read PCA9535 RXLOSS (mux 0x74 ch4 and ch5) */
+    for (int g = 0; g < 2; g++) {
+        if (mux_select(0x74, RXLOSS_PCA9535_CHAN[g]) < 0) {
+            fprintf(stderr,
+                    "wedge100s-i2c-daemon: RXLOSS PCA9535[%d] mux select failed\n",
+                    g);
+            continue;
+        }
+        for (int r = 0; r < 2; r++) {
+            uint8_t reg_byte = (uint8_t)r;
+            uint8_t val = 0;
+            int ret = cp2112_write_read((uint8_t)RXLOSS_PCA9535_ADDR[g],
+                                        &reg_byte, 1, &val, 1);
+            if (ret < 0) {
+                fprintf(stderr,
+                        "wedge100s-i2c-daemon: RXLOSS PCA9535[%d] reg %d read failed\n",
+                        g, r);
+                continue;
+            }
+            for (int bit = 0; bit < 8; bit++) {
+                int line = r * 8 + bit;
+                int p    = g * 16 + (line ^ 1);  /* XOR-1 interleave (ONL sfpi.c) */
+                curr_rxlos[p] = !((val >> bit) & 1);  /* active-low: 0=loss */
+            }
+        }
+        mux_deselect(0x74);
+    }
+
+    /* Write per-port rxlos files */
+    for (int port = 0; port < NUM_PORTS; port++) {
+        char rxlos_path[64];
+        snprintf(rxlos_path, sizeof(rxlos_path),
+                 RUN_DIR "/sfp_%d_rxlos", port);
+        write_str_file(rxlos_path, curr_rxlos[port] ? "1" : "0");
     }
 }
 
@@ -1732,6 +1869,7 @@ int main(void)
             /* hidraw poll functions (order matters — see comment in spec) */
             poll_syseeprom_hidraw();
             poll_presence_hidraw();
+            poll_rxloss_hidraw();
             poll_lpmode_hidraw();
             poll_write_requests_hidraw();
             poll_read_requests_hidraw();

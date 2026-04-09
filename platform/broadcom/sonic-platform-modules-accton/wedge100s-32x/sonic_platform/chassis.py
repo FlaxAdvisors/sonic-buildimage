@@ -237,19 +237,55 @@ class Chassis(ChassisBase):
         except Exception:
             return 'NA'
 
+    _CPLD_RESET_MAP = {
+        0x00: (ChassisBase.REBOOT_CAUSE_NON_HARDWARE, "Unknown (CPLD default)"),
+        0x01: (ChassisBase.REBOOT_CAUSE_POWER_LOSS, "Standby power domain reset"),
+        0x02: (ChassisBase.REBOOT_CAUSE_POWER_LOSS, "Main power domain reset"),
+        0x03: (ChassisBase.REBOOT_CAUSE_HARDWARE_BUTTON, "Front panel push button"),
+        0x04: (ChassisBase.REBOOT_CAUSE_HARDWARE_BUTTON, "On-board debug push button"),
+        0x05: (ChassisBase.REBOOT_CAUSE_HARDWARE_OTHER, "Facebook debug header reset"),
+        0x10: (ChassisBase.REBOOT_CAUSE_NON_HARDWARE, "Software hot reset"),
+        0x11: (ChassisBase.REBOOT_CAUSE_NON_HARDWARE, "Software warm reset"),
+        0x12: (ChassisBase.REBOOT_CAUSE_NON_HARDWARE, "Software cold reset"),
+        0x13: (ChassisBase.REBOOT_CAUSE_NON_HARDWARE, "Software power reset"),
+        0x20: (ChassisBase.REBOOT_CAUSE_HARDWARE_OTHER, "BMC request reset (BMC only)"),
+        0x21: (ChassisBase.REBOOT_CAUSE_HARDWARE_OTHER, "BMC request Tomahawk reset"),
+        0x22: (ChassisBase.REBOOT_CAUSE_HARDWARE_OTHER, "BMC request COM-e reset"),
+        0x23: (ChassisBase.REBOOT_CAUSE_HARDWARE_OTHER, "BMC request main power reset"),
+        0x24: (ChassisBase.REBOOT_CAUSE_HARDWARE_OTHER, "BMC request full board reset"),
+        0x25: (ChassisBase.REBOOT_CAUSE_WATCHDOG, "BMC watchdog timer-1 reset"),
+        0x26: (ChassisBase.REBOOT_CAUSE_WATCHDOG, "BMC watchdog timer-2 reset"),
+    }
+
     def get_reboot_cause(self):
-        """Return (cause_constant, description) from reboot-cause file."""
+        """Return the most recent reboot cause from CPLD register 0x0D.
+
+        Falls back to the SONiC reboot-cause file if CPLD data is unavailable.
+
+        Returns:
+            tuple: (REBOOT_CAUSE_xxx, description_string)
+        """
+        # Try CPLD hardware register first (most authoritative).
+        try:
+            with open('/run/wedge100s/reset_reason') as f:
+                code = int(f.read().strip(), 0)
+            if code in self._CPLD_RESET_MAP:
+                return self._CPLD_RESET_MAP[code]
+            return (self.REBOOT_CAUSE_HARDWARE_OTHER,
+                    "CPLD reset code 0x{:02x}".format(code))
+        except (OSError, ValueError):
+            pass
+
+        # Fallback: SONiC reboot-cause file.
         try:
             with open(self.REBOOT_CAUSE_FILE) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        return (self.REBOOT_CAUSE_NON_HARDWARE, line)
-        except FileNotFoundError:
+                cause = f.read().strip()
+            if cause:
+                return (self.REBOOT_CAUSE_NON_HARDWARE, cause)
+        except OSError:
             pass
-        except Exception:
-            pass
-        return (self.REBOOT_CAUSE_POWER_LOSS, "")
+
+        return (self.REBOOT_CAUSE_NON_HARDWARE, "Unknown")
 
     def get_port_or_cage_type(self, index):
         """Return cage type for port index.  All 32 ports are QSFP28.

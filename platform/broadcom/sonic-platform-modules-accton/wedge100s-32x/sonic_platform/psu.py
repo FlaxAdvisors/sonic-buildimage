@@ -48,6 +48,11 @@ _RUN_DIR = '/run/wedge100s'
 _CACHE_TTL  = 30.0
 _psu_cache  = [{} for _ in range(2)]   # one dict per PSU (0-indexed)
 
+_PSU_ALARM_CACHE    = '/run/wedge100s/psu{}_alarm'
+_PSU_INPUT_OK_CACHE = '/run/wedge100s/psu{}_input_ok'
+_PSU_MODEL_CACHE    = '/run/wedge100s/psu_{}_model'
+_PSU_SERIAL_CACHE   = '/run/wedge100s/psu_{}_serial'
+
 NUM_PSUS = 2
 
 
@@ -173,11 +178,32 @@ class Psu(PsuBase):
         return 'PSU-{}'.format(self._index)
 
     def get_model(self):
-        """Return PSU model. Static string — PMBus block-read not implemented."""
-        return "Delta DPS-1100AB-6 A"
+        """Return PSU model string from PMBus MFR_MODEL (0x9A).
+
+        Returns:
+            str: Model string, or "N/A" if unavailable.
+        """
+        path = _PSU_MODEL_CACHE.format(self._index)
+        try:
+            with open(path) as f:
+                model = f.read().strip()
+            return model if model else "N/A"
+        except OSError:
+            return "N/A"
 
     def get_serial(self):
-        return 'N/A'
+        """Return PSU serial number from PMBus MFR_SERIAL (0x9E).
+
+        Returns:
+            str: Serial number string, or "N/A" if unavailable.
+        """
+        path = _PSU_SERIAL_CACHE.format(self._index)
+        try:
+            with open(path) as f:
+                serial = f.read().strip()
+            return serial if serial else "N/A"
+        except OSError:
+            return "N/A"
 
     def get_presence(self):
         """Check if the PSU is physically inserted.
@@ -244,6 +270,33 @@ class Psu(PsuBase):
     def get_input_current(self):
         """AC input current in A (READ_IIN, PMBus reg 0x89)."""
         return _read_psu_telemetry(self._idx).get('iin')
+
+    def get_psu_alarm(self):
+        """Return True if PSU has an active alarm condition.
+
+        Returns:
+            bool: True if alarm active (abnormal), False if normal.
+        """
+        path = _PSU_ALARM_CACHE.format(self._index)
+        try:
+            with open(path) as f:
+                # CPLD: 1=normal, 0=alarm — invert for "has alarm" semantics
+                return f.read().strip() == '0'
+        except OSError:
+            return False
+
+    def get_input_status(self):
+        """Return True if PSU input power is OK.
+
+        Returns:
+            bool: True if input power is within acceptable range.
+        """
+        path = _PSU_INPUT_OK_CACHE.format(self._index)
+        try:
+            with open(path) as f:
+                return f.read().strip() == '1'
+        except OSError:
+            return False
 
     def set_status_led(self, color):
         return False

@@ -18,12 +18,22 @@
  *   model_id      (RO) — 2-bit model ID             (bits [5:4] of 0x00; 0=wedge100 TOR)
  *   pwr_stby_ok   (RO) — 1 = standby power OK       (bit 0 of 0x11)
  *   pwr_status2   (RO) — power rail status byte      (reg 0x12, hex)
+ *   rov_status    (RO) — ROV + VCORE_IDSEL byte       (reg 0x0B, hex)
+ *   reset_reason  (RO) — 8-bit reset reason code      (reg 0x0D, hex)
+ *   reset_source1 (RO) — per-source reset active bits  (reg 0x0E, hex)
+ *   reset_source2 (RO) — BMC-initiated reset bits      (reg 0x0F, hex)
+ *   come_status   (RO) — COM-e status byte             (reg 0x18, hex)
  *   led_sys1      (RW) — SYS LED 1 byte (reg 0x3e): 0=off,1=red,2=green,4=blue,+8=blink
  *   led_sys2      (RW) — SYS LED 2 byte (reg 0x3f): same encoding
  *
  * Register map (from ONL ledi.c / psui.c, verified on hardware 2026-02-25):
  *   0x00  CPLD version major / board rev [3:0] / model ID [5:4]
  *   0x01  CPLD version minor
+ *   0x0B  ROV status: D[3:0]=TH_ROV, D[6:4]=VCORE_IDSEL
+ *   0x0D  Reset reason code (8-bit)
+ *   0x0E  Reset source 1 (per-source active bits)
+ *   0x0F  Reset source 2 (BMC-initiated active bits)
+ *   0x18  COM-e status: D[2:0]=B_COM_TYPE, D[3]=GBE0_LINK1000_N, D[4:7]=SUS states
  *   0x10  PSU presence/status
  *   0x11  Power status 1 (standby power OK)
  *   0x12  Power status 2 (VCORE/VANLOG/V3V3 ready + hot)
@@ -55,6 +65,11 @@
 #define REG_PWR_STATUS1    0x11  /* D[0]=PWR_STBY_OK */
 #define REG_PWR_STATUS2    0x12  /* D[0]=VCORE_VRDY, D[1]=VCORE_HOT, D[2]=VANLOG_VRDY,
                                   * D[3]=VANLOG_HOT, D[4]=V3V3_VRDY, D[5]=V3V3_HOT */
+#define REG_ROV_STATUS     0x0b  /* D[3:0]=TH_ROV, D[6:4]=VCORE_IDSEL */
+#define REG_RESET_REASON   0x0d  /* Reset reason code (8-bit) */
+#define REG_RESET_SOURCE1  0x0e  /* Per-source reset active bits */
+#define REG_RESET_SOURCE2  0x0f  /* BMC-initiated reset active bits */
+#define REG_COME_STATUS    0x18  /* D[2:0]=COM type, D[3]=GbE link, D[4:7]=suspend states */
 #define REG_LED_SYS1       0x3e
 #define REG_LED_SYS2       0x3f
 
@@ -357,6 +372,147 @@ static ssize_t show_pwr_status2(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
 }
 
+/**
+ * @brief Show ROV status register (reg 0x0B) as hex.
+ *
+ * Returns the full byte — D[3:0]=TH_ROV code, D[6:4]=VCORE_IDSEL.
+ * Caller decodes the ROV code and VID setting.
+ *
+ * @param dev   Device structure for the CPLD.
+ * @param attr  Device attribute (unused).
+ * @param buf   Output buffer for sysfs read.
+ * @return Number of bytes written to buf, or negative errno.
+ */
+static ssize_t show_rov_status(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_ROV_STATUS);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
+}
+
+/**
+ * @brief Show reset reason code (reg 0x0D) as hex.
+ *
+ * 8-bit reset reason code: 0x00=unknown, 0x01=standby reset,
+ * 0x02=main reset, 0x03=front panel button, 0x10-0x13=SW reset,
+ * 0x20-0x26=BMC reset.
+ *
+ * @param dev   Device structure for the CPLD.
+ * @param attr  Device attribute (unused).
+ * @param buf   Output buffer for sysfs read.
+ * @return Number of bytes written to buf, or negative errno.
+ */
+static ssize_t show_reset_reason(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_RESET_REASON);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
+}
+
+/**
+ * @brief Show reset source 1 register (reg 0x0E) as hex.
+ *
+ * Per-source reset active bits — each bit indicates a specific
+ * reset source was active.
+ *
+ * @param dev   Device structure for the CPLD.
+ * @param attr  Device attribute (unused).
+ * @param buf   Output buffer for sysfs read.
+ * @return Number of bytes written to buf, or negative errno.
+ */
+static ssize_t show_reset_source1(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_RESET_SOURCE1);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
+}
+
+/**
+ * @brief Show reset source 2 register (reg 0x0F) as hex.
+ *
+ * BMC-initiated reset active bits — each bit indicates a specific
+ * BMC reset source was active.
+ *
+ * @param dev   Device structure for the CPLD.
+ * @param attr  Device attribute (unused).
+ * @param buf   Output buffer for sysfs read.
+ * @return Number of bytes written to buf, or negative errno.
+ */
+static ssize_t show_reset_source2(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_RESET_SOURCE2);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
+}
+
+/**
+ * @brief Show COM-e status register (reg 0x18) as hex.
+ *
+ * Returns the full byte — caller decodes individual fields:
+ *   D[2:0] B_COM_TYPE     — COM Express board type code
+ *   D[3]   COM_GBE0_LINK1000_N — GbE link status (1 = no 1G link)
+ *   D[4]   COM_SUS_STAT_N — suspend status (active-low)
+ *   D[5]   COM_SUS_S3_N   — S3 suspend state (active-low)
+ *   D[6]   COM_SUS_S4_N   — S4 suspend state (active-low)
+ *   D[7]   COM_SUS_S5_N   — S5 suspend state (active-low)
+ *
+ * @param dev   Device structure for the CPLD.
+ * @param attr  Device attribute (unused).
+ * @param buf   Output buffer for sysfs read.
+ * @return Number of bytes written to buf, or negative errno.
+ */
+static ssize_t show_come_status(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_COME_STATUS);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
+}
+
 /** @brief Show SYS LED 1 register value (reg 0x3e) as hex. */
 static ssize_t show_led_sys1(struct device *dev,
 			      struct device_attribute *attr, char *buf)
@@ -454,6 +610,11 @@ static DEVICE_ATTR(board_rev,    S_IRUGO, show_board_rev,    NULL);
 static DEVICE_ATTR(model_id,     S_IRUGO, show_model_id,     NULL);
 static DEVICE_ATTR(pwr_stby_ok,  S_IRUGO, show_pwr_stby_ok,  NULL);
 static DEVICE_ATTR(pwr_status2,  S_IRUGO, show_pwr_status2,  NULL);
+static DEVICE_ATTR(rov_status,     S_IRUGO, show_rov_status,     NULL);
+static DEVICE_ATTR(reset_reason,   S_IRUGO, show_reset_reason,   NULL);
+static DEVICE_ATTR(reset_source1,  S_IRUGO, show_reset_source1,  NULL);
+static DEVICE_ATTR(reset_source2,  S_IRUGO, show_reset_source2,  NULL);
+static DEVICE_ATTR(come_status,    S_IRUGO, show_come_status,    NULL);
 static DEVICE_ATTR(led_sys1, S_IRUGO | S_IWUSR, show_led_sys1, store_led_sys1);
 static DEVICE_ATTR(led_sys2, S_IRUGO | S_IWUSR, show_led_sys2, store_led_sys2);
 
@@ -471,6 +632,11 @@ static struct attribute *wedge100s_cpld_attrs[] = {
 	&dev_attr_model_id.attr,
 	&dev_attr_pwr_stby_ok.attr,
 	&dev_attr_pwr_status2.attr,
+	&dev_attr_rov_status.attr,
+	&dev_attr_reset_reason.attr,
+	&dev_attr_reset_source1.attr,
+	&dev_attr_reset_source2.attr,
+	&dev_attr_come_status.attr,
 	&dev_attr_led_sys1.attr,
 	&dev_attr_led_sys2.attr,
 	NULL,

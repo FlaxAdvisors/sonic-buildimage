@@ -27,6 +27,8 @@
  *   fan_{1..5}_front               front-rotor RPM
  *   fan_{1..5}_rear                rear-rotor RPM
  *   psu_{1,2}_{vin,iin,iout,pout}  raw PMBus LINEAR11 16-bit word (decimal)
+ *   psu_{1,2}_model                PSU MFR_MODEL string (PMBus block-read)
+ *   psu_{1,2}_serial               PSU MFR_SERIAL string (PMBus block-read)
  *   qsfp_int                       BMC gpio31 value (0 = interrupt asserted)
  *   qsfp_led_position              BMC gpio59 board strap (written once)
  *
@@ -50,6 +52,7 @@
 #include <syslog.h>
 #include <sys/inotify.h>
 #include <sys/timerfd.h>
+#include <ctype.h>
 
 /* ── constants ─────────────────────────────────────────────────────────── */
 
@@ -97,6 +100,26 @@ static int write_file(const char *path, int value)
     FILE *f = fopen(path, "w");
     if (!f) return -1;
     fprintf(f, "%d\n", value);
+    fclose(f);
+    return 0;
+}
+
+/* ── write_str_file ─────────────────────────────────────────────────────── */
+/**
+ * @brief Write a string followed by a newline to a file.
+ *
+ * Companion to write_file() for non-integer values such as PMBus
+ * MFR_MODEL / MFR_SERIAL ASCII strings.
+ *
+ * @param path  Absolute path of the file to write.
+ * @param str   Null-terminated string to write.
+ * @return 0 on success, -1 if fopen() failed.
+ */
+static int write_str_file(const char *path, const char *str)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    fprintf(f, "%s\n", str);
     fclose(f);
     return 0;
 }
@@ -184,6 +207,80 @@ static int bmc_read_int(const char *bmc_cmd, int base, int *result)
     if (end == line || errno != 0) return -1;
 
     *result = (int)val;
+    return 0;
+}
+
+/* ── bmc_read_pmbus_string ──────────────────────────────────────────────── */
+/**
+ * @brief Read a PMBus block-read register via i2ctransfer and decode as ASCII.
+ *
+ * Runs `i2ctransfer -y <bus> w1@<addr> <reg> r33@<addr>` on the BMC via SSH.
+ * The first returned byte is the PMBus block length; the following bytes are
+ * ASCII characters.  Trailing spaces and NUL bytes are trimmed.
+ *
+ * @param bus     BMC I2C bus number.
+ * @param addr    PMBus device address (e.g. 0x59).
+ * @param reg     PMBus register (e.g. 0x9A for MFR_MODEL).
+ * @param out     Output buffer for the decoded string.
+ * @param outsz   Size of output buffer in bytes.
+ * @return 0 on success, -1 on SSH/parse failure or zero-length result.
+ */
+static int bmc_read_pmbus_string(int bus, int addr, int reg,
+                                 char *out, size_t outsz)
+{
+    char bmc_cmd[256];
+    char shell_cmd[512];
+    char line[512];
+    FILE *fp;
+    unsigned int bytes[33];
+    int nbytes, blklen, i, end;
+
+    snprintf(bmc_cmd, sizeof(bmc_cmd),
+             "i2ctransfer -f -y %d w1@0x%02x 0x%02x r33@0x%02x",
+             bus, addr, reg, addr);
+    build_ssh_cmd(shell_cmd, sizeof(shell_cmd), bmc_cmd, " 2>/dev/null");
+
+    fp = popen(shell_cmd, "r");
+    if (!fp) return -1;
+
+    line[0] = '\0';
+    fgets(line, sizeof(line), fp);
+    pclose(fp);
+
+    line[strcspn(line, "\r\n")] = '\0';
+    if (!line[0]) return -1;
+
+    /* Parse space-separated hex bytes: "0x0e 0x44 0x50 ..." */
+    nbytes = 0;
+    {
+        char *p = line;
+        char *endp;
+        while (nbytes < 33 && *p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            unsigned long v = strtoul(p, &endp, 16);
+            if (endp == p) break;
+            bytes[nbytes++] = (unsigned int)(v & 0xFF);
+            p = endp;
+        }
+    }
+    if (nbytes < 2) return -1;   /* need at least length byte + 1 char */
+
+    blklen = (int)bytes[0];
+    if (blklen <= 0 || blklen > nbytes - 1) blklen = nbytes - 1;
+    if ((size_t)blklen >= outsz) blklen = (int)(outsz - 1);
+
+    for (i = 0; i < blklen; i++)
+        out[i] = (char)bytes[i + 1];
+    out[blklen] = '\0';
+
+    /* Trim trailing spaces and NULs */
+    end = blklen - 1;
+    while (end >= 0 && (out[end] == ' ' || out[end] == '\0'))
+        end--;
+    out[end + 1] = '\0';
+
+    if (!out[0]) return -1;       /* empty after trimming */
     return 0;
 }
 
@@ -425,6 +522,16 @@ int main(void)
         { 0x8c, "iout" },
         { 0x96, "pout" },
     };
+    /* PMBus string registers for model/serial (block-read, ASCII) */
+    static const struct { int reg; const char *suffix; } pmbus_str_regs[2] = {
+        { 0x9a, "model"  },
+        { 0x9e, "serial" },
+    };
+    /*
+     * Per-PSU flag: set once model/serial have been successfully read.
+     * Cleared when the PSU is removed so re-insertion triggers a fresh read.
+     */
+    int psu_info_read[2] = {0, 0};
 
     openlog("wedge100s-bmc-daemon", LOG_PID | LOG_NDELAY, LOG_DAEMON);
     mkdir(RUN_DIR, 0755);
@@ -522,7 +629,25 @@ int main(void)
 
             /* PSU PMBus */
             for (i = 0; i < 2; i++) {
-                int r2;
+                int r2, present = 0;
+
+                /* Check PSU presence before accessing the mux */
+                snprintf(path, sizeof(path), RUN_DIR "/psu%d_present", i + 1);
+                {
+                    FILE *pf = fopen(path, "r");
+                    if (pf) {
+                        char pbuf[16] = "";
+                        if (fgets(pbuf, sizeof(pbuf), pf))
+                            present = (atoi(pbuf) == 1);
+                        fclose(pf);
+                    }
+                }
+
+                if (!present) {
+                    psu_info_read[i] = 0;  /* reset so re-insert triggers read */
+                    continue;
+                }
+
                 snprintf(cmd, sizeof(cmd), "i2cset -f -y 7 0x70 0x%02x",
                          psu_cfg[i].mux_ch);
                 bmc_run(cmd);
@@ -535,6 +660,27 @@ int main(void)
                              i + 1, pmbus_regs[r2].name);
                     if (bmc_read_int(cmd, 0, &val) == 0)
                         write_file(path, val);
+                }
+
+                /* PSU model/serial: read once per insertion (block-read) */
+                if (!psu_info_read[i]) {
+                    char strbuf[64];
+                    int got = 0;
+
+                    for (r2 = 0; r2 < 2; r2++) {
+                        if (bmc_read_pmbus_string(
+                                7, psu_cfg[i].pmbus_addr,
+                                pmbus_str_regs[r2].reg,
+                                strbuf, sizeof(strbuf)) == 0) {
+                            snprintf(path, sizeof(path),
+                                     RUN_DIR "/psu_%d_%s",
+                                     i + 1, pmbus_str_regs[r2].suffix);
+                            write_str_file(path, strbuf);
+                            got++;
+                        }
+                    }
+                    if (got == 2)
+                        psu_info_read[i] = 1;
                 }
             }
         }

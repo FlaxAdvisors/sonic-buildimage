@@ -208,19 +208,17 @@ class Fan(FanBase):
         return min(available)
 
     def get_target_speed(self):
-        """
-        Last speed percentage set via set_speed().
+        """Return the target fan speed as a percentage of maximum.
 
-        Raises NotImplementedError before the first set_speed() call so that
-        thermalctld's try_get() falls back to NOT_AVAILABLE and skips the
-        is_under/over_speed checks — avoiding false "Not OK" alarms on the
-        first poll cycle before thermalctld has issued any speed command.
+        Returns the last value set via set_speed().  When no explicit target
+        has been set (BMC manages speed autonomously), returns the current
+        actual speed so that system-health's is_under/over_speed checks pass.
 
-        All trays share one target value because set_fan_speed.sh controls
-        the whole fan board simultaneously.
+        Returns:
+            int: Target speed percentage (0–100).
         """
         if _target_speed_pct is None:
-            raise NotImplementedError
+            return self.get_speed()
         return _target_speed_pct
 
     def get_speed_tolerance(self):

@@ -40,6 +40,7 @@ NUM_SFPS = 32
 
 _I2C_EEPROM_CACHE  = '/run/wedge100s/sfp_{}_eeprom'
 _I2C_PRESENT_CACHE = '/run/wedge100s/sfp_{}_present'
+_RXLOS_CACHE = '/run/wedge100s/sfp_{}_rxlos'
 _LP_MODE_STATE = '/run/wedge100s/sfp_{}_lpmode'
 _LP_MODE_REQ   = '/run/wedge100s/sfp_{}_lpmode_req'
 _WRITE_REQ  = '/run/wedge100s/sfp_{}_write_req'   # pmon → daemon: JSON {offset, length, data_hex}
@@ -376,3 +377,22 @@ class Sfp(SfpOptoeBase):
         if not self.get_presence():
             return self.SFP_STATUS_UNPLUGGED
         return self.SFP_STATUS_OK
+
+    def get_rx_los(self):
+        """Return per-lane RX loss-of-signal status from hardware PCA9535.
+
+        The i2c-daemon reads PCA9535 at 0x24/0x25 and writes per-port
+        sfp_N_rxlos files (0=OK, 1=loss). For QSFP28 (4-lane), all 4
+        lanes share one hardware RXLOSS signal per port.
+
+        Returns:
+            list[bool]: [lane0, lane1, lane2, lane3] — True if RX loss detected.
+                        Returns [False]*4 if data unavailable.
+        """
+        path = _RXLOS_CACHE.format(self._port)
+        try:
+            with open(path) as f:
+                loss = f.read().strip() == '1'
+            return [loss] * 4
+        except OSError:
+            return [False] * 4

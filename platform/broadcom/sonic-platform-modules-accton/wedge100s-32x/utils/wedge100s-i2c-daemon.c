@@ -1347,6 +1347,62 @@ static void poll_syseeprom(void)
     }
 }
 
+/* ── CPLD I2C bus flush via BMC ─────────────────────────────────────────── */
+
+/**
+ * @brief Trigger CPLD I2C bus flush via BMC SSH to recover a stuck CP2112 bus.
+ *
+ * The CPLD register 0x38 bit 7 triggers an I2C flush sequence: setting the bit
+ * causes the CPLD to send 9 SCL clocks to unstick any slave holding SDA low.
+ * Since the CP2112 bus itself may be stuck, this function reaches the CPLD
+ * through the BMC's I2C bus 12 (BMC_I2C_13) at address 0x31, bypassing the
+ * CP2112 entirely.
+ *
+ * Sequence: set bit 7, wait 10 ms, clear bit 7.
+ *
+ * This is emergency recovery — called when PCA9535 presence reads fail,
+ * indicating the CP2112 I2C bus may be stuck.  The next poll tick retries
+ * naturally; no additional retry logic is needed here.
+ *
+ * @return 0 on success (both SSH commands returned 0), -1 on failure.
+ */
+static int cpld_i2c_flush(void)
+{
+    static const char SSH_FLUSH_SET[] =
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%%usb0 "
+        "'i2cset -y -f 12 0x31 0x38 0x80' >/dev/null 2>&1";
+    static const char SSH_FLUSH_CLR[] =
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-o ConnectTimeout=5 -i /etc/sonic/wedge100s-bmc-key "
+        "root@fe80::ff:fe00:1%%usb0 "
+        "'i2cset -y -f 12 0x31 0x38 0x00' >/dev/null 2>&1";
+
+    syslog(LOG_WARNING,
+           "wedge100s-i2c-daemon: triggering CPLD I2C flush via BMC");
+
+    int rc = system(SSH_FLUSH_SET);
+    if (rc != 0) {
+        syslog(LOG_WARNING,
+               "wedge100s-i2c-daemon: CPLD flush set bit 7 failed (rc=%d)", rc);
+        return -1;
+    }
+
+    usleep(10000);  /* 10 ms for CPLD to clock out 9 SCL pulses */
+
+    rc = system(SSH_FLUSH_CLR);
+    if (rc != 0) {
+        syslog(LOG_WARNING,
+               "wedge100s-i2c-daemon: CPLD flush clear bit 7 failed (rc=%d)", rc);
+        return -1;
+    }
+
+    syslog(LOG_WARNING,
+           "wedge100s-i2c-daemon: CPLD I2C flush complete");
+    return 0;
+}
+
 /* ── poll_presence — hidraw path (Phase 2) ──────────────────────────────── */
 
 /**
@@ -1368,12 +1424,14 @@ static void poll_syseeprom(void)
 static void poll_presence_hidraw(void)
 {
     int curr_present[NUM_PORTS] = {0};
+    int pca9535_failures = 0;
 
     /* Read PCA9535 presence (mux 0x74 ch2 and ch3) */
     for (int g = 0; g < 2; g++) {
         if (mux_select(0x74, PCA9535_MUX_CHAN[g]) < 0) {
             fprintf(stderr,
                     "wedge100s-i2c-daemon: PCA9535[%d] mux select failed\n", g);
+            pca9535_failures++;
             continue;
         }
         for (int r = 0; r < 2; r++) {
@@ -1385,6 +1443,7 @@ static void poll_presence_hidraw(void)
                 fprintf(stderr,
                         "wedge100s-i2c-daemon: PCA9535[%d] reg %d read failed\n",
                         g, r);
+                pca9535_failures++;
                 continue;
             }
             for (int bit = 0; bit < 8; bit++) {
@@ -1394,6 +1453,17 @@ static void poll_presence_hidraw(void)
             }
         }
         mux_deselect(0x74);
+    }
+
+    /*
+     * If all PCA9535 reads failed, the CP2112 bus is likely stuck.
+     * Trigger a CPLD I2C flush via BMC and cancel the stale CP2112 transfer.
+     * The next poll tick will retry presence reads naturally.
+     */
+    if (pca9535_failures >= 4) {
+        cpld_i2c_flush();
+        cp2112_cancel();
+        return;
     }
 
     /* Process each port: update presence file and refresh EEPROM lower page */

@@ -456,69 +456,27 @@ EOF
     echo "wedge100s postinst: patched $CHRONY_HOOK — idempotent NTP source reload"
 fi
 
-# If pmon container already exists but is stopped, remove it so the next
-# supervisor start recreates it with the updated flags.
-# Do NOT remove a running pmon: xcvrd holds I2C bus locks and forceful removal
-# causes a bus hang requiring a full power cycle.
-if command -v docker >/dev/null 2>&1 && timeout 5 docker info >/dev/null 2>&1; then
-    PMON_STATUS=$(timeout 5 docker inspect --format='{{.State.Status}}' pmon 2>/dev/null || true)
-    if [ "$PMON_STATUS" = "exited" ] || [ "$PMON_STATUS" = "created" ]; then
-        docker rm pmon >/dev/null 2>&1 || true
-        echo "wedge100s postinst: removed stopped pmon container — will be recreated on next start"
-    elif [ "$PMON_STATUS" = "running" ]; then
-        echo "wedge100s postinst: NOTE: pmon container is running with old flags." \
-             "Reboot (or stop pmon then 'docker rm pmon') to pick up ttyACM device mapping."
-    fi
-
-    # Force-reinstall sonic_platform wheel on the HOST (python3 for decode-syseeprom
-    # and other SONiC CLI tools) and inside the running pmon container.
-    # Always force-reinstall so deb upgrades take effect immediately without
-    # needing a reboot — "already installed" check skips it otherwise.
-    DEVICE_WHEEL="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/sonic_platform-1.0-py3-none-any.whl"
-    if [ -f "$DEVICE_WHEEL" ]; then
-        pip3 install --quiet --force-reinstall "$DEVICE_WHEEL" 2>/dev/null || true
-        echo "wedge100s postinst: reinstalled sonic_platform wheel on host"
-    fi
-
-    # Update sonic_platform wheel inside the running pmon container.
-    # The wheel is bind-mounted from the host but docker_init.sh skips reinstall
-    # if sonic_platform is already importable (it is, baked into the image).
-    # Force-reinstall here so the container picks up chassis.py changes immediately
-    # without waiting for a full image rebuild.
-    if [ "$PMON_STATUS" = "running" ]; then
-        PLATFORM_WHEEL="/usr/share/sonic/platform/sonic_platform-1.0-py3-none-any.whl"
-        if timeout 10 docker exec pmon test -f "$PLATFORM_WHEEL" 2>/dev/null; then
-            timeout 10 docker exec pmon pip3 install --quiet --force-reinstall "$PLATFORM_WHEEL" 2>/dev/null || true
-            echo "wedge100s postinst: reinstalled sonic_platform wheel in pmon container"
-        fi
-        # Ensure openssh-client (ssh binary) is available inside pmon.
-        # bmc.py uses subprocess.run(['ssh', ...]) for BMC communication.
-        # The pmon Docker image does not include openssh-client; copy the
-        # host binary until the Dockerfile is rebuilt with openssh-client.
-        if ! timeout 10 docker exec pmon which ssh >/dev/null 2>&1; then
-            SSH_BIN=$(which ssh 2>/dev/null)
-            if [ -n "$SSH_BIN" ]; then
-                docker cp "$SSH_BIN" pmon:/usr/bin/ssh 2>/dev/null || true
-                # Copy required shared libraries if missing
-                for lib in $(ldd "$SSH_BIN" 2>/dev/null | awk '/=>/{print $3}' | grep -v '^('); do
-                    [ -f "$lib" ] && timeout 10 docker exec pmon test -f "$lib" 2>/dev/null || \
-                        docker cp "$lib" pmon:"$lib" 2>/dev/null || true
-                done
-                echo "wedge100s postinst: copied ssh binary into pmon container"
-            fi
-        fi
-        # Patch psud poll interval: 3s → 30s (PSU insertion is a human-scale event).
-        # This reduces I2C traffic through the CP2112 USB bridge, improving SSH responsiveness.
-        if timeout 10 docker exec pmon grep -q 'PSU_INFO_UPDATE_PERIOD_SECS = 3' /usr/local/bin/psud 2>/dev/null; then
-            timeout 10 docker exec pmon sed -i 's/PSU_INFO_UPDATE_PERIOD_SECS = 3/PSU_INFO_UPDATE_PERIOD_SECS = 30/' \
-                /usr/local/bin/psud 2>/dev/null || true
-            echo "wedge100s postinst: patched psud poll interval 3s → 30s in pmon container"
-        fi
-        # Restart xcvrd and psud to pick up the updated code.
-        timeout 10 docker exec pmon supervisorctl restart xcvrd psud 2>/dev/null || true
-        echo "wedge100s postinst: restarted xcvrd and psud"
-    fi
+# Force-reinstall sonic_platform wheel on the HOST (python3 for decode-syseeprom
+# and other SONiC CLI tools).  Always force-reinstall so deb upgrades take effect
+# immediately — "already installed" check skips it otherwise.
+DEVICE_WHEEL="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/sonic_platform-1.0-py3-none-any.whl"
+if [ -f "$DEVICE_WHEEL" ]; then
+    pip3 install --quiet --force-reinstall "$DEVICE_WHEEL" 2>/dev/null || true
+    echo "wedge100s postinst: reinstalled sonic_platform wheel on host"
 fi
+
+# Signal wedge100s-pmon-fixup.service to run after pmon starts.
+# That oneshot service handles all Docker/pmon container operations:
+#   - sonic_platform wheel reinstall inside pmon
+#   - ssh binary copy into pmon (for bmc.py)
+#   - psud poll interval patch (3s → 30s)
+#   - xcvrd/psud restart
+# These cannot run here because Docker/pmon may not be up during postinst
+# (first-boot: rc.local runs before Docker; upgrade: pmon may be stopped).
+mkdir -p /run/wedge100s
+touch /run/wedge100s/pmon-fixup-needed
+systemctl enable wedge100s-pmon-fixup.service 2>/dev/null || true
+echo "wedge100s postinst: armed wedge100s-pmon-fixup.service (runs after pmon starts)"
 
 # Enable LEDUP1 link-state synchronisation daemon.
 # Do not start — has After=syncd.service which blocks during first-boot postinst.

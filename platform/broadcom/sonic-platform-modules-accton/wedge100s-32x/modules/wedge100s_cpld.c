@@ -63,8 +63,9 @@
 #define REG_PSU_STATUS     0x10
 #define REG_BOARD_REV      0x00  /* D[3:0]=BRD_REV, D[5:4]=MODEL_ID */
 #define REG_PWR_STATUS1    0x11  /* D[0]=PWR_STBY_OK */
-#define REG_PWR_STATUS2    0x12  /* D[0]=VCORE_VRDY, D[1]=VCORE_HOT, D[2]=VANLOG_VRDY,
-                                  * D[3]=VANLOG_HOT, D[4]=V3V3_VRDY, D[5]=V3V3_HOT */
+#define REG_PWR_STATUS2    0x12  /* D[0]=VCORE_VRDY (1=ready), D[1]=VCORE_HOT (1=OK, 0=hot),
+                                  * D[2]=VANLOG_VRDY, D[3]=VANLOG_HOT,
+                                  * D[4]=V3V3_VRDY,   D[5]=V3V3_HOT (all active-low thermal) */
 #define REG_ROV_STATUS     0x0b  /* D[3:0]=TH_ROV, D[6:4]=VCORE_IDSEL */
 #define REG_RESET_REASON   0x0d  /* Reset reason code (8-bit) */
 #define REG_RESET_SOURCE1  0x0e  /* Per-source reset active bits */

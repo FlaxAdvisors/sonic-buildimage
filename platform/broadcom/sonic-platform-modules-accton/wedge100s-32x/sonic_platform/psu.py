@@ -156,8 +156,10 @@ class Psu(PsuBase):
     """Platform-specific PSU class for Accton Wedge 100S-32X."""
 
     def __init__(self, index):
-        """
-        index -- 1-based PSU index (1 = PSU1, 2 = PSU2).
+        """Initialize PSU instance.
+
+        Args:
+            index: 1-based PSU index (1 = PSU1, 2 = PSU2).
         """
         PsuBase.__init__(self)
         self._index = index       # 1-based
@@ -178,7 +180,11 @@ class Psu(PsuBase):
         return 'N/A'
 
     def get_presence(self):
-        """True when the PSU is physically inserted."""
+        """Check if the PSU is physically inserted.
+
+        Returns:
+            bool: True when present, False when absent or CPLD unreadable.
+        """
         val = _read_cpld_attr('psu{}_present'.format(self._index))
         if val is None:
             return False
@@ -214,9 +220,12 @@ class Psu(PsuBase):
         return 650.0
 
     def get_voltage(self):
-        """
-        DC output voltage in V (computed as POUT / IOUT).
-        Returns None when telemetry is unavailable or IOUT is zero.
+        """Return DC output voltage in volts.
+
+        Computed as POUT / IOUT to avoid LINEAR16 VOUT_MODE complexity.
+
+        Returns:
+            float: DC output voltage in V, or None if unavailable.
         """
         return _read_psu_telemetry(self._idx).get('vout')
 

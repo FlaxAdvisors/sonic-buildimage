@@ -69,10 +69,10 @@ class Thermal(ThermalBase):
     """Platform-specific Thermal class for Accton Wedge 100S-32X."""
 
     def __init__(self, index):
-        """
-        index -- 0-based sensor index:
-                   0   = CPU Core (host sysfs)
-                   1–7 = TMP75 sensors (BMC sysfs via TTY)
+        """Initialize Thermal sensor instance.
+
+        Args:
+            index: 0-based sensor index (0 = CPU Core, 1–7 = TMP75 sensors).
         """
         ThermalBase.__init__(self)
         self._index = index
@@ -152,9 +152,12 @@ class Thermal(ThermalBase):
         return self._read_temperature() is not None
 
     def get_temperature(self):
-        """
-        Returns current temperature in Celsius (float), or None on failure.
+        """Return current temperature in Celsius.
+
         Also updates the min/max recorded values.
+
+        Returns:
+            float: Temperature in degrees Celsius, or None on read failure.
         """
         temp = self._read_temperature()
         self._update_minmax(temp)
@@ -164,13 +167,34 @@ class Thermal(ThermalBase):
         return self._high
 
     def set_high_threshold(self, temperature):
+        """Set the high warning threshold.
+
+        Args:
+            temperature: Threshold in degrees Celsius.
+
+        Returns:
+            bool: True on success.
+        """
         self._high = float(temperature)
         return True
 
     def get_high_critical_threshold(self):
+        """Return the high critical threshold in degrees Celsius.
+
+        Returns:
+            float: Critical temperature threshold.
+        """
         return self._high_crit
 
     def set_high_critical_threshold(self, temperature):
+        """Set the high critical threshold.
+
+        Args:
+            temperature: Threshold in degrees Celsius.
+
+        Returns:
+            bool: True on success.
+        """
         self._high_crit = float(temperature)
         return True
 

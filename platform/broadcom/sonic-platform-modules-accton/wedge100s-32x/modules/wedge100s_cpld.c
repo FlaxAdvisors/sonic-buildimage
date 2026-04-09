@@ -1,5 +1,6 @@
-/*
- * wedge100s_cpld.c — CPLD I2C driver for Accton Wedge 100S-32X
+/**
+ * @file wedge100s_cpld.c
+ * @brief CPLD I2C driver for Accton Wedge 100S-32X
  *
  * Single CPLD at i2c-1/0x32.
  *
@@ -60,6 +61,12 @@ struct wedge100s_cpld_data {
  * I2C helpers with retry
  * --------------------------------------------------------------------------- */
 
+/**
+ * @brief Read a single byte from a CPLD register via I2C with retry.
+ * @param client I2C client handle for the CPLD device.
+ * @param reg Register address to read.
+ * @return Register value (0–255) on success, negative errno on failure.
+ */
 static int cpld_read(struct i2c_client *client, u8 reg)
 {
 	int status, retry = I2C_RW_RETRY_COUNT;
@@ -73,6 +80,13 @@ static int cpld_read(struct i2c_client *client, u8 reg)
 	return status;
 }
 
+/**
+ * @brief Write a single byte to a CPLD register via I2C with retry.
+ * @param client I2C client handle for the CPLD device.
+ * @param reg Register address to write.
+ * @param value Byte value to write.
+ * @return 0 on success, negative errno on failure.
+ */
 static int cpld_write(struct i2c_client *client, u8 reg, u8 value)
 {
 	int status, retry = I2C_RW_RETRY_COUNT;
@@ -90,6 +104,7 @@ static int cpld_write(struct i2c_client *client, u8 reg, u8 value)
  * sysfs show/store handlers
  * --------------------------------------------------------------------------- */
 
+/** @brief Show CPLD firmware version as "major.minor". */
 static ssize_t show_cpld_version(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
@@ -110,6 +125,7 @@ static ssize_t show_cpld_version(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "%d.%d\n", major, minor);
 }
 
+/** @brief Show PSU1 presence (1=present, 0=absent). Active-low bit 0 of reg 0x10. */
 static ssize_t show_psu1_present(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
@@ -128,6 +144,7 @@ static ssize_t show_psu1_present(struct device *dev,
 			 !((val >> PSU1_PRESENT_BIT) & 1));
 }
 
+/** @brief Show PSU1 power-good status (1=good). Active-high bit 1 of reg 0x10. */
 static ssize_t show_psu1_pgood(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -145,6 +162,7 @@ static ssize_t show_psu1_pgood(struct device *dev,
 			 (val >> PSU1_PGOOD_BIT) & 1);
 }
 
+/** @brief Show PSU2 presence (1=present, 0=absent). Active-low bit 4 of reg 0x10. */
 static ssize_t show_psu2_present(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
@@ -163,6 +181,7 @@ static ssize_t show_psu2_present(struct device *dev,
 			 !((val >> PSU2_PRESENT_BIT) & 1));
 }
 
+/** @brief Show PSU2 power-good status (1=good). Active-high bit 5 of reg 0x10. */
 static ssize_t show_psu2_pgood(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -180,6 +199,7 @@ static ssize_t show_psu2_pgood(struct device *dev,
 			 (val >> PSU2_PGOOD_BIT) & 1);
 }
 
+/** @brief Show SYS LED 1 register value (reg 0x3e) as hex. */
 static ssize_t show_led_sys1(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
@@ -196,6 +216,7 @@ static ssize_t show_led_sys1(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
 }
 
+/** @brief Store SYS LED 1 value (0x00–0xff) to reg 0x3e. */
 static ssize_t store_led_sys1(struct device *dev,
 			       struct device_attribute *attr,
 			       const char *buf, size_t count)
@@ -218,6 +239,7 @@ static ssize_t store_led_sys1(struct device *dev,
 	return status < 0 ? status : count;
 }
 
+/** @brief Show SYS LED 2 register value (reg 0x3f) as hex. */
 static ssize_t show_led_sys2(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
@@ -234,6 +256,7 @@ static ssize_t show_led_sys2(struct device *dev,
 	return scnprintf(buf, PAGE_SIZE, "0x%02x\n", val);
 }
 
+/** @brief Store SYS LED 2 value (0x00–0xff) to reg 0x3f. */
 static ssize_t store_led_sys2(struct device *dev,
 			       struct device_attribute *attr,
 			       const char *buf, size_t count)
@@ -287,6 +310,11 @@ static const struct attribute_group wedge100s_cpld_group = {
  * I2C driver probe / remove
  * --------------------------------------------------------------------------- */
 
+/**
+ * @brief Probe callback — allocate driver data and create sysfs group.
+ * @param client I2C client for the CPLD at 0x32.
+ * @return 0 on success, negative errno on failure.
+ */
 static int wedge100s_cpld_probe(struct i2c_client *client)
 {
 	struct wedge100s_cpld_data *data;
@@ -316,6 +344,7 @@ static int wedge100s_cpld_probe(struct i2c_client *client)
 	return 0;
 }
 
+/** @brief Remove callback — tear down sysfs group. */
 static void wedge100s_cpld_remove(struct i2c_client *client)
 {
 	sysfs_remove_group(&client->dev.kobj, &wedge100s_cpld_group);

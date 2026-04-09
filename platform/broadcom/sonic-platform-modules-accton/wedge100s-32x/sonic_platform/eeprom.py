@@ -41,7 +41,11 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
         self._eeprom_cache = None
 
     def read_eeprom(self):
-        """Return raw EEPROM bytes from the daemon cache, or None if absent."""
+        """Return raw EEPROM bytes from the daemon cache.
+
+        Returns:
+            bytearray: Raw EEPROM data (up to 8192 bytes), or None if absent.
+        """
         try:
             with open(_SYSEEPROM_DAEMON_CACHE, 'rb') as f:
                 data = f.read(8192)
@@ -52,15 +56,15 @@ class SysEeprom(eeprom_tlvinfo.TlvInfoDecoder):
         return None
 
     def get_eeprom(self):
-        """
-        Returns a dictionary of TLV entries decoded from the system EEPROM.
-
-        Keys are hex type-code strings (e.g. "0x21" for Product Name).
-        Values are their decoded string representations.
+        """Decode and return TLV entries from the system EEPROM.
 
         Returns {} without caching when the daemon file is absent (normal for
         the first few seconds after boot) so the next call retries.  Once a
         valid parse succeeds the result is cached permanently (EEPROM is static).
+
+        Returns:
+            dict: TLV entries keyed by hex type-code string (e.g. "0x21"
+                for Product Name). Values are decoded string representations.
         """
         if self._eeprom_cache is not None:
             return self._eeprom_cache

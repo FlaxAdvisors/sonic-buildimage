@@ -83,8 +83,10 @@ class Sfp(SfpOptoeBase):
     """Platform-specific Sfp class for Accton Wedge 100S-32X (QSFP28 ports)."""
 
     def __init__(self, port):
-        """
-        port -- 0-based port index (0–31).
+        """Initialize SFP instance for a given port.
+
+        Args:
+            port: 0-based port index (0–31).
         """
         SfpOptoeBase.__init__(self)
         self._port = port
@@ -94,12 +96,15 @@ class Sfp(SfpOptoeBase):
     # ------------------------------------------------------------------
 
     def get_eeprom_path(self):
-        """Return the daemon cache path for this port's EEPROM."""
+        """Return the daemon cache path for this port's EEPROM.
+
+        Returns:
+            str: Path to /run/wedge100s/sfp_N_eeprom for this port.
+        """
         return _I2C_EEPROM_CACHE.format(self._port)
 
     def read_eeprom(self, offset, num_bytes):
-        """
-        Return EEPROM bytes from the daemon cache, refreshing DOM on TTL expiry.
+        """Return EEPROM bytes from the daemon cache, refreshing DOM on TTL expiry.
 
         Normal path: reads /run/wedge100s/sfp_N_eeprom written by
         wedge100s-i2c-daemon on insertion.  No I2C transaction unless TTL expires.
@@ -109,8 +114,12 @@ class Sfp(SfpOptoeBase):
         daemon request/response files, merges with the cached upper page, and
         atomically replaces the cache file.
 
-        Returns None if the cache file is absent (port not yet seen by daemon —
-        normal during the first few seconds after pmon start, or port is empty).
+        Args:
+            offset: Byte offset into the 256-byte EEPROM page (0–255).
+            num_bytes: Number of bytes to read.
+
+        Returns:
+            bytearray: Requested EEPROM slice, or None if cache file is absent.
         """
         cache = _I2C_EEPROM_CACHE.format(self._port)
 
@@ -150,7 +159,8 @@ class Sfp(SfpOptoeBase):
     def _hardware_read_lower_page(self):
         """Read lower page (bytes 0-127) from hardware via daemon read request file.
 
-        Returns bytearray(128) on success, None on timeout or error.
+        Returns:
+            bytearray: 128-byte lower page on success, or None on timeout/error.
         """
         req_path  = _READ_REQ.format(self._port)
         resp_path = _READ_RESP.format(self._port)
@@ -193,7 +203,16 @@ class Sfp(SfpOptoeBase):
             return None
 
     def write_eeprom(self, offset, num_bytes, write_buffer):
-        """Write to QSFP EEPROM via daemon request file; wait for ack."""
+        """Write to QSFP EEPROM via daemon request file; wait for ack.
+
+        Args:
+            offset: Byte offset into the EEPROM page (0–255).
+            num_bytes: Number of bytes to write.
+            write_buffer: Buffer containing data to write.
+
+        Returns:
+            bool: True if daemon acknowledged successful write, False otherwise.
+        """
         if num_bytes <= 0 or write_buffer is None:
             return False
         if not (0 <= offset < 256):
@@ -244,15 +263,21 @@ class Sfp(SfpOptoeBase):
     # ------------------------------------------------------------------
 
     def get_name(self):
+        """Return human-readable port name.
+
+        Returns:
+            str: Port name in format 'QSFP28 N' (1-based).
+        """
         return 'QSFP28 {}'.format(self._port + 1)
 
     def get_presence(self):
-        """
-        True when a QSFP28 module is physically inserted in this port.
+        """Check if a QSFP28 module is physically inserted in this port.
 
         Reads /run/wedge100s/sfp_N_present written by wedge100s-i2c-daemon
-        every 3 s.  Returns False if the file is absent (daemon not yet
-        started — normal during the first few seconds after pmon start).
+        every 3 s.
+
+        Returns:
+            bool: True if present, False if absent or daemon not yet started.
         """
         cache_file = _I2C_PRESENT_CACHE.format(self._port)
         try:
@@ -302,22 +327,18 @@ class Sfp(SfpOptoeBase):
         return False
 
     def set_lpmode(self, lpmode):
-        """
-        Request LP_MODE change by writing a request file for the daemon.
-
-        lpmode=True  → write "1" to sfp_N_lpmode_req (assert, force low-power)
-        lpmode=False → write "0" to sfp_N_lpmode_req (deassert, allow high-power)
+        """Request LP_MODE change by writing a request file for the daemon.
 
         The daemon reads and applies the request within one poll cycle (~3 s),
         then deletes the request file and updates the state file.
 
-        Returns True immediately on successful file write (async: hardware state
-        changes after the next daemon tick, ~3 s later).
+        Args:
+            lpmode: True to assert LP_MODE (low-power, TX off),
+                False to deassert (high-power, TX enabled).
 
-        xcvrd contract: on this platform xcvrd calls set_lpmode() but does not
-        re-read LP_MODE state to verify the result; it trusts get_lpmode() on the
-        next poll cycle.  The ~3 s async window is acceptable because the daemon
-        tick interval matches xcvrd's ~3 s poll period.
+        Returns:
+            bool: True on successful file write (async — hardware state
+                changes after the next daemon tick, ~3 s later).
         """
         req_file = _LP_MODE_REQ.format(self._port)
         try:
@@ -333,7 +354,10 @@ class Sfp(SfpOptoeBase):
         Some QSFP28 modules (e.g. Arista QSFP28-SR4-100G) have DIAG_MON_TYPE
         (byte 220) with bit 5 clear, so Sff8636Api.get_temperature_support()
         returns False even though bytes 22-23 contain valid temperature data.
-        Monkey-patch the instance so xcvrd reports temperature for these modules.
+
+        Returns:
+            XcvrApi: The transceiver API instance (with temperature patch if
+                needed), or None if no module is present.
         """
         api = super().get_xcvr_api()
         if api is None:

@@ -124,8 +124,10 @@ class Fan(FanBase):
     """Platform-specific Fan class for Accton Wedge 100S-32X."""
 
     def __init__(self, fan_index):
-        """
-        fan_index -- 1-based fan tray index (1–5), matching ONL fid.
+        """Initialize Fan instance.
+
+        Args:
+            fan_index: 1-based fan tray index (1–5), matching ONL fid.
         """
         FanBase.__init__(self)
         self.index = fan_index   # 1-based, 1–5
@@ -179,11 +181,12 @@ class Fan(FanBase):
         return FanBase.FAN_DIRECTION_INTAKE
 
     def get_speed(self):
-        """
-        Current fan speed as a percentage of MAX_FAN_SPEED (0–100).
+        """Return current fan speed as a percentage of MAX_FAN_SPEED (0–100).
 
         Uses min(front_rpm, rear_rpm) per fani.c policy.
-        Returns 0 when the tray is absent, stalled, or BMC is unreadable.
+
+        Returns:
+            int: Speed percentage (0–100), or 0 if absent/stalled/unreadable.
         """
         rpm = self.get_speed_rpm()
         if not rpm:
@@ -191,12 +194,12 @@ class Fan(FanBase):
         return min((rpm * 100) // _MAX_FAN_SPEED, 100)
 
     def get_speed_rpm(self):
-        """
-        Current fan speed in RPM.
+        """Return current fan speed in RPM.
 
-        Reports min(front_rotor, rear_rotor), matching fani.c which flags
-        a tray as failed when any rotor stalls.  Returns 0 if a rotor has
-        stalled; returns None when the BMC is unreadable.
+        Reports min(front_rotor, rear_rotor), matching fani.c policy.
+
+        Returns:
+            int: RPM value, 0 if stalled, or None if BMC is unreadable.
         """
         front, rear = _cached_rpm_pair(self.index)
         if front is None and rear is None:
@@ -228,13 +231,15 @@ class Fan(FanBase):
         return 20
 
     def set_speed(self, speed):
-        """
-        Set all fan trays to speed % of maximum.
+        """Set all fan trays to speed % of maximum.
 
-        Sends 'set_fan_speed.sh <pct>' to the BMC via TTY.  The script
-        controls the PWM for all 5 trays simultaneously.
+        Sends 'set_fan_speed.sh <pct>' to the BMC via TTY.
 
-        Returns True on success, False on failure.
+        Args:
+            speed: Target speed as percentage of maximum (0–100).
+
+        Returns:
+            bool: True on success, False on failure.
         """
         global _target_speed_pct
         speed = max(0, min(100, int(speed)))

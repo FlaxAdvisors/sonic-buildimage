@@ -1,0 +1,3 @@
+# Wedge 100S-32X udev rules
+# CP2112 USB-HID bridge — tag for wedge100s-i2c-daemon
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea90", MODE="0660", GROUP="root", TAG+="systemd"

@@ -104,7 +104,9 @@ echo "wedge100s postinst: enabled wedge100s-i2c-daemon.service"
 # Keeps BCM56960 LEDUP1 DATA_RAM in sync with STATE_DB oper_status so that
 # port LEDs show blue (down) instead of magenta (always-up) when no link.
 systemctl enable wedge100s-ledup-linkstate.service
-systemctl start  wedge100s-ledup-linkstate.service || true
+# Do not start here — service has After=syncd.service which blocks during
+# first-boot postinst (syncd not yet running).  systemd starts it automatically
+# when multi-user.target is reached later in the boot sequence.
 echo "wedge100s postinst: enabled wedge100s-ledup-linkstate.service"
 
 exit 0

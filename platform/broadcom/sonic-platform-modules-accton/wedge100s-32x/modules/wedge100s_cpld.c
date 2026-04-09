@@ -10,6 +10,10 @@
  *   psu1_pgood    (RO) — 1 = power good            (bit 1 of 0x10, active-high)
  *   psu2_present  (RO) — 1 = present, 0 = absent  (bit 4 of 0x10, active-low)
  *   psu2_pgood    (RO) — 1 = power good            (bit 5 of 0x10, active-high)
+ *   psu1_input_ok (RO) — 1 = input OK, 0 = bad    (bit 2 of 0x10, active-high)
+ *   psu1_alarm    (RO) — 1 = normal, 0 = alarm     (bit 3 of 0x10, active-high)
+ *   psu2_input_ok (RO) — 1 = input OK, 0 = bad    (bit 6 of 0x10, active-high)
+ *   psu2_alarm    (RO) — 1 = normal, 0 = alarm     (bit 7 of 0x10, active-high)
  *   led_sys1      (RW) — SYS LED 1 byte (reg 0x3e): 0=off,1=red,2=green,4=blue,+8=blink
  *   led_sys2      (RW) — SYS LED 2 byte (reg 0x3f): same encoding
  *
@@ -49,6 +53,10 @@
 #define PSU1_PGOOD_BIT     1  /* 1 = power good */
 #define PSU2_PRESENT_BIT   4  /* 0 = present, 1 = absent */
 #define PSU2_PGOOD_BIT     5  /* 1 = power good */
+#define PSU1_INPUT_OK_BIT  2  /* 0 = input bad, 1 = input OK */
+#define PSU1_ALARM_BIT     3  /* 0 = alarm active, 1 = normal */
+#define PSU2_INPUT_OK_BIT  6  /* 0 = input bad, 1 = input OK */
+#define PSU2_ALARM_BIT     7  /* 0 = alarm active, 1 = normal */
 
 #define I2C_RW_RETRY_COUNT    10
 #define I2C_RW_RETRY_INTERVAL 60  /* ms */
@@ -199,6 +207,78 @@ static ssize_t show_psu2_pgood(struct device *dev,
 			 (val >> PSU2_PGOOD_BIT) & 1);
 }
 
+/** @brief Show PSU1 alarm status (1=normal, 0=alarm). Active-high bit 3 of reg 0x10. */
+static ssize_t show_psu1_alarm(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_PSU_STATUS);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 (val >> PSU1_ALARM_BIT) & 1);
+}
+
+/** @brief Show PSU1 input-OK status (1=input OK, 0=bad). Active-high bit 2 of reg 0x10. */
+static ssize_t show_psu1_input_ok(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_PSU_STATUS);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 (val >> PSU1_INPUT_OK_BIT) & 1);
+}
+
+/** @brief Show PSU2 alarm status (1=normal, 0=alarm). Active-high bit 7 of reg 0x10. */
+static ssize_t show_psu2_alarm(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_PSU_STATUS);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 (val >> PSU2_ALARM_BIT) & 1);
+}
+
+/** @brief Show PSU2 input-OK status (1=input OK, 0=bad). Active-high bit 6 of reg 0x10. */
+static ssize_t show_psu2_input_ok(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_PSU_STATUS);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 (val >> PSU2_INPUT_OK_BIT) & 1);
+}
+
 /** @brief Show SYS LED 1 register value (reg 0x3e) as hex. */
 static ssize_t show_led_sys1(struct device *dev,
 			      struct device_attribute *attr, char *buf)
@@ -288,6 +368,10 @@ static DEVICE_ATTR(psu1_present, S_IRUGO, show_psu1_present, NULL);
 static DEVICE_ATTR(psu1_pgood,   S_IRUGO, show_psu1_pgood,   NULL);
 static DEVICE_ATTR(psu2_present, S_IRUGO, show_psu2_present, NULL);
 static DEVICE_ATTR(psu2_pgood,   S_IRUGO, show_psu2_pgood,   NULL);
+static DEVICE_ATTR(psu1_alarm,    S_IRUGO, show_psu1_alarm,    NULL);
+static DEVICE_ATTR(psu1_input_ok, S_IRUGO, show_psu1_input_ok, NULL);
+static DEVICE_ATTR(psu2_alarm,    S_IRUGO, show_psu2_alarm,    NULL);
+static DEVICE_ATTR(psu2_input_ok, S_IRUGO, show_psu2_input_ok, NULL);
 static DEVICE_ATTR(led_sys1, S_IRUGO | S_IWUSR, show_led_sys1, store_led_sys1);
 static DEVICE_ATTR(led_sys2, S_IRUGO | S_IWUSR, show_led_sys2, store_led_sys2);
 
@@ -297,6 +381,10 @@ static struct attribute *wedge100s_cpld_attrs[] = {
 	&dev_attr_psu1_pgood.attr,
 	&dev_attr_psu2_present.attr,
 	&dev_attr_psu2_pgood.attr,
+	&dev_attr_psu1_alarm.attr,
+	&dev_attr_psu1_input_ok.attr,
+	&dev_attr_psu2_alarm.attr,
+	&dev_attr_psu2_input_ok.attr,
 	&dev_attr_led_sys1.attr,
 	&dev_attr_led_sys2.attr,
 	NULL,

@@ -1,0 +1,16 @@
+[Unit]
+Description=Wedge 100S pmon container fixups (wheel, ssh, psud patch)
+After=pmon.service
+Requires=pmon.service
+# Only needed once per boot or deb upgrade — not a long-running daemon.
+# ConditionPathExists ensures we only run when the postinst left us a marker.
+ConditionPathExists=/run/wedge100s/pmon-fixup-needed
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/wedge100s-pmon-fixup
+ExecStartPost=/bin/rm -f /run/wedge100s/pmon-fixup-needed
+
+[Install]
+WantedBy=multi-user.target

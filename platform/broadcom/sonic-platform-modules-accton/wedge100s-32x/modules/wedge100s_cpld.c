@@ -33,10 +33,10 @@
  *   0x0D  Reset reason code (8-bit)
  *   0x0E  Reset source 1 (per-source active bits)
  *   0x0F  Reset source 2 (BMC-initiated active bits)
- *   0x18  COM-e status: D[2:0]=B_COM_TYPE, D[3]=GBE0_LINK1000_N, D[4:7]=SUS states
  *   0x10  PSU presence/status
  *   0x11  Power status 1 (standby power OK)
  *   0x12  Power status 2 (VCORE/VANLOG/V3V3 ready + hot)
+ *   0x18  COM-e status: D[2:0]=B_COM_TYPE, D[3]=GBE0_LINK1000_N, D[4:7]=SUS states
  *   0x3e  SYS LED 1
  *   0x3f  SYS LED 2
  *

@@ -1108,24 +1108,32 @@ static void poll_lpmode_sysfs(void)
  * @brief Mirror read-only wedge100s_cpld sysfs attributes to /run/wedge100s/.
  *
  * Provides a single canonical read path for Python consumers (psu.py,
- * component.py) so they never touch the kernel I2C sysfs tree directly.
+ * component.py, chassis.py) so they never touch the kernel I2C sysfs tree
+ * directly.
  *
- * cpld_version is read once at first tick (static hardware value).
- * PSU state (psu1/psu2 present and pgood) is read on every tick.
+ * Static attrs (cpld_version, board_rev, model_id, come_status) are hardware
+ * constants — read once at first tick and never again.
+ *
+ * Dynamic attrs (PSU state, power rails, ROV, reset reason/sources) are read
+ * on every tick.
  *
  * LED attributes (led_sys1, led_sys2) are NOT mirrored here; they are
  * managed exclusively by apply_led_writes().
  */
 static void poll_cpld(void)
 {
-    /* cpld_version: static hardware info — read once at first tick only. */
-    {
+    /* Static attrs: hardware constants — read once, never again. */
+    static const char *static_attrs[] = {
+        "cpld_version", "board_rev", "model_id", "come_status",
+        NULL
+    };
+    for (int i = 0; static_attrs[i]; i++) {
         char dst[128];
         struct stat st;
-        snprintf(dst, sizeof(dst), RUN_DIR "/cpld_version");
+        snprintf(dst, sizeof(dst), RUN_DIR "/%s", static_attrs[i]);
         if (stat(dst, &st) != 0) {
             char src[128], val[64];
-            snprintf(src, sizeof(src), CPLD_SYSFS "/cpld_version");
+            snprintf(src, sizeof(src), CPLD_SYSFS "/%s", static_attrs[i]);
             FILE *f = fopen(src, "r");
             if (f) {
                 if (fgets(val, (int)sizeof(val), f)) {
@@ -1139,16 +1147,18 @@ static void poll_cpld(void)
         }
     }
 
-    /* PSU state: dynamic — read every tick. */
-    static const char *psu_attrs[] = {
-        "psu1_present", "psu1_pgood",
-        "psu2_present", "psu2_pgood",
+    /* Dynamic attrs: can change at runtime — read every tick. */
+    static const char *dynamic_attrs[] = {
+        "psu1_present", "psu1_pgood", "psu1_alarm", "psu1_input_ok",
+        "psu2_present", "psu2_pgood", "psu2_alarm", "psu2_input_ok",
+        "pwr_stby_ok",  "pwr_status2", "rov_status",
+        "reset_reason", "reset_source1", "reset_source2",
         NULL
     };
-    for (int i = 0; psu_attrs[i]; i++) {
+    for (int i = 0; dynamic_attrs[i]; i++) {
         char src[128], dst[128], val[64];
-        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", psu_attrs[i]);
-        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", psu_attrs[i]);
+        snprintf(src, sizeof(src), CPLD_SYSFS "/%s", dynamic_attrs[i]);
+        snprintf(dst, sizeof(dst), RUN_DIR   "/%s", dynamic_attrs[i]);
         FILE *f = fopen(src, "r");
         if (!f) continue;
         if (fgets(val, (int)sizeof(val), f)) {

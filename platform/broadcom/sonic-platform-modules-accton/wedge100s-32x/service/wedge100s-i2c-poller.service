@@ -1,0 +1,9 @@
+[Unit]
+Description=Wedge100S QSFP I2C polling (invoked by wedge100s-i2c-poller.timer)
+Documentation=file:///usr/bin/wedge100s-i2c-daemon.c
+After=wedge100s-platform-init.service
+Requires=wedge100s-platform-init.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wedge100s-i2c-daemon poll-presence

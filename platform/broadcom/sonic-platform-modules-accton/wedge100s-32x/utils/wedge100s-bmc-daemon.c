@@ -212,11 +212,19 @@ static int bmc_read_int(const char *bmc_cmd, int base, int *result)
 
 /* ── bmc_read_pmbus_string ──────────────────────────────────────────────── */
 /**
- * @brief Read a PMBus block-read register via i2ctransfer and decode as ASCII.
+ * @brief Read a PMBus block-read register via i2cdump and decode as ASCII.
  *
- * Runs `i2ctransfer -y <bus> w1@<addr> <reg> r33@<addr>` on the BMC via SSH.
- * The first returned byte is the PMBus block length; the following bytes are
- * ASCII characters.  Trailing spaces and NUL bytes are trimmed.
+ * Runs `i2cdump -f -y <bus> <addr> s <reg>` on the BMC via SSH.  The BMC's
+ * OpenBMC image ships i2cget/i2cset/i2cdump/i2cdetect but NOT i2ctransfer,
+ * so we use `i2cdump` in SMBus block-read mode ('s' + start register).
+ *
+ * Output format (two lines):
+ *   "     0  1  2  3 ...  f    0123456789abcdef"   (header — skipped)
+ *   "00: 53 50 41 46 43 ...    SPAFCBK-14G"        (hex bytes + ASCII)
+ *
+ * We parse the ASCII portion after the four-space separator because the hex
+ * bytes are the raw block payload (PMBus block-length byte is consumed by
+ * the SMBus layer, not returned by i2cdump).
  *
  * @param bus     BMC I2C bus number.
  * @param addr    PMBus device address (e.g. 0x59).
@@ -232,17 +240,21 @@ static int bmc_read_pmbus_string(int bus, int addr, int reg,
     char shell_cmd[512];
     char line[512];
     FILE *fp;
-    unsigned int bytes[33];
-    int nbytes, blklen, i, end;
+    char *ascii;
+    int end;
 
     snprintf(bmc_cmd, sizeof(bmc_cmd),
-             "i2ctransfer -f -y %d w1@0x%02x 0x%02x r33@0x%02x",
-             bus, addr, reg, addr);
+             "i2cdump -f -y %d 0x%02x s 0x%02x",
+             bus, addr, reg);
     build_ssh_cmd(shell_cmd, sizeof(shell_cmd), bmc_cmd, " 2>/dev/null");
 
     fp = popen(shell_cmd, "r");
     if (!fp) return -1;
 
+    /* Skip the header line ("     0  1  2 ...") */
+    if (!fgets(line, sizeof(line), fp)) { pclose(fp); return -1; }
+
+    /* Read the data line ("00: 53 50 41 ...    SPAFCBK-14G") */
     line[0] = '\0';
     fgets(line, sizeof(line), fp);
     pclose(fp);
@@ -250,32 +262,18 @@ static int bmc_read_pmbus_string(int bus, int addr, int reg,
     line[strcspn(line, "\r\n")] = '\0';
     if (!line[0]) return -1;
 
-    /* Parse space-separated hex bytes: "0x0e 0x44 0x50 ..." */
-    nbytes = 0;
-    {
-        char *p = line;
-        char *endp;
-        while (nbytes < 33 && *p) {
-            while (*p == ' ') p++;
-            if (!*p) break;
-            unsigned long v = strtoul(p, &endp, 16);
-            if (endp == p) break;
-            bytes[nbytes++] = (unsigned int)(v & 0xFF);
-            p = endp;
-        }
-    }
-    if (nbytes < 2) return -1;   /* need at least length byte + 1 char */
+    /* Find the ASCII column: four spaces separate hex dump from ASCII */
+    ascii = strstr(line, "    ");
+    if (!ascii) return -1;
+    while (*ascii == ' ') ascii++;
+    if (!*ascii) return -1;
 
-    blklen = (int)bytes[0];
-    if (blklen <= 0 || blklen > nbytes - 1) blklen = nbytes - 1;
-    if ((size_t)blklen >= outsz) blklen = (int)(outsz - 1);
-
-    for (i = 0; i < blklen; i++)
-        out[i] = (char)bytes[i + 1];
-    out[blklen] = '\0';
+    /* Copy to output, respecting buffer size */
+    strncpy(out, ascii, outsz - 1);
+    out[outsz - 1] = '\0';
 
     /* Trim trailing spaces and NULs */
-    end = blklen - 1;
+    end = (int)strlen(out) - 1;
     while (end >= 0 && (out[end] == ' ' || out[end] == '\0'))
         end--;
     out[end + 1] = '\0';

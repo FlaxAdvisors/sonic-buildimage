@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
 From: wedge100s-port <wedge100s@local>
 Date: 2026-03-28
-Subject: [PATCH] fix: sfpshow SFF-8636/QSFP28 PM fallback and threshold dict crash
+Subject: [PATCH] fix: sfpshow SFF-8636/QSFP28 PM fallback and threshold dict
+ crash
 
 Two fixes in sfpshow's show_pm_info():
 
@@ -18,12 +19,16 @@ Two fixes in sfpshow's show_pm_info():
    and ZR ports are unaffected (the existing tabulate path still runs).
 
    Also adds SFF8636_PM_HEADER constant for the fallback table header.
+
+Updates test expectations in sfp_test.py to match new SFF-8636 fallback
+output for non-CMIS ports (Ethernet0 mock data is QSFP28 with DOM sensor).
 ---
- scripts/sfpshow | 26 ++++++++++++++++++++++++--
- 1 file changed, 24 insertions(+), 2 deletions(-)
+ scripts/sfpshow   | 25 ++++++++++++++++++++++--
+ tests/sfp_test.py | 30 +++++++++++++++++++++++++---
+ 2 files changed, 50 insertions(+), 5 deletions(-)
 
 diff --git a/scripts/sfpshow b/scripts/sfpshow
-index 05754e44..4d35efd0 100755
+index 05754e44..1846dc71 100755
 --- a/scripts/sfpshow
 +++ b/scripts/sfpshow
 @@ -253,6 +253,8 @@ ZR_PM_INFO_MAP = {
@@ -35,7 +40,7 @@ index 05754e44..4d35efd0 100755
  QSFP_STATUS_NOT_APPLICABLE_STR = 'Transceiver status info not applicable'
 
  def display_invalid_intf_eeprom(intf_name):
-@@ -609,10 +611,9 @@ class SFPShow(object):
+@@ -609,7 +611,7 @@ class SFPShow(object):
          sfp_pm_dict = state_db.get_all(
              self.db.STATE_DB, 'TRANSCEIVER_PM|{}'.format(first_subport))
          sfp_threshold_dict = state_db.get_all(
@@ -43,11 +48,8 @@ index 05754e44..4d35efd0 100755
 +            state_db.STATE_DB, 'TRANSCEIVER_DOM_THRESHOLD|{}'.format(first_subport)) or {}
          # Convert VDM THRESHOLD fields to legacy DOM THRESHOLD fields
          self.convert_vdm_fields_to_legacy_fields(state_db, first_subport, sfp_threshold_dict, CCMIS_VDM_THRESHOLD_TO_LEGACY_DOM_THRESHOLD_MAP, 'THRESHOLD')
--        table = []
-         indent_num = 4
-         indent = ' ' * indent_num
-         if sfp_pm_dict:
-@@ -650,7 +651,26 @@ class SFPShow(object):
+         table = []
+@@ -650,7 +652,26 @@ class SFPShow(object):
                                 ZR_PM_HEADER, disable_numparse=True).replace('\n', '\n' + indent)
              output += '\n'
          else:
@@ -75,3 +77,58 @@ index 05754e44..4d35efd0 100755
          return output
 
      def is_valid_physical_port(self, port_name):
+diff --git a/tests/sfp_test.py b/tests/sfp_test.py
+index e4441c8d..718979b3 100644
+--- a/tests/sfp_test.py
++++ b/tests/sfp_test.py
+@@ -880,7 +880,15 @@ Ethernet64  Present
+ """
+
+ test_qsfp_dd_pm_all_output = """\
+-Ethernet0: Transceiver performance monitoring not applicable
++Ethernet0:
++    Lane    Rx Power (dBm)    Tx Bias (mA)    Tx Power (dBm)
++    ------  ----------------  --------------  ----------------
++    1       0.3802            6.7500          N/A
++    2       -0.4871           6.7500          N/A
++    3       -0.0860           6.7500          N/A
++    4       0.3830            6.7500          N/A
++    Temperature: 30.9258 C
++    Voltage: 3.2824 Volts
+
+ Ethernet4: Transceiver performance monitoring not applicable
+
+@@ -1163,7 +1171,15 @@ Ethernet200  Not present
+         runner = CliRunner()
+         result = runner.invoke(show.cli.commands["interfaces"].commands["transceiver"].commands["pm"], ['Ethernet0', '-n', 'asic0'])
+         result_lines = result.output.strip('\n')
+-        expected = "Ethernet0: Transceiver performance monitoring not applicable"
++        expected = ("Ethernet0: \n"
++                    "    Lane    Rx Power (dBm)    Tx Bias (mA)    Tx Power (dBm)\n"
++                    "    ------  ----------------  --------------  ----------------\n"
++                    "    1       0.3802            6.7500          N/A\n"
++                    "    2       -0.4871           6.7500          N/A\n"
++                    "    3       -0.0860           6.7500          N/A\n"
++                    "    4       0.3830            6.7500          N/A\n"
++                    "    Temperature: 30.9258 C\n"
++                    "    Voltage: 3.2824 Volts")
+         assert result_lines == expected
+
+     def test_qsfp_dd_pm_without_ns(self):
+@@ -1171,7 +1187,15 @@ Ethernet200  Not present
+         result = runner.invoke(
+                 show.cli.commands["interfaces"].commands["transceiver"].commands["pm"], ['Ethernet0'])
+         result_lines = result.output.strip('\n')
+-        expected = "Ethernet0: Transceiver performance monitoring not applicable"
++        expected = ("Ethernet0: \n"
++                    "    Lane    Rx Power (dBm)    Tx Bias (mA)    Tx Power (dBm)\n"
++                    "    ------  ----------------  --------------  ----------------\n"
++                    "    1       0.3802            6.7500          N/A\n"
++                    "    2       -0.4871           6.7500          N/A\n"
++                    "    3       -0.0860           6.7500          N/A\n"
++                    "    4       0.3830            6.7500          N/A\n"
++                    "    Temperature: 30.9258 C\n"
++                    "    Voltage: 3.2824 Volts")
+         assert result_lines == expected
+
+     @patch.object(show_module.interfaces.click.Choice, 'convert', MagicMock(return_value='asic0'))

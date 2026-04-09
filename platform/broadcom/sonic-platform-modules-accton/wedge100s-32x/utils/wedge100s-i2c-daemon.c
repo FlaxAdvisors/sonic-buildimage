@@ -1,6 +1,6 @@
 /**
  * @file wedge100s-i2c-daemon.c
- * @brief Event-driven QSFP presence and EEPROM cache daemon for Wedge 100S-32X.
+ * @brief Event-driven QSFP presence, RXLOSS, and EEPROM cache daemon for Wedge 100S-32X.
  *
  * Usage: wedge100s-i2c-daemon poll-presence
  *
@@ -94,6 +94,10 @@ static const int PCA9535_ADDR[2] = { 0x22, 0x23 };
 
 /* PCA9535 mux channels (mux 0x74: ch2 → bus 36, ch3 → bus 37) */
 static const int PCA9535_MUX_CHAN[2] = { 2, 3 };
+
+/* PCA9535 RXLOSS chips (mux 0x74 ch4/ch5) */
+static const int RXLOSS_PCA9535_ADDR[2] = { 0x24, 0x25 };
+static const int RXLOSS_PCA9535_CHAN[2] = { 4,    5    };
 
 /* PCA9535 LP_MODE chips (mux 0x74 ch0/ch1) */
 static const int LP_PCA9535_ADDR[2] = { 0x20, 0x21 };
@@ -1434,6 +1438,59 @@ static void poll_presence_hidraw(void)
     }
 }
 
+/* ── poll_rxloss — hidraw path (Phase 2 only) ─────────────────────────── */
+
+/**
+ * @brief Poll QSFP RXLOSS signals from PCA9535 at 0x24/0x25 via hidraw.
+ *
+ * Reads PCA9535 INPUT registers on PCA9548 0x74 channels 4/5 to determine
+ * per-port receive-loss-of-signal status.  Writes "0" (OK) or "1" (loss
+ * detected) to /run/wedge100s/sfp_N_rxlos for each of the 32 ports.
+ *
+ * RXLOSS is active-low on the PCA9535: bit=0 means loss detected.
+ * The same XOR-1 interleave used for presence applies here.
+ */
+static void poll_rxloss_hidraw(void)
+{
+    int curr_rxlos[NUM_PORTS] = {0};
+
+    /* Read PCA9535 RXLOSS (mux 0x74 ch4 and ch5) */
+    for (int g = 0; g < 2; g++) {
+        if (mux_select(0x74, RXLOSS_PCA9535_CHAN[g]) < 0) {
+            fprintf(stderr,
+                    "wedge100s-i2c-daemon: RXLOSS PCA9535[%d] mux select failed\n",
+                    g);
+            continue;
+        }
+        for (int r = 0; r < 2; r++) {
+            uint8_t reg_byte = (uint8_t)r;
+            uint8_t val = 0;
+            int ret = cp2112_write_read((uint8_t)RXLOSS_PCA9535_ADDR[g],
+                                        &reg_byte, 1, &val, 1);
+            if (ret < 0) {
+                fprintf(stderr,
+                        "wedge100s-i2c-daemon: RXLOSS PCA9535[%d] reg %d read failed\n",
+                        g, r);
+                continue;
+            }
+            for (int bit = 0; bit < 8; bit++) {
+                int line = r * 8 + bit;
+                int p    = g * 16 + (line ^ 1);  /* XOR-1 interleave (ONL sfpi.c) */
+                curr_rxlos[p] = !((val >> bit) & 1);  /* active-low: 0=loss */
+            }
+        }
+        mux_deselect(0x74);
+    }
+
+    /* Write per-port rxlos files */
+    for (int port = 0; port < NUM_PORTS; port++) {
+        char rxlos_path[64];
+        snprintf(rxlos_path, sizeof(rxlos_path),
+                 RUN_DIR "/sfp_%d_rxlos", port);
+        write_str_file(rxlos_path, curr_rxlos[port] ? "1" : "0");
+    }
+}
+
 /* ── poll_presence — sysfs/i2c-dev path (Phase 1 fallback) ─────────────── */
 
 /**
@@ -1742,6 +1799,7 @@ int main(void)
             /* hidraw poll functions (order matters — see comment in spec) */
             poll_syseeprom_hidraw();
             poll_presence_hidraw();
+            poll_rxloss_hidraw();
             poll_lpmode_hidraw();
             poll_write_requests_hidraw();
             poll_read_requests_hidraw();

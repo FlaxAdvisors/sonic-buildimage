@@ -99,6 +99,19 @@ class Chassis(ChassisBase):
         0x0c: 'blue_blink',
     }
 
+    def initialize_system_led(self):
+        """Initialize the system status LED to its default state.
+
+        Called by SONiC system-health on startup.
+
+        Returns:
+            bool: Always True; LED defaults are set by the CPLD on power-on.
+        """
+        return True
+
+    # Upstream SONiC typo compatibility — remove when sonic-utilities is fixed
+    initizalize_system_led = initialize_system_led
+
     def set_status_led(self, color):
         """Set the system status LED color via the daemon run-file.
 

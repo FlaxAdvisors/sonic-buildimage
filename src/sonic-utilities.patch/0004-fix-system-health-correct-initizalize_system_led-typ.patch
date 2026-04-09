@@ -1,0 +1,40 @@
+From 577d196fac06f53c34fa851ccf1eda7d860ec1b2 Mon Sep 17 00:00:00 2001
+From: db-at-work <22159364+db-at-work@users.noreply.github.com>
+Date: Thu, 9 Apr 2026 15:41:39 -0700
+Subject: [PATCH] fix(system-health): correct initizalize_system_led typo to
+ initialize_system_led
+
+---
+ show/system_health.py       | 2 +-
+ tests/system_health_test.py | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/show/system_health.py b/show/system_health.py
+index 0a8e1934..dcf4d30e 100644
+--- a/show/system_health.py
++++ b/show/system_health.py
+@@ -37,7 +37,7 @@ def get_system_health_status():
+ 
+     chassis = Chassis()
+     stat = manager.check(chassis)
+-    chassis.initizalize_system_led()
++    chassis.initialize_system_led()
+ 
+     return manager, chassis, stat
+ 
+diff --git a/tests/system_health_test.py b/tests/system_health_test.py
+index ca0a294f..a76f30a7 100644
+--- a/tests/system_health_test.py
++++ b/tests/system_health_test.py
+@@ -50,7 +50,7 @@ class MockerManager(object):
+ class MockerChassis(object):
+     counter = 0
+ 
+-    def initizalize_system_led(self):
++    def initialize_system_led(self):
+         return
+ 
+     def get_status_led(self):
+-- 
+2.25.1
+

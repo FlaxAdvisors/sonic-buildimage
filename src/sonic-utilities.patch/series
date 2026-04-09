@@ -1,3 +1,4 @@
 0001-fix-sfpshow-sff8636-pm-fallback-and-threshold-dict.patch
 0002-fix-generate-completions-fallback-template-for-import-failures.patch
 0003-fix-sonic-package-manager-defer-Docker-init-in-migra.patch
+0004-fix-system-health-correct-initizalize_system_led-typ.patch

@@ -48,6 +48,503 @@ EOF
 systemctl daemon-reload
 echo "wedge100s postinst: installed pmon.service drop-in $DROPIN_FILE"
 
+
+# D3: enable BMC sensor persistent daemon.
+# Replaced timer+oneshot with timerfd-driven persistent process.
+mkdir -p /run/wedge100s
+systemctl enable wedge100s-bmc-daemon.service
+systemctl start  wedge100s-bmc-daemon.service || true
+
+# D2: enable QSFP I2C persistent daemon.
+# Replaced timer+oneshot with timerfd+inotify driven persistent process.
+systemctl enable wedge100s-i2c-daemon.service
+systemctl start  wedge100s-i2c-daemon.service || true
+
+# Install port_breakout_config_db.json to /etc/sonic/ if not already present.
+# The DPB CLI reads this file from /etc/sonic/ to get default config for new
+# sub-ports created during breakout; it does NOT fall back to the hwsku dir.
+# The /etc/sonic/ overlay is persistent across reboots but not across full
+# image reinstalls, so we install it here on every .deb upgrade.
+HWSKU_DIR="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/Accton-WEDGE100S-32X"
+BREAKOUT_CFG="$HWSKU_DIR/port_breakout_config_db.json"
+if [ -f "$BREAKOUT_CFG" ]; then
+    cp "$BREAKOUT_CFG" /etc/sonic/port_breakout_config_db.json
+    echo "wedge100s postinst: installed port_breakout_config_db.json to /etc/sonic/"
+fi
+
+# Seed BREAKOUT_CFG in CONFIG_DB from hwsku.json default_brkout_mode values.
+# config-setup does not pass -H to sonic-cfggen, so on a fresh install the
+# BREAKOUT_CFG table is never populated; without it `config interface breakout`
+# returns "Entry not found" and DPB refuses to operate.
+# Only runs when the table is entirely absent — existing breakout config is preserved.
+if redis-cli -n 4 ping >/dev/null 2>&1; then
+    BRKOUT_COUNT=$(redis-cli -n 4 keys 'BREAKOUT_CFG*' 2>/dev/null | wc -l)
+    if [ "$BRKOUT_COUNT" -eq 0 ]; then
+        sonic-cfggen -H -k Accton-WEDGE100S-32X --print-data 2>/dev/null \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({'BREAKOUT_CFG': d.get('BREAKOUT_CFG', {})}))" \
+            | sonic-cfggen -j /dev/stdin --write-to-db 2>/dev/null \
+            && echo "wedge100s postinst: seeded BREAKOUT_CFG (32 entries) from hwsku.json defaults" \
+            || echo "wedge100s postinst: WARNING: BREAKOUT_CFG seed failed" >&2
+    else
+        echo "wedge100s postinst: BREAKOUT_CFG already populated ($BRKOUT_COUNT entries) — skip seed"
+    fi
+fi
+
+# Bring usb0 up immediately (CDC-ECM link to BMC).
+# systemd-networkd is masked on SONiC; the interface is kept up across reboots
+# by _configure_usb0() in wedge100s-platform-init.service.
+# IPv6 link-local (fe80::ff:fe00:1%usb0) auto-configures from the fixed BMC MAC.
+ip link set usb0 up 2>/dev/null || true
+echo "wedge100s postinst: usb0 UP (CDC-ECM; IPv6 link-local fe80::ff:fe00:1%usb0)"
+
+# Provision the platform SSH key to the BMC (one-time bootstrap via TTY).
+# Generates /etc/sonic/wedge100s-bmc-key (ed25519) if absent, then pushes
+# the public key to the BMC via /dev/ttyACM0 and persists it to
+# /mnt/data/etc/authorized_keys for BMC reboot survival.
+# /etc/sonic/ is already mounted ro inside pmon, so the key is accessible
+# to bmc.py running inside the pmon container without any extra mount.
+# Subsequent postinst runs re-provision idempotently (grep -qxF guards against
+# duplicate entries in authorized_keys).
+# After this block, all runtime BMC communication uses SSH — no TTY fallback.
+if [ -c /dev/ttyACM0 ]; then
+    python3 - <<'PYEOF' || true
+import sys
+# Prefer the installed wheel path; fall back to any dist-packages
+for p in ['/usr/local/lib/python3.13/dist-packages',
+          '/usr/local/lib/python3.11/dist-packages']:
+    import os; sys.path.insert(0, p) if os.path.isdir(p) else None
+try:
+    from sonic_platform import bmc
+    ok = bmc.provision_ssh_key()
+    if ok:
+        print("wedge100s postinst: BMC SSH key provisioned to fe80::ff:fe00:1%usb0")
+    else:
+        print("wedge100s postinst: WARNING: BMC SSH key provisioning failed (TTY unavailable?)",
+              file=sys.stderr)
+except Exception as e:
+    print("wedge100s postinst: WARNING: BMC SSH key provisioning exception: " + str(e),
+          file=sys.stderr)
+PYEOF
+else
+    echo "wedge100s postinst: WARNING: /dev/ttyACM0 absent — BMC SSH key not provisioned"
+fi
+
+# Patch pmon.sh to pass ttyACM0 (BMC USB-CDC serial) into the pmon container.
+#
+# Context: pmon.sh is generated at build time from docker_image_ctl.j2.
+# The get_pmon_device_mounts() function already handles i2c-N buses via regex,
+# so /dev/i2c-1..41 (CP2112 mux tree) are passed through automatically.
+# However ttyACM[0-9]* is NOT in that regex; without it the BMC is unreachable
+# inside the container, causing a 140-second timeout per thermal/fan poll cycle.
+#
+# The patch inserts a conditional --device line immediately after the
+# $(get_pmon_device_mounts) call so it is idempotent and safe across upgrades.
+# The container must be recreated (not just restarted) to pick up the new flags;
+# on a fresh .bin install a reboot suffices (pmon is created on first boot).
+PMON_SH="/usr/bin/pmon.sh"
+if [ -f "$PMON_SH" ] && ! grep -q "ttyACM" "$PMON_SH"; then
+    python3 - <<'PYEOF'
+import sys
+
+PMON_SH = "/usr/bin/pmon.sh"
+NEEDLE   = "$(get_pmon_device_mounts) \\"
+INSERT   = '    $(for d in /dev/ttyACM*; do [ -c "$d" ] && echo "--device=$d:$d"; done) \\'
+
+with open(PMON_SH) as fh:
+    text = fh.read()
+
+if NEEDLE not in text:
+    print("wedge100s postinst: WARNING: '$(get_pmon_device_mounts)' not found in "
+          + PMON_SH + " — ttyACM patch skipped", file=sys.stderr)
+    sys.exit(0)
+
+text = text.replace(NEEDLE, NEEDLE + "\n" + INSERT, 1)
+
+with open(PMON_SH, "w") as fh:
+    fh.write(text)
+
+print("wedge100s postinst: patched " + PMON_SH + " — ttyACM* passthrough added")
+PYEOF
+fi
+
+# Patch pmon.sh to bind-mount /run/wedge100s (BMC daemon output) read-only
+# into the pmon container.  Required for Phase R29 (Python reads daemon files
+# instead of issuing TTY commands).  Pre-applying in R28 is harmless: the
+# volume is mounted but unused until R29 replaces the bmc.py calls.
+#
+# Insertion point: after the ttyACM --device line (if present) or after
+# $(get_pmon_device_mounts); idempotent — skipped if already patched.
+PMON_SH="/usr/bin/pmon.sh"
+if [ -f "$PMON_SH" ] && ! grep -q "run/wedge100s" "$PMON_SH"; then
+    python3 - <<'PYEOF'
+import sys
+
+PMON_SH = "/usr/bin/pmon.sh"
+# Preferred insertion: after the ttyACM --device line we added earlier
+NEEDLE_TTYACM = 'for d in /dev/ttyACM*'
+# Fallback: after get_pmon_device_mounts
+NEEDLE_MOUNTS = "$(get_pmon_device_mounts) \\"
+INSERT = '    $([ -d /run/wedge100s ] && echo "--volume /run/wedge100s:/run/wedge100s:ro") \\'
+
+with open(PMON_SH) as fh:
+    lines = fh.readlines()
+
+new_lines = []
+inserted = False
+for line in lines:
+    new_lines.append(line)
+    if not inserted and NEEDLE_TTYACM in line:
+        new_lines.append(INSERT + '\n')
+        inserted = True
+
+if not inserted:
+    # ttyACM line not present; fall back to get_pmon_device_mounts
+    text = ''.join(new_lines)
+    if NEEDLE_MOUNTS in text:
+        text = text.replace(NEEDLE_MOUNTS, NEEDLE_MOUNTS + "\n" + INSERT, 1)
+        new_lines = [text]
+        inserted = True
+
+if not inserted:
+    print("wedge100s postinst: WARNING: no insertion point for /run/wedge100s in "
+          + PMON_SH + " — volume patch skipped", file=sys.stderr)
+    sys.exit(0)
+
+with open(PMON_SH, "w") as fh:
+    fh.write(''.join(new_lines))
+
+print("wedge100s postinst: patched " + PMON_SH + " — /run/wedge100s volume added")
+PYEOF
+fi
+
+# Convert Click 7.x bash completion files to Click 8.x format.
+#
+# SONiC ships completion files generated with Click 7.x (_CMD_COMPLETE=complete).
+# Click 8.x changed the runtime completion env var to _CMD_COMPLETE=bash_complete
+# and changed the response format to "type<TAB>value" lines.  Click 7 files are
+# syntactically valid bash (no login errors) but tab-completion returns nothing
+# because Click 8.x ignores the old env var.
+#
+# We convert via pure text transformation — no need to run the CLI, so there is
+# no dependency on the SONiC database being up at postinst time.
+#
+# "|| true" prevents set -e from aborting the rest of postinst if this block
+# fails (e.g. import error or permission problem on an unusual image).
+python3 - <<'PYEOF' || true
+import os, re, sys
+
+COMPLETION_DIR = "/etc/bash_completion.d"
+
+# Click 8 bash_source completion template.
+# Uses bash_complete (runtime) env var and handles typed "plain/dir/file" responses.
+CLICK8_TMPL = """\
+_{func}() {{
+    local IFS=$'\\n'
+    local response
+    response=$(env COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD=$COMP_CWORD \\
+               {envvar}=bash_complete {cmd} 2>/dev/null)
+    for completion in $response; do
+        IFS=',' read type value <<< "$completion"
+        if [[ $type == 'plain' ]]; then
+            COMPREPLY+=($value)
+        elif [[ $type == 'dir' ]]; then
+            COMPREPLY=(); compopt -o dirnames
+        elif [[ $type == 'file' ]]; then
+            COMPREPLY=(); compopt -o default
+        fi
+    done
+    return 0
+}}
+complete -o nosort -F _{func} {cmd}
+"""
+
+for fname in sorted(os.listdir(COMPLETION_DIR)):
+    fpath = os.path.join(COMPLETION_DIR, fname)
+    if not os.path.isfile(fpath):
+        continue
+    try:
+        text = open(fpath).read()
+    except OSError:
+        continue
+    # Detect Click 7: function body calls _CMD_COMPLETE=complete
+    if '_COMPLETE=complete' not in text:
+        continue
+    # Extract command name from: complete [-o ...] -F _foo_completion cmdname
+    # Allow leading whitespace (some files indent the complete call inside a setup fn).
+    # Strip trailing semicolons that some generators append.
+    m = re.search(r'^[ \t]*complete[ \t]+.*[ \t]+(\S+)[ \t]*$', text, re.MULTILINE)
+    if not m:
+        continue
+    cmd = m.group(1).rstrip(';')
+    # Build env var: cmd → upper, hyphens → underscores, prefix/suffix _COMPLETE
+    envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
+    # Build function name: cmd → lower, hyphens → underscores
+    func = cmd.lower().replace('-', '_') + '_completion'
+    new_text = CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd)
+    open(fpath, 'w').write(new_text)
+    print("wedge100s postinst: converted Click 7→8 completion for " + fname)
+
+# Second pass: fix any completion file that fails bash -n syntax check.
+# This catches files previously broken by a failed bash_source regeneration
+# attempt (e.g. Python import error prepended to otherwise valid completion).
+# Third pass: fix any file whose complete line has a semicolon in the command name.
+# bash -n passes these (semicolon is valid syntax) but at runtime bash executes
+# the part before ';' as a command, causing login errors.
+import subprocess
+for fname in sorted(os.listdir(COMPLETION_DIR)):
+    fpath = os.path.join(COMPLETION_DIR, fname)
+    if not os.path.isfile(fpath):
+        continue
+    try:
+        text = open(fpath).read()
+    except OSError:
+        continue
+    syntax_ok = subprocess.run(['bash', '-n', fpath], capture_output=True).returncode == 0
+    m = re.search(r'^[ \t]*complete[ \t]+.*[ \t]+(\S+)[ \t]*$', text, re.MULTILINE)
+    raw_cmd = m.group(1) if m else ''
+    cmd = raw_cmd.rstrip(';')
+    needs_fix = not syntax_ok or (cmd != raw_cmd)
+    if not needs_fix:
+        continue
+    if not cmd or not m:
+        print('wedge100s postinst: WARNING: cannot fix broken completion ' + fname)
+        continue
+    envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
+    func = cmd.lower().replace('-', '_') + '_completion'
+    open(fpath, 'w').write(CLICK8_TMPL.format(func=func, envvar=envvar, cmd=cmd))
+    print('wedge100s postinst: repaired completion for ' + fname + ' (cmd=' + cmd + ')')
+PYEOF
+
+# Generate Click 8 bash completion for standard SONiC Click CLIs that have no
+# completion file in /etc/bash_completion.d/.  Uses _CMD_COMPLETE=bash_source,
+# which outputs the shell function without requiring the database to be up —
+# safe to run at postinst time.  Idempotent: skipped when the file exists.
+#
+# Background: SONiC image builders generate completion files for most Click CLIs
+# but historically omit 'show'.  On images that already shipped Click 8 the
+# conversion pass above finds nothing to convert, leaving 'show <TAB>' broken.
+python3 - <<'PYEOF' || true
+import os, subprocess, sys
+
+COMPLETION_DIR = "/etc/bash_completion.d"
+
+# Standard SONiC Click CLIs that must have a completion file.
+# Extend this list if other commands are found missing on new image builds.
+SONIC_CLICK_CMDS = ['show']
+
+for cmd in SONIC_CLICK_CMDS:
+    fpath = os.path.join(COMPLETION_DIR, cmd)
+    if os.path.exists(fpath):
+        continue  # already present — skip
+    envvar = '_' + cmd.upper().replace('-', '_') + '_COMPLETE'
+    try:
+        result = subprocess.run(
+            [cmd],
+            env={**os.environ, envvar: 'bash_source'},
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print('wedge100s postinst: WARNING: cannot generate completion for '
+              + cmd + ': ' + str(e), file=sys.stderr)
+        continue
+    if result.returncode != 0 or '_completion' not in result.stdout:
+        print('wedge100s postinst: WARNING: bash_source output for ' + cmd
+              + ' was empty or unexpected — skipped', file=sys.stderr)
+        continue
+    with open(fpath, 'w') as f:
+        f.write(result.stdout)
+    print('wedge100s postinst: generated Click 8 completion for ' + cmd)
+PYEOF
+
+# Silence memory_checker's routine syslog output during normal (within-threshold) checks.
+#
+# memory_checker fires every 60 s per monitored container and logs 4 INFO lines
+# ("Container ID / memory / cache / total") unconditionally, even when everything
+# is fine.  On threshold breach it exits with code 3 and prints to stdout (which
+# monit captures); on errors it logs LOG_ERR.  The routine INFO lines have no
+# operational value and generate ~6,000 journal lines/day.
+#
+# Fix 1: Remove the bmp and otel monit checks — those containers are not deployed
+#         on this platform; the "not running" message fires every 60 s for nothing.
+# Fix 2: Strip the four routine syslog.LOG_INFO calls from check_memory_usage()
+#         so the script is silent on success and noisy only on error/threshold.
+#
+# Note: an earlier postinst version demoted these to LOG_DEBUG; if that marker is
+# present the patch below re-targets LOG_DEBUG instead of LOG_INFO.
+
+for f in /etc/monit/conf.d/monit_bmp /etc/monit/conf.d/monit_otel; do
+    if [ -f "$f" ]; then
+        rm -f "$f"
+        echo "wedge100s postinst: removed unused monit check $f"
+    fi
+done
+
+MEMORY_CHECKER="/usr/bin/memory_checker"
+if [ -f "$MEMORY_CHECKER" ] && ! grep -q "wedge100s: routine-checks-silenced" "$MEMORY_CHECKER"; then
+    python3 - <<'PYEOF'
+import re, sys
+
+MEM_CHECKER = "/usr/bin/memory_checker"
+
+try:
+    text = open(MEM_CHECKER).read()
+except OSError as e:
+    print("wedge100s postinst: WARNING: cannot read {}: {}".format(MEM_CHECKER, e), file=sys.stderr)
+    sys.exit(0)
+
+# Accept either LOG_INFO (fresh install) or LOG_DEBUG (old postinst patched file).
+LVL = r'LOG_(?:INFO|DEBUG)'
+
+# Remove the four syslog calls that fire on every successful check.
+# Each is a two-line statement: syslog.syslog(..., "msg"\n    .format(...))
+patterns = [
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] Container ID of[^\n]*\n[^\n]*\)',
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] The memory usage of container[^\n]*\n[^\n]*\)',
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] The cache usage of container[^\n]*\n[^\n]*\)',
+    r'\s*syslog\.syslog\(syslog\.' + LVL + r', "\[memory_checker\] Total memory usage of container[^\n]*\n[^\n]*\)',
+]
+
+new_text = text
+for pat in patterns:
+    new_text = re.sub(pat, '', new_text)
+
+if new_text == text:
+    print("wedge100s postinst: WARNING: memory_checker patch matched nothing — skipped", file=sys.stderr)
+    sys.exit(0)
+
+open(MEM_CHECKER, 'w').write(new_text)
+print("wedge100s postinst: patched memory_checker — removed routine check_memory_usage syslog calls")
+PYEOF
+    echo "# wedge100s: routine-checks-silenced" >> "$MEMORY_CHECKER"
+fi
+
+# Patch the chrony dhclient exit hook to skip reload when NTP servers are unchanged.
+# The stock hook unconditionally deletes and rewrites the sources file on every
+# DHCP RENEW (even with identical IPs), causing chrony to log a burst of
+# "Removed source / Added source" messages every ~60 min (DHCP lease renewal).
+# The patched version compares new vs existing content and skips the reload if equal.
+CHRONY_HOOK="/etc/dhcp/dhclient-exit-hooks.d/chrony"
+if [ -f "$CHRONY_HOOK" ] && ! grep -q "wedge100s: idempotent" "$CHRONY_HOOK"; then
+    cat > "$CHRONY_HOOK" <<'EOF'
+# wedge100s: idempotent
+CHRONY_SOURCEDIR=/run/chrony-dhcp
+SERVERFILE=$CHRONY_SOURCEDIR/$interface.sources
+
+chrony_config() {
+    mkdir -p "$CHRONY_SOURCEDIR"
+    # Build the new file content without writing it yet.
+    local newcontent=""
+    for server in $new_ntp_servers; do
+        newcontent="${newcontent}server $server iburst
+"
+    done
+    # Skip the reload entirely when the server list is unchanged.
+    if [ -f "$SERVERFILE" ] && [ "$(cat "$SERVERFILE")" = "$newcontent" ]; then
+        return
+    fi
+    printf '%s' "$newcontent" > "$SERVERFILE"
+    /usr/bin/chronyc reload sources > /dev/null 2>&1 || :
+}
+
+chrony_restore() {
+    if [ -f "$SERVERFILE" ]; then
+        rm -f "$SERVERFILE"
+        /usr/bin/chronyc reload sources > /dev/null 2>&1 || :
+    fi
+}
+
+case $reason in
+    BOUND|RENEW|REBIND|REBOOT)
+        chrony_config
+        ;;
+    EXPIRE|FAIL|RELEASE|STOP)
+        chrony_restore
+        ;;
+esac
+EOF
+    echo "wedge100s postinst: patched $CHRONY_HOOK — idempotent NTP source reload"
+fi
+
+# If pmon container already exists but is stopped, remove it so the next
+# supervisor start recreates it with the updated flags.
+# Do NOT remove a running pmon: xcvrd holds I2C bus locks and forceful removal
+# causes a bus hang requiring a full power cycle.
+if command -v docker >/dev/null 2>&1; then
+    PMON_STATUS=$(docker inspect --format='{{.State.Status}}' pmon 2>/dev/null || true)
+    if [ "$PMON_STATUS" = "exited" ] || [ "$PMON_STATUS" = "created" ]; then
+        docker rm pmon >/dev/null 2>&1 || true
+        echo "wedge100s postinst: removed stopped pmon container — will be recreated on next start"
+    elif [ "$PMON_STATUS" = "running" ]; then
+        echo "wedge100s postinst: NOTE: pmon container is running with old flags." \
+             "Reboot (or stop pmon then 'docker rm pmon') to pick up ttyACM device mapping."
+    fi
+
+    # Force-reinstall sonic_platform wheel on the HOST (python3 for decode-syseeprom
+    # and other SONiC CLI tools) and inside the running pmon container.
+    # Always force-reinstall so deb upgrades take effect immediately without
+    # needing a reboot — "already installed" check skips it otherwise.
+    DEVICE_WHEEL="/usr/share/sonic/device/x86_64-accton_wedge100s_32x-r0/sonic_platform-1.0-py3-none-any.whl"
+    if [ -f "$DEVICE_WHEEL" ]; then
+        pip3 install --quiet --force-reinstall "$DEVICE_WHEEL" 2>/dev/null || true
+        echo "wedge100s postinst: reinstalled sonic_platform wheel on host"
+    fi
+
+    # Update sonic_platform wheel inside the running pmon container.
+    # The wheel is bind-mounted from the host but docker_init.sh skips reinstall
+    # if sonic_platform is already importable (it is, baked into the image).
+    # Force-reinstall here so the container picks up chassis.py changes immediately
+    # without waiting for a full image rebuild.
+    if [ "$PMON_STATUS" = "running" ]; then
+        PLATFORM_WHEEL="/usr/share/sonic/platform/sonic_platform-1.0-py3-none-any.whl"
+        if docker exec pmon test -f "$PLATFORM_WHEEL" 2>/dev/null; then
+            docker exec pmon pip3 install --quiet --force-reinstall "$PLATFORM_WHEEL" 2>/dev/null || true
+            echo "wedge100s postinst: reinstalled sonic_platform wheel in pmon container"
+        fi
+        # Ensure openssh-client (ssh binary) is available inside pmon.
+        # bmc.py uses subprocess.run(['ssh', ...]) for BMC communication.
+        # The pmon Docker image does not include openssh-client; copy the
+        # host binary until the Dockerfile is rebuilt with openssh-client.
+        if ! docker exec pmon which ssh >/dev/null 2>&1; then
+            SSH_BIN=$(which ssh 2>/dev/null)
+            if [ -n "$SSH_BIN" ]; then
+                docker cp "$SSH_BIN" pmon:/usr/bin/ssh 2>/dev/null || true
+                # Copy required shared libraries if missing
+                for lib in $(ldd "$SSH_BIN" 2>/dev/null | awk '/=>/{print $3}' | grep -v '^('); do
+                    [ -f "$lib" ] && docker exec pmon test -f "$lib" 2>/dev/null || \
+                        docker cp "$lib" pmon:"$lib" 2>/dev/null || true
+                done
+                echo "wedge100s postinst: copied ssh binary into pmon container"
+            fi
+        fi
+        # Patch psud poll interval: 3s → 30s (PSU insertion is a human-scale event).
+        # This reduces I2C traffic through the CP2112 USB bridge, improving SSH responsiveness.
+        if docker exec pmon grep -q 'PSU_INFO_UPDATE_PERIOD_SECS = 3' /usr/local/bin/psud 2>/dev/null; then
+            docker exec pmon sed -i 's/PSU_INFO_UPDATE_PERIOD_SECS = 3/PSU_INFO_UPDATE_PERIOD_SECS = 30/' \
+                /usr/local/bin/psud 2>/dev/null || true
+            echo "wedge100s postinst: patched psud poll interval 3s → 30s in pmon container"
+        fi
+        # Restart xcvrd and psud to pick up the updated code.
+        docker exec pmon supervisorctl restart xcvrd psud 2>/dev/null || true
+        echo "wedge100s postinst: restarted xcvrd and psud"
+    fi
+fi
+
+# Enable and start LEDUP1 link-state synchronisation daemon.
+# Keeps BCM56960 LEDUP1 DATA_RAM in sync with STATE_DB oper_status so that
+# port LEDs show blue (down) instead of magenta (always-up) when no link.
+systemctl enable wedge100s-ledup-linkstate.service
+systemctl start  wedge100s-ledup-linkstate.service || true
+echo "wedge100s postinst: enabled wedge100s-ledup-linkstate.service"
+
+# Enable and start the flex-counter-daemon on the host.
+# The C daemon reads breakout port counters from bcmcmd (via the host-side
+# bind-mounted socket at /var/run/docker-syncd/sswsyncd.socket) and writes
+# to Redis on localhost.  It retries both connections internally, so hard
+# dependencies are not required — just ordering after syncd.
+systemctl enable wedge100s-flex-counter-daemon.service
+systemctl start  wedge100s-flex-counter-daemon.service || true
+echo "wedge100s postinst: enabled wedge100s-flex-counter-daemon.service"
+
 # system-health (healthd) blocks on a Redis wait when it receives SIGTERM during
 # shutdown — Redis is already stopped by that point.  healthd has no signal handler
 # that interrupts the blocking DB call, so it hangs for the full DefaultTimeoutStopSec
@@ -59,6 +556,19 @@ cat > "$SYSHEALTH_DROPIN_DIR/wedge100s-stop-timeout.conf" <<'EOF'
 TimeoutStopSec=5
 EOF
 echo "wedge100s postinst: installed system-health.service drop-in (TimeoutStopSec=5)"
+
+# Fix serial console lockup: agetty probes terminal type via VT220 escape sequences
+# (DECRQCPO \033[6n, etc.) when TERM is unset or xterm in systemd's environment.
+# On a raw UART serial console via mTerm/microcom there is no terminal emulator to
+# respond; agetty waits for cursor-position replies that never arrive, freezing the
+# console.  Force TERM=linux to skip capability probing entirely.
+SERIAL_GETTY_DROPIN_DIR="/etc/systemd/system/serial-getty@ttyS0.service.d"
+mkdir -p "$SERIAL_GETTY_DROPIN_DIR"
+cat > "$SERIAL_GETTY_DROPIN_DIR/wedge100s-term.conf" <<'EOF'
+[Service]
+Environment=TERM=linux
+EOF
+echo "wedge100s postinst: installed serial-getty@ttyS0 drop-in (TERM=linux)"
 
 # Install var-log.mount drop-in so Docker is fully stopped before /var/log unmount attempt.
 VAR_LOG_DROPIN_DIR="/etc/systemd/system/var-log.mount.d"
@@ -75,18 +585,43 @@ systemctl enable wedge100s-pre-shutdown.service
 systemctl start wedge100s-pre-shutdown.service || true
 echo "wedge100s postinst: enabled wedge100s-pre-shutdown.service"
 
-# Fix serial console lockup: agetty probes terminal type via VT220 escape sequences
-# (DECRQCPO \033[6n, etc.) when TERM is unset or xterm in systemd's environment.
-# On a raw UART serial console via mTerm/microcom there is no terminal emulator to
-# respond; agetty waits for cursor-position replies that never arrive, freezing the
-# console.  Force TERM=linux to skip capability probing entirely.
-SERIAL_GETTY_DROPIN_DIR="/etc/systemd/system/serial-getty@ttyS0.service.d"
-mkdir -p "$SERIAL_GETTY_DROPIN_DIR"
-cat > "$SERIAL_GETTY_DROPIN_DIR/wedge100s-term.conf" <<'EOF'
-[Service]
-Environment=TERM=linux
+# Create /boot/grub -> /host/grub symlink so standard grub-reboot works.
+# SONiC's grub environment lives at /host/grub/grubenv (ext4 partition), not
+# /boot/grub/grubenv, so grub-probe and grub-editenv fail without this symlink.
+if [ ! -e /boot/grub ]; then
+    ln -s /host/grub /boot/grub
+    echo "wedge100s postinst: created /boot/grub -> /host/grub symlink"
+fi
+
+# Install sonic-reboot-onie: one-shot helper to reboot into ONIE install mode.
+# Sets next_entry=ONIE in the SONiC grubenv and onie_mode=install in the
+# ONIE-BOOT partition grubenv (/dev/sda2), then reboots.
+# ONIE reads onie_mode to select the "Install OS" menu entry automatically.
+cat > /usr/local/sbin/sonic-reboot-onie <<'EOF'
+#!/bin/sh
+# sonic-reboot-onie: reboot into ONIE install mode.
+# Sets next_entry=ONIE in /host/grub/grubenv (SONiC GRUB picks ONIE entry)
+# and onie_mode=install in /dev/sda2 (ONIE-BOOT grubenv), then reboots.
+set -e
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: must be run as root" >&2
+    exit 1
+fi
+
+grub-editenv /host/grub/grubenv set next_entry=ONIE
+
+ONIE_MOUNT=/mnt/onie-boot
+mkdir -p "$ONIE_MOUNT"
+mount /dev/sda2 "$ONIE_MOUNT"
+grub-editenv "$ONIE_MOUNT/grub/grubenv" set onie_mode=install
+umount "$ONIE_MOUNT"
+
+echo "Configured for ONIE install mode. Rebooting..."
+reboot
 EOF
-echo "wedge100s postinst: installed serial-getty@ttyS0 drop-in (TERM=linux)"
+chmod +x /usr/local/sbin/sonic-reboot-onie
+echo "wedge100s postinst: installed /usr/local/sbin/sonic-reboot-onie"
 
 # Enable BMC sensor persistent daemon.
 # Replaced timer+oneshot with timerfd-driven persistent process.

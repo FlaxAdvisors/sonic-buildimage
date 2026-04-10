@@ -128,21 +128,26 @@ def _aggregate_led_states(iface_states):
     Collapses all sub-ports that share a physical LED slot (a native 100G
     cage) into a single encoded byte for the LEDUP1 DATA_RAM write:
 
-      * All lanes up               -> 0x80 (solid colour)
-      * Partial (some up, some down) -> 0x81 (link + blink flag)
-      * All lanes down             -> 0x00 (dark)
+      * All lanes up                 -> 0x80 (solid colour)
+      * Partial (some up, some down) -> 0x80 (solid, treated same as all-up)
+      * All lanes down               -> 0x00 (dark)
 
     This handles 1×100G (1 sub-port), 2×50G (2 sub-ports), 4×25G and 4×10G
-    (4 sub-ports) breakout modes uniformly. The partial state is used so the
-    operator sees at-a-glance that not all channels of a breakout group are
-    carrying traffic.
+    (4 sub-ports) breakout modes uniformly.
+
+    Note: OCP spec defines a 12-bit per-port LED format supporting per-lane
+    status, but the LEDUP1 patched bytecode in led_proc_init.soc only
+    distinguishes 0x00 (down) and 0x80 (up) — it has no blink-on-bit-0
+    decode path. A future bytecode extension could introduce an amber-blink
+    encoding for partial state — see
+    notes/2026-04-09-led-breakout-partial.md for follow-up.
 
     Args:
         iface_states: dict mapping interface name to bool (True = link up).
 
     Returns:
-        dict: {led_port: state_byte} for every LED port with at least one
-        known sub-port in ``iface_states``.
+        dict: {led_port: state_byte} where state_byte ∈ {0x00, 0x80}, for
+        every LED port with at least one known sub-port in ``iface_states``.
     """
     led_counts = {}  # {led_port: [total_sub, up_count]}
 
@@ -159,10 +164,13 @@ def _aggregate_led_states(iface_states):
     for led_port, (total, up) in led_counts.items():
         if up == 0:
             led_states[led_port] = 0x00
-        elif up == total:
-            led_states[led_port] = 0x80
         else:
-            led_states[led_port] = 0x81  # partial: link + blink
+            # FIXME(GAP-028-followup): Partial breakout state currently maps
+            # to solid-on (0x80) because the LEDUP1 bytecode in
+            # led_proc_init.soc does not implement a blink encoding. When the
+            # bytecode is extended to honor bit 0 as an amber-blink flag,
+            # change this branch to: 0x80 if up == total else 0x81.
+            led_states[led_port] = 0x80
     return led_states
 
 

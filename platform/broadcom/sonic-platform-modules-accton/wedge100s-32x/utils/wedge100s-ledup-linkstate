@@ -90,6 +90,82 @@ _IFACE_TO_LED_PORT = {
 _LED_PORT_TO_IFACE = {v: k for k, v in _IFACE_TO_LED_PORT.items()}
 
 
+# ── breakout-aware iface → LED_port mapping ───────────────────────────────────
+
+def _iface_to_led_port(iface):
+    """Map any interface (native or breakout sub-port) to LED port.
+
+    A breakout sub-port is any SONiC interface whose first serdes lane is not
+    a multiple of 4 (e.g., Ethernet17, Ethernet18, Ethernet19 under a 4×25G
+    breakout of the 100G port whose native parent is Ethernet16). The physical
+    LED slot is still the parent's slot — this function maps any child back
+    to the parent's entry in ``_IFACE_TO_LED_PORT``.
+
+    LED port = (first_serdes_of_parent - 1) / 4.
+    Parent = Ethernet number rounded down to nearest multiple of 4.
+
+    Args:
+        iface: SONiC interface name (e.g., 'Ethernet16', 'Ethernet17').
+
+    Returns:
+        int or None: LED port index (0-31), or None if not mappable
+        (non-Ethernet interface, malformed name, or parent not in the map).
+    """
+    if not iface.startswith('Ethernet'):
+        return None
+    try:
+        idx = int(iface[8:])
+    except ValueError:
+        return None
+    parent_idx = (idx // 4) * 4
+    parent_iface = 'Ethernet%d' % parent_idx
+    return _IFACE_TO_LED_PORT.get(parent_iface)
+
+
+def _aggregate_led_states(iface_states):
+    """Aggregate per-interface oper_status into per-LED-port state byte.
+
+    Collapses all sub-ports that share a physical LED slot (a native 100G
+    cage) into a single encoded byte for the LEDUP1 DATA_RAM write:
+
+      * All lanes up               -> 0x80 (solid colour)
+      * Partial (some up, some down) -> 0x81 (link + blink flag)
+      * All lanes down             -> 0x00 (dark)
+
+    This handles 1×100G (1 sub-port), 2×50G (2 sub-ports), 4×25G and 4×10G
+    (4 sub-ports) breakout modes uniformly. The partial state is used so the
+    operator sees at-a-glance that not all channels of a breakout group are
+    carrying traffic.
+
+    Args:
+        iface_states: dict mapping interface name to bool (True = link up).
+
+    Returns:
+        dict: {led_port: state_byte} for every LED port with at least one
+        known sub-port in ``iface_states``.
+    """
+    led_counts = {}  # {led_port: [total_sub, up_count]}
+
+    for iface, up in iface_states.items():
+        led_port = _iface_to_led_port(iface)
+        if led_port is None:
+            continue
+        entry = led_counts.setdefault(led_port, [0, 0])
+        entry[0] += 1
+        if up:
+            entry[1] += 1
+
+    led_states = {}
+    for led_port, (total, up) in led_counts.items():
+        if up == 0:
+            led_states[led_port] = 0x00
+        elif up == total:
+            led_states[led_port] = 0x80
+        else:
+            led_states[led_port] = 0x81  # partial: link + blink
+    return led_states
+
+
 # ── logging ───────────────────────────────────────────────────────────────────
 
 def _log(msg, priority=syslog.LOG_INFO):
@@ -197,7 +273,7 @@ def _wait_for_socket(path, timeout_s):
 
 # ── LEDUP1 DATA_RAM write ─────────────────────────────────────────────────────
 
-def _set_ledup1(bcm, led_port, up):
+def _set_ledup1(bcm, led_port, state_byte):
     """Write LEDUP1 DATA_RAM[led_port+64] via bcmcmd. Returns True on success.
 
     The LEDUP1 bytecode program is patched (see led_proc_init.soc 'led 1 prog')
@@ -208,9 +284,17 @@ def _set_ledup1(bcm, led_port, up):
     Must use 'DATA=value' field-qualified syntax.  'setreg REG 0x00' silently
     fails (no error, value unchanged) while 'setreg REG DATA=0x00' performs a
     read-modify-write on the DATA field and lands correctly.
+
+    Args:
+        bcm: BcmcmdClient instance with an established diag-shell connection.
+        led_port: LED port index (0-31).
+        state_byte: Encoded state byte (0x00 dark, 0x80 solid, 0x81 partial).
+
+    Returns:
+        bool: True on success, False on bcmcmd error.
     """
-    val = '0x80' if up else '0x00'
-    cmd = 'setreg CMIC_LEDUP1_DATA_RAM(%d) DATA=%s' % (led_port + 64, val)
+    cmd = 'setreg CMIC_LEDUP1_DATA_RAM(%d) DATA=0x%02x' % (
+        led_port + 64, state_byte & 0xff)
     try:
         out = bcm.cmd(cmd)
         # setreg produces no output on success; a BCM error starts with '***'
@@ -223,12 +307,20 @@ def _set_ledup1(bcm, led_port, up):
         return False
 
 
-def _write_status(led_port, up):
-    """Write /run/wedge100s/ledup1_port_N status file."""
+def _write_status(led_port, state_byte):
+    """Write /run/wedge100s/ledup1_port_N status file.
+
+    The file holds '1' for any link-up encoding (solid or partial) and '0'
+    for dark, so existing consumers that treat it as a boolean keep working.
+
+    Args:
+        led_port: LED port index (0-31).
+        state_byte: Encoded state byte (0x00 dark, 0x80 solid, 0x81 partial).
+    """
     path = os.path.join(RUN_DIR, 'ledup1_port_%d' % led_port)
     try:
         with open(path, 'w') as f:
-            f.write('1\n' if up else '0\n')
+            f.write('0\n' if state_byte == 0x00 else '1\n')
     except OSError as e:
         _log('status write %s: %s' % (path, e), syslog.LOG_DEBUG)
 
@@ -260,11 +352,21 @@ def _read_state_db():
 
 # ── forced override (.set files) ──────────────────────────────────────────────
 
-def _process_set_files(bcm, current):
+def _process_set_files(bcm, prev_led_state):
     """Check for ledup1_port_N.set override files. Process and remove them.
 
     Files are written by led_control.py on ledd port_link_state_change()
-    events for immediate (<1s) response between STATE_DB poll cycles.
+    events for immediate (<1s) response between STATE_DB poll cycles. The
+    file contents are interpreted as a boolean (anything but '0' means up),
+    and the override is applied as a solid (0x80) or dark (0x00) state —
+    per-lane aggregation is not available on this fast path because ledd
+    only reports a single interface at a time.
+
+    Args:
+        bcm: BcmcmdClient instance with an established diag-shell connection.
+        prev_led_state: dict {led_port: state_byte} last written — updated
+            in place so subsequent polls don't redundantly re-write the
+            overridden slot.
     """
     try:
         entries = os.listdir(RUN_DIR)
@@ -290,29 +392,43 @@ def _process_set_files(bcm, current):
         if not (0 <= led_port <= 31):
             continue
 
-        up = (val != '0')
-        if _set_ledup1(bcm, led_port, up):
-            _write_status(led_port, up)
+        state_byte = 0x80 if val != '0' else 0x00
+        if _set_ledup1(bcm, led_port, state_byte):
+            _write_status(led_port, state_byte)
             iface = _LED_PORT_TO_IFACE.get(led_port, '?')
-            _log('override: %s LED_port %d → %s' % (iface, led_port, 'up' if up else 'down'))
-            current[iface] = up
+            _log('override: %s LED_port %d → 0x%02x' % (iface, led_port, state_byte))
+            prev_led_state[led_port] = state_byte
 
 
 # ── state application ─────────────────────────────────────────────────────────
 
-def _apply_states(bcm, new_states, current):
-    """Write DATA_RAM for every changed port. Updates current in place."""
+def _apply_states(bcm, iface_states, prev_led_state):
+    """Aggregate sub-port states and write changed LED slots.
+
+    Builds per-LED-port state bytes from ``iface_states`` via
+    :func:`_aggregate_led_states` and writes DATA_RAM only for slots whose
+    encoded byte differs from ``prev_led_state``. This handles native and
+    all supported breakout modes (2×50G, 4×25G, 4×10G) uniformly.
+
+    Args:
+        bcm: BcmcmdClient instance with an established diag-shell connection.
+        iface_states: dict {iface: bool} — current oper_status snapshot.
+        prev_led_state: dict {led_port: state_byte} — previous written bytes,
+            updated in place for every successful write.
+
+    Returns:
+        int: Number of LED slots whose DATA_RAM byte was updated.
+    """
+    led_states = _aggregate_led_states(iface_states)
     changed = 0
-    for iface, up in new_states.items():
-        led_port = _IFACE_TO_LED_PORT.get(iface)
-        if led_port is None:
-            continue   # breakout sub-port or unknown — skip
-        if current.get(iface) == up:
-            continue   # no change
-        if _set_ledup1(bcm, led_port, up):
-            _write_status(led_port, up)
-            _log('%s LED_port %d → %s' % (iface, led_port, 'up' if up else 'down'))
-            current[iface] = up
+    for led_port, state_byte in led_states.items():
+        if prev_led_state.get(led_port) == state_byte:
+            continue  # no change
+        if _set_ledup1(bcm, led_port, state_byte):
+            _write_status(led_port, state_byte)
+            iface = _LED_PORT_TO_IFACE.get(led_port, '?')
+            _log('%s LED_port %d → 0x%02x' % (iface, led_port, state_byte))
+            prev_led_state[led_port] = state_byte
             changed += 1
     return changed
 
@@ -332,18 +448,22 @@ def main():
 
     _log('bcmcmd socket ready — connecting')
 
-    # Initial sweep: sync all 32 ports to current STATE_DB state.
+    # Initial sweep: sync all 32 LED slots to current STATE_DB state.
     # We hold bcmcmd only for the duration of the initial sweep, then release it.
     # In steady state we only open bcmcmd when we actually have changes to push,
     # so that the flex-counter-daemon (which also uses bcmcmd) can interleave.
-    current = {}
+    #
+    # prev_led_state is keyed by LED slot (0-31) not by iface, because after
+    # breakout aggregation a single slot is the product of up to 4 sub-ports.
+    prev_led_state = {}
     states = _read_state_db()
     if states:
         with BcmcmdClient(SOCKET_PATH_HOST) as bcm:
             bcm._connect()
             _log('bcmcmd connected for initial sweep')
-            n = _apply_states(bcm, states, current)
-            _log('initial sweep: %d ports updated (%d changed)' % (len(states), n))
+            n = _apply_states(bcm, states, prev_led_state)
+            _log('initial sweep: %d ifaces seen, %d LED slots updated' % (
+                 len(states), n))
     else:
         _log('STATE_DB empty at startup — will sync on next poll',
              syslog.LOG_WARNING)
@@ -359,11 +479,14 @@ def main():
             n.startswith('ledup1_port_') and n.endswith('.set')
             for n in (os.listdir(RUN_DIR) if os.path.isdir(RUN_DIR) else [])
         )
-        changes = {
-            iface: up for iface, up in states.items()
-            if current.get(iface) != up and iface in _IFACE_TO_LED_PORT
-        }
-        if not (has_set_files or changes):
+        # Pre-compute aggregated LED-slot bytes and compare to prev. This
+        # cheap pass lets us skip opening bcmcmd entirely when nothing has
+        # changed, which keeps the flex-counter-daemon happy.
+        desired = _aggregate_led_states(states)
+        has_changes = any(
+            prev_led_state.get(lp) != sb for lp, sb in desired.items()
+        )
+        if not (has_set_files or has_changes):
             continue  # nothing to do — don't touch bcmcmd this cycle
         # Open bcmcmd only when we have actual work, release immediately after.
         with BcmcmdClient(SOCKET_PATH_HOST) as bcm:
@@ -372,8 +495,8 @@ def main():
             except Exception as e:
                 _log('bcmcmd connect failed: %s' % e, syslog.LOG_WARNING)
                 continue
-            _process_set_files(bcm, current)
-            _apply_states(bcm, states, current)
+            _process_set_files(bcm, prev_led_state)
+            _apply_states(bcm, states, prev_led_state)
 
 
 if __name__ == '__main__':

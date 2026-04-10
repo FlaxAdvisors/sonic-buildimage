@@ -27,6 +27,9 @@
  *   fan_{1..5}_front               front-rotor RPM
  *   fan_{1..5}_rear                rear-rotor RPM
  *   psu_{1,2}_{vin,iin,iout,pout}  raw PMBus LINEAR11 16-bit word (decimal)
+ *   psu_{1,2}_vout                 raw PMBus LINEAR16 READ_VOUT word (decimal)
+ *   psu_{1,2}_temp                 raw PMBus LINEAR11 READ_TEMPERATURE_1 word (decimal)
+ *   psu_{1,2}_fan                  raw PMBus READ_FAN_SPEED_1 word (RPM, decimal)
  *   psu_{1,2}_model                PSU MFR_MODEL string (PMBus block-read)
  *   psu_{1,2}_serial               PSU MFR_SERIAL string (PMBus block-read)
  *   qsfp_int                       BMC gpio31 value (0 = interrupt asserted)
@@ -514,11 +517,32 @@ int main(void)
         { 0x02, 0x59 },
         { 0x01, 0x5a },
     };
-    static const struct { int reg; const char *name; } pmbus_regs[4] = {
+    /*
+     * PMBus word-read registers polled every 10s per PSU.
+     * 0x88 READ_VIN, 0x89 READ_IIN, 0x8c READ_IOUT, 0x96 READ_POUT — LINEAR11.
+     * 0x8b READ_VOUT — LINEAR16 with exponent from VOUT_MODE (0x20).
+     *   Delta SPAFCBK-14G reports VOUT_MODE = 0x17 → signed 5-bit exp = -9,
+     *   so psu.py decodes vout as raw / 512.0 (verified on hardware 2026-04-09
+     *   on both PSU1 = 0x17ca → 11.895V and PSU2 = 0x1802 → 12.004V).
+     * 0x8d READ_TEMPERATURE_1 — LINEAR11 (intake air temperature, ~23-26C at
+     *   ambient idle, verified on hardware 2026-04-09).
+     * 0x90 READ_FAN_SPEED_1 — Delta SPAFCBK-14G reports FAN_CONFIG_1_2 (0x3a)
+     *   = 0x90 (FAN_1 installed, unit-bit set, FAN_2 absent) but the observed
+     *   word values (PSU1 = 0x2800 = 10240, PSU2 = 0x2909 = 10505) make sense
+     *   only as plain RPM — as LINEAR11 they would be 0 and 8480, and as duty
+     *   cycle they would be out of 0-100 range. Both PSUs reporting similar
+     *   values at matched load confirms the "raw RPM" interpretation (verified
+     *   on hardware 2026-04-09). psu.py stores the file value directly.
+     * Cache files are raw decimal integers; psu.py runs the decoders.
+     */
+    static const struct { int reg; const char *name; } pmbus_regs[7] = {
         { 0x88, "vin"  },
         { 0x89, "iin"  },
         { 0x8c, "iout" },
         { 0x96, "pout" },
+        { 0x8b, "vout" },
+        { 0x8d, "temp" },
+        { 0x90, "fan"  },
     };
     /* PMBus string registers for model/serial (block-read, ASCII) */
     static const struct { int reg; const char *suffix; } pmbus_str_regs[2] = {
@@ -650,7 +674,7 @@ int main(void)
                          psu_cfg[i].mux_ch);
                 bmc_run(cmd);
 
-                for (r2 = 0; r2 < 4; r2++) {
+                for (r2 = 0; r2 < 7; r2++) {
                     snprintf(cmd, sizeof(cmd),
                              "i2cget -f -y 7 0x%02x 0x%02x w",
                              psu_cfg[i].pmbus_addr, pmbus_regs[r2].reg);

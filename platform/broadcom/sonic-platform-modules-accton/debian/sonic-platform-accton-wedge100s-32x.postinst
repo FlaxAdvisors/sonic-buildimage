@@ -478,17 +478,21 @@ touch /run/wedge100s/pmon-fixup-needed
 systemctl enable wedge100s-pmon-fixup.service 2>/dev/null || true
 echo "wedge100s postinst: armed wedge100s-pmon-fixup.service (runs after pmon starts)"
 
-# Enable LEDUP1 link-state synchronisation daemon.
-# Do not start — has After=syncd.service which blocks during first-boot postinst.
-# systemd starts it automatically when multi-user.target is reached.
+# Enable and start LEDUP1 link-state synchronisation daemon.
+# Use --no-block: the service has After=syncd.service, so the start job
+# queues until syncd is up. --no-block prevents the postinst from waiting.
+# This is required because enable-only does NOT cause systemd to start the
+# unit during the current boot cycle (verified on fresh-boot 2026-04-11
+# that services were left "inactive (dead)" and SYSTEM_READY never
+# transitioned to UP until manually started).
 systemctl enable wedge100s-ledup-linkstate.service
-echo "wedge100s postinst: enabled wedge100s-ledup-linkstate.service"
+systemctl --no-block start wedge100s-ledup-linkstate.service || true
+echo "wedge100s postinst: enabled + queued start for wedge100s-ledup-linkstate.service"
 
-# Enable flex-counter-daemon.
-# Do not start — has After=syncd.service which blocks during first-boot postinst.
-# systemd starts it automatically when multi-user.target is reached.
+# Enable and start flex-counter-daemon (same rationale as above).
 systemctl enable wedge100s-flex-counter-daemon.service
-echo "wedge100s postinst: enabled wedge100s-flex-counter-daemon.service"
+systemctl --no-block start wedge100s-flex-counter-daemon.service || true
+echo "wedge100s postinst: enabled + queued start for wedge100s-flex-counter-daemon.service"
 
 # system-health (healthd) blocks on a Redis wait when it receives SIGTERM during
 # shutdown — Redis is already stopped by that point.  healthd has no signal handler

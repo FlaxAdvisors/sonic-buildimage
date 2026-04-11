@@ -420,6 +420,11 @@ sudo LANG=C chroot $FILESYSTEM_ROOT systemctl disable chrony.service
 sudo cp $IMAGE_CONFIGS/chrony/override.conf $FILESYSTEM_ROOT_USR_LIB_SYSTEMD_SYSTEM/chrony.service.d/
 sudo LANG=C chroot $FILESYSTEM_ROOT systemctl enable chrony.service
 
+# Install set-vrf-strict-mode oneshot — sets /proc/sys/net/vrf/strict_mode=1
+# after the VRF module is loaded, so mgmt VRF policy routing works correctly.
+sudo cp $IMAGE_CONFIGS/set-vrf-strict-mode/set-vrf-strict-mode.service $FILESYSTEM_ROOT/etc/systemd/system/set-vrf-strict-mode.service
+sudo LANG=C chroot $FILESYSTEM_ROOT systemctl enable set-vrf-strict-mode
+
 # Copy DNS templates
 sudo cp $BUILD_TEMPLATES/dns.j2 $FILESYSTEM_ROOT_USR_SHARE_SONIC_TEMPLATES/
 

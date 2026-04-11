@@ -25,6 +25,11 @@
  *   come_status   (RO) — COM-e status byte             (reg 0x18, hex)
  *   led_sys1      (RW) — SYS LED 1 byte (reg 0x3e): 0=off,1=red,2=green,4=blue,+8=blink
  *   led_sys2      (RW) — SYS LED 2 byte (reg 0x3f): same encoding
+ *   heart_attack_en (RW) — Fan-heartbeat hardware shutdown enable
+ *                          (reg 0x2E bit 7): 1 = CPLD cuts main power if fan
+ *                          CPLD heartbeat stops (all fan trays removed),
+ *                          0 = rely on SONiC thermalctld alone.
+ *                          Read-modify-write preserves bits [6:0].
  *
  * Register map (from ONL ledi.c / psui.c, verified on hardware 2026-02-25):
  *   0x00  CPLD version major / board rev [3:0] / model ID [5:4]
@@ -37,6 +42,9 @@
  *   0x11  Power status 1 (standby power OK)
  *   0x12  Power status 2 (VCORE/VANLOG/V3V3 ready + hot)
  *   0x18  COM-e status: D[2:0]=B_COM_TYPE, D[3]=GBE0_LINK1000_N, D[4:7]=SUS states
+ *   0x2E  Fan control byte: D[7]=HEART_ATTACK_EN (1=CPLD hw shutdown on
+ *         fan-CPLD heartbeat loss), D[6:0]=other fan-CPLD features (observed
+ *         value 0x18 on hare-lorax 2026-04-09, full semantics TBD)
  *   0x3e  SYS LED 1
  *   0x3f  SYS LED 2
  *
@@ -71,6 +79,8 @@
 #define REG_RESET_SOURCE1  0x0e  /* Per-source reset active bits */
 #define REG_RESET_SOURCE2  0x0f  /* BMC-initiated reset active bits */
 #define REG_COME_STATUS    0x18  /* D[2:0]=COM type, D[3]=GbE link, D[4:7]=suspend states */
+#define REG_FAN_CTRL       0x2e  /* D[7]=HEART_ATTACK_EN, D[6:0]=other fan-CPLD features */
+#define HEART_ATTACK_BIT   7
 #define REG_LED_SYS1       0x3e
 #define REG_LED_SYS2       0x3f
 
@@ -594,6 +604,83 @@ static ssize_t store_led_sys2(struct device *dev,
 	return status < 0 ? status : count;
 }
 
+/**
+ * @brief Show HEART_ATTACK_EN state (CPLD reg 0x2E bit 7).
+ *
+ * Reads CPLD register 0x2E and returns bit 7 as "0\n" or "1\n". When set,
+ * the CPLD hardware will cut main power if the fan CPLD heartbeat stops
+ * (e.g., when all fan trays are removed). When clear, SONiC thermalctld
+ * alone is responsible for responding to fan failure.
+ *
+ * @param dev   Device structure.
+ * @param attr  Device attribute.
+ * @param buf   Output buffer.
+ * @return Number of bytes written to @p buf, or negative errno on I2C error.
+ */
+static ssize_t show_heart_attack_en(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	int val;
+
+	mutex_lock(&data->update_lock);
+	val = cpld_read(client, REG_FAN_CTRL);
+	mutex_unlock(&data->update_lock);
+
+	if (val < 0)
+		return val;
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 (val >> HEART_ATTACK_BIT) & 1);
+}
+
+/**
+ * @brief Store HEART_ATTACK_EN state (CPLD reg 0x2E bit 7).
+ *
+ * Accepts "0" or "1" (any base accepted by kstrtoul). Performs a
+ * read-modify-write on register 0x2E so the other fan-CPLD control bits
+ * in D[6:0] are preserved. Policy note: flipping this bit is a live-system
+ * operation; see notes/2026-04-09-fan-heartbeat.md for the interaction
+ * model with SONiC thermalctld before changing it.
+ *
+ * @param dev   Device structure.
+ * @param attr  Device attribute.
+ * @param buf   Input buffer containing ASCII "0" or "1".
+ * @param count Number of bytes in @p buf.
+ * @return @p count on success, or negative errno on parse/I2C error.
+ */
+static ssize_t store_heart_attack_en(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct wedge100s_cpld_data *data = i2c_get_clientdata(client);
+	unsigned long val;
+	int cur, status;
+
+	status = kstrtoul(buf, 0, &val);
+	if (status)
+		return status;
+	if (val > 1)
+		return -EINVAL;
+
+	mutex_lock(&data->update_lock);
+	cur = cpld_read(client, REG_FAN_CTRL);
+	if (cur < 0) {
+		mutex_unlock(&data->update_lock);
+		return cur;
+	}
+	if (val)
+		cur |= (1 << HEART_ATTACK_BIT);
+	else
+		cur &= ~(1 << HEART_ATTACK_BIT);
+	status = cpld_write(client, REG_FAN_CTRL, (u8)cur);
+	mutex_unlock(&data->update_lock);
+
+	return status < 0 ? status : count;
+}
+
 /* ---------------------------------------------------------------------------
  * Attribute group
  * --------------------------------------------------------------------------- */
@@ -618,6 +705,8 @@ static DEVICE_ATTR(reset_source2,  S_IRUGO, show_reset_source2,  NULL);
 static DEVICE_ATTR(come_status,    S_IRUGO, show_come_status,    NULL);
 static DEVICE_ATTR(led_sys1, S_IRUGO | S_IWUSR, show_led_sys1, store_led_sys1);
 static DEVICE_ATTR(led_sys2, S_IRUGO | S_IWUSR, show_led_sys2, store_led_sys2);
+static DEVICE_ATTR(heart_attack_en, S_IRUGO | S_IWUSR,
+		   show_heart_attack_en, store_heart_attack_en);
 
 static struct attribute *wedge100s_cpld_attrs[] = {
 	&dev_attr_cpld_version.attr,
@@ -640,6 +729,7 @@ static struct attribute *wedge100s_cpld_attrs[] = {
 	&dev_attr_come_status.attr,
 	&dev_attr_led_sys1.attr,
 	&dev_attr_led_sys2.attr,
+	&dev_attr_heart_attack_en.attr,
 	NULL,
 };
 

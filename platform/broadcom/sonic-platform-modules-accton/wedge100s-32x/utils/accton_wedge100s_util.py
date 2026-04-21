@@ -447,7 +447,10 @@ def _bmc_led_init():
         "-o", "ConnectTimeout=5",
         "-i", BMC_KEY,
     ]
-    LOCAL_SCRIPT = "/usr/bin/clear_led_diag.sh"
+    # LOCAL_SCRIPT is the BMC-side script source on the SONiC host (shipped by
+    # the platform .deb to /usr/bin/), distinct from /usr/bin/clear_led_diag.sh
+    # which is the SONiC-host trigger one-liner consumed by wedge100s-bmc-daemon.
+    LOCAL_SCRIPT = "/usr/bin/clear_led_diag_bmc.sh"
     BMC_SCRIPT   = "/usr/local/bin/clear_led_diag.sh"
     SETUP_BOARD  = "/etc/init.d/setup_board.sh"
 

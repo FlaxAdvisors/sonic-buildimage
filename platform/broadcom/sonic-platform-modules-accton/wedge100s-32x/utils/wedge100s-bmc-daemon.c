@@ -161,16 +161,28 @@ static const char SSH_CHECK[] =
 /**
  * @brief Execute a BMC shell command via the SSH ControlMaster socket.
  *
- * Output (stdout and stderr) is discarded. Used for fire-and-forget
- * commands such as i2cset and LED diagnostic script invocations.
+ * Output (stdout and stderr) is discarded. Used for fire-and-forget commands
+ * such as i2cset and LED diagnostic script invocations. The exit status is
+ * logged to syslog — silent failures previously masked issues like a missing
+ * BMC-side script, turning a 30-second diagnosis into a multi-hour one.
  *
  * @param bmc_cmd Shell command to run on the BMC.
+ * @return The exit status as returned by system(3) — 0 on success, non-zero
+ *         on any failure (including SSH-layer errors and BMC-side errors).
  */
-static void bmc_run(const char *bmc_cmd)
+static int bmc_run(const char *bmc_cmd)
 {
     char shell_cmd[512];
+    int rc;
     build_ssh_cmd(shell_cmd, sizeof(shell_cmd), bmc_cmd, " >/dev/null 2>&1");
-    (void)system(shell_cmd);
+    rc = system(shell_cmd);
+    if (rc == 0) {
+        syslog(LOG_INFO, "wedge100s-bmc-daemon: bmc_run OK: %s", bmc_cmd);
+    } else {
+        syslog(LOG_WARNING,
+               "wedge100s-bmc-daemon: bmc_run FAILED rc=%d: %s", rc, bmc_cmd);
+    }
+    return rc;
 }
 
 /* ── bmc_read_int ────────────────────────────────────────────────────────── */

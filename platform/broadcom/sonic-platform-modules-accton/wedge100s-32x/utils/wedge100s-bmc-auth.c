@@ -4,7 +4,9 @@
  *
  * Opens the BMC serial console (57600 8N1), logs in as root/0penBmc,
  * appends /etc/sonic/wedge100s-bmc-key.pub to /root/.ssh/authorized_keys
- * idempotently, then exits cleanly.
+ * idempotently, then exits cleanly.  If the SONiC-side keypair is absent,
+ * generates one (ed25519, no passphrase) before the push so this tool is
+ * self-contained and does not race with postinst on first boot.
  *
  * Called from platform-init (do_install) on every SONiC boot.
  * Also called by wedge100s-bmc-daemon on every BMC reconnect, since the
@@ -20,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -29,10 +32,37 @@
 #define TTY_DEV     "/dev/ttyACM0"
 #define BMC_LOGIN   "root"
 #define BMC_PASS    "0penBmc"
+#define PRIVKEY_PATH "/etc/sonic/wedge100s-bmc-key"
 #define PUBKEY_PATH "/etc/sonic/wedge100s-bmc-key.pub"
 #define TIMEOUT_SEC 10
 
 static int g_tty_fd = -1;
+
+/**
+ * @brief Ensure the SONiC-side BMC SSH keypair exists, generating it if absent.
+ *
+ * Called before reading PUBKEY_PATH so this tool is idempotent and
+ * self-contained — no race with postinst's bmc.provision_ssh_key() on
+ * first boot of a fresh install (where postinst runs after platform-init).
+ *
+ * @return 0 if the pubkey is present (pre-existing or freshly generated),
+ *         -1 if ssh-keygen failed.
+ */
+static int ensure_keypair(void)
+{
+    struct stat st;
+    if (stat(PUBKEY_PATH, &st) == 0) return 0;
+
+    fprintf(stderr,
+            "wedge100s-bmc-auth: %s absent — generating ed25519 keypair\n",
+            PUBKEY_PATH);
+    int rc = system("ssh-keygen -q -t ed25519 -N '' -f " PRIVKEY_PATH);
+    if (rc != 0) {
+        fprintf(stderr, "wedge100s-bmc-auth: ssh-keygen failed (rc=%d)\n", rc);
+        return -1;
+    }
+    return 0;
+}
 
 /**
  * @brief Open /dev/ttyACM0 and configure it for 57600 8N1 raw mode.
@@ -127,6 +157,8 @@ int main(void)
     char cmd[768];
     char buf[1024];
     FILE *fp;
+
+    if (ensure_keypair() < 0) return 1;
 
     /* Read public key */
     fp = fopen(PUBKEY_PATH, "r");

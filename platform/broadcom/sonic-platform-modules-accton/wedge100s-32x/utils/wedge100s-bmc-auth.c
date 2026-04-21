@@ -44,7 +44,8 @@
 #define PUBKEY_PATH   "/etc/sonic/wedge100s-bmc-key.pub"
 #define BMC_PASS      "0penBmc"
 #define BMC_HOST      "root@fe80::ff:fe00:1%usb0"
-#define ASKPASS_PATH  "/run/wedge100s/bmc-askpass.sh"
+/* /run is mounted noexec on SONiC; /tmp is tmpfs + exec OK */
+#define ASKPASS_PATH  "/tmp/wedge100s-bmc-askpass.sh"
 #define MAX_TRIES     6
 #define RETRY_DELAY   5
 
@@ -83,8 +84,6 @@ static int ensure_keypair(void)
  */
 static int write_askpass(void)
 {
-    mkdir("/run/wedge100s", 0755);   /* idempotent; daemons create this too */
-
     int fd = open(ASKPASS_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0700);
     if (fd < 0) {
         fprintf(stderr, "wedge100s-bmc-auth: open %s: %s\n",
@@ -101,10 +100,45 @@ static int write_askpass(void)
     return 0;
 }
 
+/**
+ * @brief Probe whether the SONiC-side key is already installed on the BMC.
+ *
+ * Runs ssh with pubkey-only authentication (password disabled, BatchMode). If
+ * it connects, the key is already in the BMC's authorized_keys and we can
+ * skip the push entirely — avoiding duplicate entries that ssh-copy-id -f
+ * would otherwise accumulate.
+ *
+ * @return 1 if the key is already installed, 0 if not (or BMC unreachable).
+ */
+static int pubkey_already_works(void)
+{
+    const char *cmd =
+        "ssh "
+        "-o BatchMode=yes "
+        "-o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=/dev/null "
+        "-o ConnectTimeout=5 "
+        "-o PubkeyAuthentication=yes "
+        "-o PasswordAuthentication=no "
+        "-o ControlMaster=no "
+        "-o ControlPath=none "
+        "-i " PRIVKEY_PATH " "
+        BMC_HOST " true >/dev/null 2>&1";
+    int rc = system(cmd);
+    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
+}
+
 int main(void)
 {
     if (ensure_keypair() < 0) return 1;
-    if (write_askpass()    < 0) return 1;
+
+    /* Idempotence guard: skip the whole dance if BMC already accepts our key. */
+    if (pubkey_already_works()) {
+        fprintf(stderr, "wedge100s-bmc-auth: BMC already accepts our key\n");
+        return 0;
+    }
+
+    if (write_askpass() < 0) return 1;
 
     const char *cmd =
         "SSH_ASKPASS=" ASKPASS_PATH " "

@@ -130,6 +130,11 @@ static int pubkey_already_works(void)
 
 int main(void)
 {
+    /* When invoked from a systemd service, HOME may be empty — ssh-copy-id
+     * then fails trying to create ~/.ssh/ssh-copy-id.XXXXXXXXXX as its
+     * staging dir. Force HOME=/root so the temp-dir path resolves. */
+    setenv("HOME", "/root", 1);
+
     if (ensure_keypair() < 0) return 1;
 
     /* Idempotence guard: skip the whole dance if BMC already accepts our key. */

@@ -1,9 +1,9 @@
 [Unit]
-Description=Wedge100S LEDUP1 link-state synchronisation daemon
+Description=Wedge100S FBOSS LED link-state driver
 Documentation=file:///usr/share/doc/wedge100s-ledup-linkstate
-# Needs platform init (driver + CPLD) and the bcmcmd socket (syncd).
-# We use Wants= (not Requires=) for syncd so a syncd restart does not
-# bring this service down — it reconnects via its own retry loop.
+# Needs platform init (driver + CPLD) and the bcmcmd socket via syncd.
+# Wants= (not Requires=) for syncd so a syncd restart doesn't take us
+# down — the daemon reconnects via its own retry loop.
 After=wedge100s-platform-init.service syncd.service
 Requires=wedge100s-platform-init.service
 Wants=syncd.service

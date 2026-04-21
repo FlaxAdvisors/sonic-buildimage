@@ -1,61 +1,27 @@
 # led_proc_init.soc — LED microcontroller init for Accton Wedge 100S-32X
 #
-# BCM56960 (Tomahawk) has two LED scan chains: LEDUP0 and LEDUP1.
-# Each drives one color channel of the per-port bi-color LED.
-# The bytecode is identical to AS7712-32X (same Tomahawk chip, same 32×100G layout).
+# Loads the FBOSS 22-byte LED microcode onto both CMIC_LEDUP engines, which
+# drive the 32-cage front panel (64 LEDs total) with 8-color-per-LED
+# capability. Both engines read per-LED color bytes from DATA_RAM[192..223]
+# (ADDR_SW_PORTS = 0xc0). The wedge100s-ledup-linkstate daemon writes
+# per-port colors into these addresses based on SONiC STATE_DB link state.
 #
-# REMAP derivation:
-#   LED physical port index = (first_serdes_lane - 1) / 4
-#   Source: portmap_*.0=<serdes>:100 entries in th-wedge100s-32x-flex.config.bcm
-#   Scan chain visits BCM ports in BCM port-number order (authoritative).
+# Bank split (empirically verified 2026-04-21):
+#   LEDUP0 drives cages 1-12 + 29-32 (32 LEDs)
+#   LEDUP1 drives cages 13-28        (32 LEDs)
 #
-#   Scan  BCM port  SONiC iface  Serdes  LED port
-#   pos 0    1      Ethernet16    5      1
-#   pos 1    5      Ethernet20    1      0
-#   pos 2    9      Ethernet24   13      3
-#   pos 3   13      Ethernet28    9      2
-#   pos 4   17      Ethernet32   21      5
-#   pos 5   21      Ethernet36   17      4
-#   pos 6   25      Ethernet40   29      7
-#   pos 7   29      Ethernet44   25      6
-#   pos 8   34      Ethernet48   37      9
-#   pos 9   38      Ethernet52   33      8
-#   pos 10  42      Ethernet56   45     11
-#   pos 11  46      Ethernet60   41     10
-#   pos 12  50      Ethernet64   53     13
-#   pos 13  54      Ethernet68   49     12
-#   pos 14  58      Ethernet72   61     15
-#   pos 15  62      Ethernet76   57     14
-#   pos 16  68      Ethernet80   69     17
-#   pos 17  72      Ethernet84   65     16
-#   pos 18  76      Ethernet88   77     19
-#   pos 19  80      Ethernet92   73     18
-#   pos 20  84      Ethernet96   85     21
-#   pos 21  88      Ethernet100  81     20
-#   pos 22  92      Ethernet104  93     23
-#   pos 23  96      Ethernet108  89     22
-#   pos 24 102      Ethernet112 101     25
-#   pos 25 106      Ethernet116  97     24
-#   pos 26 110      Ethernet120 109     27
-#   pos 27 114      Ethernet124 105     26
-#   pos 28 118      Ethernet0   117     29
-#   pos 29 122      Ethernet4   113     28
-#   pos 30 126      Ethernet8   125     31
-#   pos 31 130      Ethernet12  121     30
+# REMAP values are identical on both engines: a simple adjacent-pair swap
+# [1,0,3,2, 5,4,7,6, ..., 29,28,31,30] for positions 0-31. Positions 32-63
+# are remapped to index 63 (unused — wedge100s has no scan-chain positions
+# 32-63 wired to physical LEDs). This matches the scan-chain routing the
+# FBOSS bytecode assumes, so no REMAP change is needed for the cutover.
 #
-# Chain assignment (Wedge 100S hardware model):
-#   LEDUP0 scan pos 0-31 → blue  channel of physical LEDs 0-31
-#   LEDUP1 scan pos 0-31 → orange channel of physical LEDs 0-31
-#   Positions 32-63 on both chains are not wired to physical LEDs on this PCB.
-#   Both chains use IDENTICAL REMAP for positions 0-31.
-#   LEDUP0 uses the stock BCM program (reads DATA_RAM[REMAP[pos]], BCM SDK-owned).
-#   LEDUP1 uses a patched program (reads DATA_RAM[REMAP[pos]+64], daemon-owned).
-#   Bytecode behavior: DOWN → LEDUP0 fires blue, LEDUP1 dark → LED shows BLUE
-#                       UP   → both fire → LED shows BLUE+ORANGE (magenta/pink)
-#
-# NOTE: physical scan chain routing not confirmed from PCB schematic.
-# If individual port LEDs show wrong link status, investigate scan chain
-# physical order vs BCM port order and adjust REMAP accordingly.
+# FBOSS bytecode source:
+#   fboss/agent/platforms/common/utils/Wedge100LedUtils.cpp
+#   fboss/agent/platforms/wedge/wedge100/wedge100_led.asm
+# Per-port color byte encoding: bits [2:0] are 3-bit RGB (specific CPLD
+# wiring on this board renders certain 3-bit combinations as pink instead
+# of pure black — see daemon's COLOR_OFF comment).
 
 m CMIC_LEDUP0_PORT_ORDER_REMAP_0_3    REMAP_PORT_0=1    REMAP_PORT_1=0    REMAP_PORT_2=3    REMAP_PORT_3=2
 m CMIC_LEDUP0_PORT_ORDER_REMAP_4_7    REMAP_PORT_4=5    REMAP_PORT_5=4    REMAP_PORT_6=7    REMAP_PORT_7=6
@@ -74,13 +40,6 @@ m CMIC_LEDUP0_PORT_ORDER_REMAP_52_55  REMAP_PORT_52=63  REMAP_PORT_53=63  REMAP_
 m CMIC_LEDUP0_PORT_ORDER_REMAP_56_59  REMAP_PORT_56=63  REMAP_PORT_57=63  REMAP_PORT_58=63  REMAP_PORT_59=63
 m CMIC_LEDUP0_PORT_ORDER_REMAP_60_63  REMAP_PORT_60=63  REMAP_PORT_61=63  REMAP_PORT_62=63  REMAP_PORT_63=63
 
-# LEDUP1 uses the same REMAP as LEDUP0 (1,0,3,2,...,31,30).
-# The LED program is patched (see 'led 1 prog' below) to redirect DATA_RAM reads
-# from REMAP[scan_pos] (addresses 0..31, BCM SDK linkscan-owned) to address
-# REMAP[scan_pos]+64 (addresses 64..95, never written by linkscan).
-# wedge100s-ledup-linkstate writes CMIC_LEDUP1_DATA_RAM(LED_port+64) = 0x80 (up)
-# or 0x00 (down); the patched program reads that safe-zone address.
-# Note: REMAP fields are 6-bit (max 63); the +64 offset is handled in bytecode.
 m CMIC_LEDUP1_PORT_ORDER_REMAP_0_3    REMAP_PORT_0=1    REMAP_PORT_1=0    REMAP_PORT_2=3    REMAP_PORT_3=2
 m CMIC_LEDUP1_PORT_ORDER_REMAP_4_7    REMAP_PORT_4=5    REMAP_PORT_5=4    REMAP_PORT_6=7    REMAP_PORT_7=6
 m CMIC_LEDUP1_PORT_ORDER_REMAP_8_11   REMAP_PORT_8=9    REMAP_PORT_9=8    REMAP_PORT_10=11  REMAP_PORT_11=10
@@ -97,51 +56,13 @@ m CMIC_LEDUP1_PORT_ORDER_REMAP_48_51  REMAP_PORT_48=63  REMAP_PORT_49=63  REMAP_
 m CMIC_LEDUP1_PORT_ORDER_REMAP_52_55  REMAP_PORT_52=63  REMAP_PORT_53=63  REMAP_PORT_54=63  REMAP_PORT_55=63
 m CMIC_LEDUP1_PORT_ORDER_REMAP_56_59  REMAP_PORT_56=63  REMAP_PORT_57=63  REMAP_PORT_58=63  REMAP_PORT_59=63
 m CMIC_LEDUP1_PORT_ORDER_REMAP_60_63  REMAP_PORT_60=63  REMAP_PORT_61=63  REMAP_PORT_62=63  REMAP_PORT_63=63
-# Initialise the +64 zone to 0x00 (all ports link-down) so LEDs start blue-only
-# until the wedge100s-ledup-linkstate daemon performs its first STATE_DB sweep.
-setreg CMIC_LEDUP1_DATA_RAM(64) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(65) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(66) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(67) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(68) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(69) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(70) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(71) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(72) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(73) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(74) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(75) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(76) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(77) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(78) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(79) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(80) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(81) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(82) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(83) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(84) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(85) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(86) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(87) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(88) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(89) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(90) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(91) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(92) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(93) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(94) DATA=0x00
-setreg CMIC_LEDUP1_DATA_RAM(95) DATA=0x00
 
-led 0 prog  02 FD 42 80 02 FF 42 00 02 FE 42 00 02 FA 42 E0 02 FB 42 40 06 F9 D2 00 74 1E 02 F9 42 03 67 AC 67 C3 67 52 86 FE 67 C3 67 52 86 FE 67 C3 67 52 86 FE 67 C3 67 52 86 FE 06 FB D6 FE 74 1E 86 FC 3E FA 06 FE 88 4A 03 71 4C 67 84 57 67 84 57 67 98 57 06 FE 88 80 4A 00 27 97 75 4F 90 4A 00 27 4A 01 27 B7 97 71 69 77 42 06 F9 D6 FC 74 7C 02 F9 4A 07 37 4E 07 02 FC 42 00 4E 07 06 F9 0A 07 71 4F 77 42 16 FF 06 FD 17 4D DA 07 74 95 12 FF 52 00 86 FD 57 86 FF 57 16 FF 06 FD 07 4D DA 07 74 A9 12 FF 52 00 86 FD 57 86 FF 57 06 FE C2 FC 98 98 12 F4 50 C2 FC 98 98 F2 F0 14 06 F4 C2 03 88 77 D1 06 FE C2 FC 98 98 F2 E0 14 06 FE C2 03 88 18 71 E2 80 18 71 DD 67 98 67 98 57 67 84 67 98 57 80 18 71 EB 67 98 67 84 57 67 84 67 84 57 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+# FBOSS 22-byte LED microcode (identical on both engines). Reads per-port
+# color bytes from DATA_RAM[0xc0 + port] (= DATA_RAM[192..255]) and shifts
+# 3 bits per port out to the scan chain.
+led 0 prog  02 3F 12 C0 F8 15 67 0D 90 75 02 3A C0 21 87 99 21 87 99 21 87 57
 led 0 start
-
-# Patched LEDUP1 program: offset 0x14-0x15 changed from '06 F9' (indirect load via
-# REMAP pointer) to '77 F0' (JMP to patch routine at 0xF0).  The patch routine at
-# 0xF0 reads DATA_RAM[F9] (the REMAP value = led_port 0..31), ORs with 0x40 (+64),
-# stores as a temp pointer in DATA_RAM[FC], then does the indirect load from
-# DATA_RAM[led_port+64] (daemon-owned safe zone) before jumping back to 0x16.
-# All other bytes are identical to the stock LEDUP0 program.
-led 1 prog  02 FD 42 80 02 FF 42 00 02 FE 42 00 02 FA 42 E0 02 FB 42 40 77 F0 D2 00 74 1E 02 F9 42 03 67 AC 67 C3 67 52 86 FE 67 C3 67 52 86 FE 67 C3 67 52 86 FE 67 C3 67 52 86 FE 06 FB D6 FE 74 1E 86 FC 3E FA 06 FE 88 4A 03 71 4C 67 84 57 67 84 57 67 98 57 06 FE 88 80 4A 00 27 97 75 4F 90 4A 00 27 4A 01 27 B7 97 71 69 77 42 06 F9 D6 FC 74 7C 02 F9 4A 07 37 4E 07 02 FC 42 00 4E 07 06 F9 0A 07 71 4F 77 42 16 FF 06 FD 17 4D DA 07 74 95 12 FF 52 00 86 FD 57 86 FF 57 16 FF 06 FD 07 4D DA 07 74 A9 12 FF 52 00 86 FD 57 86 FF 57 06 FE C2 FC 98 98 12 F4 50 C2 FC 98 98 F2 F0 14 06 F4 C2 03 88 77 D1 06 FE C2 FC 98 98 F2 E0 14 06 FE C2 03 88 18 71 E2 80 18 71 DD 67 98 67 98 57 67 84 67 98 57 80 18 71 EB 67 98 67 84 57 67 84 67 84 57 02 F9 0A 40 12 FC 06 FC 77 16 00 00 00 00 00 00
+led 1 prog  02 3F 12 C0 F8 15 67 0D 90 75 02 3A C0 21 87 99 21 87 99 21 87 57
 led 1 start
 
 led auto on

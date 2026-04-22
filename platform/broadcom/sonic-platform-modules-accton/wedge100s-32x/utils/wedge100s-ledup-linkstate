@@ -10,10 +10,11 @@
 # (done at syncd startup by led_proc_init.soc). Auto-reloads it at
 # daemon startup as a safety net if the bytes don't match.
 #
-# Supersedes the earlier LEDUP1-safe-zone daemon (which wrote to
-# DATA_RAM[64..95] under the patched stock BCM bytecode). Same filename
-# and service name, incompatible semantics — only useful with FBOSS
-# bytecode loaded; see device/accton/.../led_proc_init.soc.
+# Handles breakout transparently: all 128 possible Ethernet lane names
+# (Ethernet0..127) map to their 32 cages; aggregate_cage_state() folds
+# 1..4 sub-port states into a single per-cage color. A cage's LED lights
+# at the max-speed of any oper-up sub-port; if no sub-port is oper-up
+# the cage shows 'pending link' (purple) or 'admin-down' (dim pink).
 
 import argparse
 import logging
@@ -53,11 +54,14 @@ CAGE_MAP = {
 
 # SONiC Ethernet port -> physical cage number (from port_config.ini
 # `index` column; authoritative front-panel labeling).
-#  Ethernet(4*N) -> cage (N+1), N=0..31.
-# Empirically verified 2026-04-21 by running a single 100G QSFP28 cable
-# through all 32 ports in sequence: each port's link-up lit its own
-# cage's LED correctly.
-PORT_TO_CAGE = {f"Ethernet{4*n}": n + 1 for n in range(32)}
+#
+# Map expanded to cover all 128 potential Ethernet ports (all 4 lanes of
+# each cage) so breakout sub-ports correctly feed the cage LED: when a
+# cage is in 4x breakout mode, any of its 4 sub-ports linking up drives
+# the cage's LED to the corresponding speed color.
+# Ethernet(4*N + lane) -> cage (N+1), N=0..31, lane=0..3.
+PORT_TO_CAGE = {f"Ethernet{4*n + lane}": n + 1
+                for n in range(32) for lane in range(4)}
 
 # Palette byte codes — see notes for rendering details on defect LEDs.
 # CAVEAT on COLOR_OFF: we don't actually have a reliable "truly dark" byte
@@ -152,11 +156,40 @@ def ensure_fboss_bytecode():
         bcmcmd_query(f"led {n} start")
 
 
+def aggregate_cage_state(cage_subport_states: list) -> tuple:
+    """Fold 1..4 sub-port states (admin, oper, speed) into a single
+    (admin, oper, speed) tuple representing the cage's effective state.
+
+    Policy: any oper-up sub-port wins — report max speed of linked lanes.
+    Otherwise if any admin-up sub-port is present, report admin-up/oper-down
+    (cable absent or link failure). If all admin-down, report admin-down.
+    """
+    if not cage_subport_states:
+        return ("down", "down", 0)
+    up_speeds = [s[2] for s in cage_subport_states if s[1] == "up"]
+    if up_speeds:
+        return ("up", "up", max(up_speeds))
+    if any(s[0] == "up" for s in cage_subport_states):
+        return ("up", "down", 0)
+    return ("down", "down", 0)
+
+
 def build_frame(port_states: dict) -> list:
-    """Translate {port: (admin, oper, speed_mbps)} into bcmcmd setregs."""
-    cmds = []
+    """Translate {port: (admin, oper, speed_mbps)} into bcmcmd setregs.
+
+    Groups ports by cage (multiple sub-ports per cage in breakout mode),
+    aggregates sub-port states, then writes one color per cage's L+R
+    arrows.
+    """
+    # Group sub-port states by cage number.
+    cage_states = {cage: [] for cage in CAGE_MAP}
     for port, cage in PORT_TO_CAGE.items():
-        admin, oper, speed = port_states.get(port, ("down", "down", 0))
+        if port in port_states:
+            cage_states[cage].append(port_states[port])
+
+    cmds = []
+    for cage, subport_states in cage_states.items():
+        admin, oper, speed = aggregate_cage_state(subport_states)
         color = port_color(admin, oper, speed)
         eng, laddr, raddr = CAGE_MAP[cage]
         cmds.append(f"setreg CMIC_LEDUP{eng}_DATA_RAM[{laddr}] 0x{color:02x}")

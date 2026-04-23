@@ -1,0 +1,20 @@
+[Unit]
+Description=Wedge100S emergency I2C bus reset (CP2112 hardware recovery)
+Documentation=file:///usr/bin/wedge100s-bus-reset.sh
+# This runs under systemd (not an interactive SSH session), so the USB
+# bus reset it triggers via the BMC cannot kill its own shell — the
+# script always gets to finish its "restart daemons" step.
+#
+# Rate-limit: at most 3 runs in 10 minutes.  If three bus resets don't
+# recover the I2C bus, something worse is wrong — stop looping and let
+# the i2c-daemon stay failed so an operator can look.
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/wedge100s-bus-reset.sh
+# USB hub reset + waiting for hidraw0 re-enumeration can take ~30s;
+# BMC round-trip latency adds some more. 120s is a comfortable cap.
+TimeoutStartSec=120

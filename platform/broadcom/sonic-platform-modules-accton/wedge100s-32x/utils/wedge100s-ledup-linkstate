@@ -3,8 +3,7 @@
 #
 # Reads per-port link state from SONiC STATE_DB and writes per-LED color
 # bytes to CMIC_LEDUP{0,1}_DATA_RAM[192..223] using the verified 64-LED
-# address map. Drives the 32-cage × 2-arrow front panel with 8 color
-# states per LED (see port_color() for the policy).
+# address map. Drives the 32-cage × 2-arrow front panel.
 #
 # Expects the FBOSS 22-byte LED microcode to be loaded on both engines
 # (done at syncd startup by led_proc_init.soc). Auto-reloads it at
@@ -12,7 +11,7 @@
 #
 # Handles breakout transparently: all 128 possible Ethernet lane names
 # (Ethernet0..127) map to their 32 cages; aggregate_cage_state() folds
-# 1..4 sub-port states into a single per-cage color. A cage's LED lights
+# 1..4 sub-port states into a single per-cage color. Cage LED lights
 # at the max-speed of any oper-up sub-port; if no sub-port is oper-up
 # the cage shows 'pending link' (purple) or 'admin-down' (dim pink).
 
@@ -63,23 +62,19 @@ CAGE_MAP = {
 PORT_TO_CAGE = {f"Ethernet{4*n + lane}": n + 1
                 for n in range(32) for lane in range(4)}
 
-# Palette byte codes — see notes for rendering details on defect LEDs.
-# CAVEAT on COLOR_OFF: we don't actually have a reliable "truly dark" byte
-# value on this board. The FBOSS bytecode falls back to the BCM SDK's
-# HW-populated link-status bytes at DATA_RAM[0..63] when our color byte
-# is 0x00, yielding pink. 0x0f renders off on isolated cages but renders
-# dim pink when applied to all 32 addresses simultaneously — the
-# bytecode has some inter-port coupling we haven't reverse-engineered.
-# So we use 0x00 for COLOR_OFF (admin-down, no daemon state) and use
-# COLOR_RED for link-down to give an unambiguous visible signal.
-COLOR_OFF     = 0x00
-COLOR_CYAN    = 0x01
-COLOR_YELLOW  = 0x02
-COLOR_GREEN   = 0x03
-COLOR_MAGENTA = 0x04
-COLOR_PURPLE  = 0x05
-COLOR_RED     = 0x06
-COLOR_DIM     = 0x07
+# Palette byte codes. See TODO-FBOSS-COLORS-SUCK.md for the palette's
+# structural limitations (no pure blue, no true OFF, 0x00 renders as
+# bright-pink not dark). We use 0x00 intentionally as a distinct speed
+# color slot ("bright pink" = 40G) rather than as OFF, since no byte
+# produces a reliably dark LED on this board.
+COLOR_BRIGHT_PINK = 0x00   # 40G link-up
+COLOR_CYAN        = 0x01   # 10G link-up
+COLOR_YELLOW      = 0x02   # 50G link-up
+COLOR_GREEN       = 0x03   # 100G link-up
+COLOR_MAGENTA     = 0x04   # 25G link-up
+COLOR_PURPLE      = 0x05   # admin-up/link-down (pending)
+COLOR_RED         = 0x06   # reserved for error/unexpected states
+COLOR_DIM         = 0x07   # admin-down
 
 # 22-byte FBOSS bytecode (fboss/agent/platforms/common/utils/Wedge100LedUtils.cpp)
 FBOSS_BYTECODE = "023F12C0F815670D9075023AC021879921879921 8757"
@@ -93,30 +88,35 @@ DEFAULT_POLL_SEC = 1.0
 def port_color(admin: str, oper: str, speed_mbps: int) -> int:
     """Map a port's (admin/oper/speed) state to a DATA_RAM color byte.
 
-    Color policy (inspired by the AS7712 "blue for unconfigured link" UX,
-    adapted to our 7-color FBOSS palette — no pure blue, so we use the
-    darkest blue-ish we have which is purple):
+    Policy — 5 speeds distinct, 2 reserved states, red held for errors:
 
-      admin-down                     -> dim pink (quiet, distinct from active ports)
-      admin-up, link-down            -> purple (AS7712-blue-equivalent)
-      admin-up, link-up, 100G        -> green
-      admin-up, link-up, 40G         -> yellow
-      admin-up, link-up, <40G        -> cyan
-      admin-up, link-up, speed=?     -> magenta (unusual - should not happen)
+      admin-down              -> dim pink
+      admin-up, link-down     -> purple  ("pending link", AS7712-style quiet)
+      admin-up, link-up, 100G -> green   (native, full speed)
+      admin-up, link-up, 50G  -> yellow
+      admin-up, link-up, 40G  -> bright pink (0x00 — quirky slot, 40G only)
+      admin-up, link-up, 25G  -> magenta
+      admin-up, link-up, 10G  -> cyan (our closest-to-blue; palette has no pure blue)
+      admin-up, link-up, ???  -> red   (unexpected speed → error color)
 
-    No truly-OFF state available on this board (see COLOR_OFF comment).
+    See TODO-FBOSS-COLORS-SUCK.md for why the palette is this shape and
+    what a real fix (custom LEDUP bytecode) would look like.
     """
     if admin != "up":
-        return COLOR_DIM       # admin-down: dim pink
+        return COLOR_DIM
     if oper != "up":
-        return COLOR_PURPLE    # link-down: AS7712-style "blue" (we have purple)
+        return COLOR_PURPLE
     if speed_mbps >= 100000:
         return COLOR_GREEN
-    if speed_mbps >= 40000:
+    if speed_mbps >= 50000:
         return COLOR_YELLOW
+    if speed_mbps >= 40000:
+        return COLOR_BRIGHT_PINK
+    if speed_mbps >= 25000:
+        return COLOR_MAGENTA
     if speed_mbps > 0:
         return COLOR_CYAN
-    return COLOR_MAGENTA  # linked but speed unknown — unusual, flag with magenta
+    return COLOR_RED  # up but unknown speed (should never happen) — flag as error
 
 
 # ---------------------------------------------------------------------------

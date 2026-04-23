@@ -3,6 +3,13 @@ Description=Wedge100S QSFP I2C persistent daemon (presence + EEPROM cache)
 Documentation=file:///usr/bin/wedge100s-i2c-daemon.c
 After=wedge100s-platform-init.service
 Requires=wedge100s-platform-init.service
+# If the daemon crash-loops (mux_deselect_all / BMC escalation failing
+# means the CP2112 I2C bus is wedged), escalate to an emergency bus
+# reset.  StartLimitBurst controls how many Restart= attempts are
+# allowed before systemd gives up on the daemon and triggers OnFailure.
+OnFailure=wedge100s-bus-reset.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

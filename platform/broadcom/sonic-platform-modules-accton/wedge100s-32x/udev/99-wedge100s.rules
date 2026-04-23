@@ -1,3 +1,11 @@
 # Wedge 100S-32X udev rules
+
 # CP2112 USB-HID bridge — tag for wedge100s-i2c-daemon
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea90", MODE="0660", GROUP="root", TAG+="systemd"
+
+# BMC CDC-Ethernet gadget — auto-bring-up usb0 on every (re-)registration.
+# Without this, a BMC reboot or a USB authorize cycle (e.g. from
+# wedge100s-bus-reset.sh) re-registers usb0 in the DOWN state, which breaks
+# wedge100s-bmc-auth and wedge100s-bmc-daemon's IPv6-LL path to
+# root@fe80::ff:fe00:1%usb0 until the next full reboot.
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="usb0", RUN+="/bin/ip link set usb0 up"
